@@ -62,12 +62,6 @@ void bch2_sb_layout_init(struct bch_sb_layout *l,
 		    sb_start, sb_pos, sb_end, sb_size);
 }
 
-/* minimum size filesystem we can create, given a bucket size: */
-static u64 min_size(unsigned bucket_size)
-{
-	return BCH_MIN_NR_NBUCKETS * bucket_size;
-}
-
 static u64 dev_max_bucket_size(u64 dev_size)
 {
 	return dev_size / BCH_MIN_NR_NBUCKETS;
@@ -82,14 +76,15 @@ u64 bch2_pick_bucket_size(struct bch_opts opts, dev_opts_list devs)
 	if (opt_defined(opts, btree_node_size))
 		bucket_size = max_t(u64, bucket_size, opts.btree_node_size);
 
-	u64 total_fs_size = 0;
-	darray_for_each(devs, i) {
-		if (i->opts.fs_size < min_size(opts.block_size))
+	u64 min_dev_size = BCH_MIN_NR_NBUCKETS * bucket_size;
+	darray_for_each(devs, i)
+		if (i->opts.fs_size < min_dev_size)
 			die("cannot format %s, too small (%llu bytes, min %llu)",
-			    i->path, i->opts.fs_size, min_size(opts.block_size));
+			    i->path, i->opts.fs_size, min_dev_size);
 
+	u64 total_fs_size = 0;
+	darray_for_each(devs, i)
 		total_fs_size += i->opts.fs_size;
-	}
 
 	struct sysinfo info;
 	si_meminfo(&info);
