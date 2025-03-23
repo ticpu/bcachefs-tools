@@ -209,38 +209,39 @@ static int migrate_fs(const char		*fs_path,
 	if (!S_ISDIR(stat.st_mode))
 		die("%s is not a directory", fs_path);
 
-	struct dev_opts dev = dev_opts_default();
+	dev_opts_list devs = {};
+	darray_push(&devs, dev_opts_default());
 
-	dev.path = dev_t_to_path(stat.st_dev);
-	dev.file = bdev_file_open_by_path(dev.path, BLK_OPEN_READ|BLK_OPEN_WRITE, &dev, NULL);
+	struct dev_opts *dev = &devs.data[0];
 
-	int ret = PTR_ERR_OR_ZERO(dev.file);
+	dev->path = dev_t_to_path(stat.st_dev);
+	dev->file = bdev_file_open_by_path(dev->path, BLK_OPEN_READ|BLK_OPEN_WRITE, dev, NULL);
+
+	int ret = PTR_ERR_OR_ZERO(dev->file);
 	if (ret < 0)
-		die("Error opening device to format %s: %s", dev.path, strerror(-ret));
-	dev.bdev = file_bdev(dev.file);
+		die("Error opening device to format %s: %s", dev->path, strerror(-ret));
+	dev->bdev = file_bdev(dev->file);
 
-	opt_set(fs_opts, block_size, get_blocksize(dev.bdev->bd_fd));
+	opt_set(fs_opts, block_size, get_blocksize(dev->bdev->bd_fd));
 
 	char *file_path = mprintf("%s/bcachefs", fs_path);
 	printf("Creating new filesystem on %s in space reserved at %s\n",
-	       dev.path, file_path);
+	       dev->path, file_path);
 
-	dev.opts.fs_size	= get_size(dev.bdev->bd_fd);
-	dev.opts.bucket_size	= bch2_pick_bucket_size(fs_opts, &dev);
-	dev.nbuckets		= dev.opts.fs_size / dev.opts.bucket_size;
+	dev->opts.fs_size	= get_size(dev->bdev->bd_fd);
+	dev->opts.bucket_size	= bch2_pick_bucket_size(fs_opts, devs);
+	dev->nbuckets		= dev->opts.fs_size / dev->opts.bucket_size;
 
-	bch2_check_bucket_size(fs_opts, &dev);
+	bch2_check_bucket_size(fs_opts, dev);
 
 	u64 bcachefs_inum;
 	ranges extents = reserve_new_fs_space(file_path,
 				fs_opts.block_size >> 9,
-				get_size(dev.bdev->bd_fd) / 5,
+				get_size(dev->bdev->bd_fd) / 5,
 				&bcachefs_inum, stat.st_dev, force);
 
-	find_superblock_space(extents, format_opts, &dev);
+	find_superblock_space(extents, format_opts, dev);
 
-	dev_opts_list devs = {};
-	darray_push(&devs, dev);
 	struct bch_sb *sb = bch2_format(fs_opt_strs, fs_opts, format_opts, devs);
 	darray_exit(&devs);
 
@@ -253,7 +254,7 @@ static int migrate_fs(const char		*fs_path,
 
 	struct bch_opts opts = bch2_opts_empty();
 	struct bch_fs *c = NULL;
-	char *path[1] = { dev.path };
+	char *path[1] = { dev->path };
 
 	opt_set(opts, sb,	sb_offset);
 	opt_set(opts, nostart,	true);
@@ -313,7 +314,7 @@ static int migrate_fs(const char		*fs_path,
 	       "filesystem. That file can be deleted once the old filesystem is\n"
 	       "no longer needed (and should be deleted prior to running\n"
 	       "bcachefs migrate-superblock)\n",
-	       sb_offset, dev.path, dev.path, sb_offset);
+	       sb_offset, dev->path, dev->path, sb_offset);
 	return 0;
 }
 

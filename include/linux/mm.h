@@ -4,6 +4,7 @@
 
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <linux/bug.h>
 #include <linux/types.h>
 
 struct sysinfo {

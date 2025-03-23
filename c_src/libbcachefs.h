@@ -72,6 +72,8 @@ struct dev_opts {
 	struct bch_opts	opts;
 };
 
+typedef DARRAY(struct dev_opts) dev_opts_list;
+
 static inline struct dev_opts dev_opts_default()
 {
 	return (struct dev_opts) { .opts = bch2_opts_empty() };
@@ -80,10 +82,8 @@ static inline struct dev_opts dev_opts_default()
 void bch2_sb_layout_init(struct bch_sb_layout *,
 			 unsigned, unsigned, u64, u64);
 
-u64 bch2_pick_bucket_size(struct bch_opts, struct dev_opts *);
+u64 bch2_pick_bucket_size(struct bch_opts, dev_opts_list);
 void bch2_check_bucket_size(struct bch_opts, struct dev_opts *);
-
-typedef DARRAY(struct dev_opts) dev_opts_list;
 
 struct bch_sb *bch2_format(struct bch_opt_strs,
 			   struct bch_opts,

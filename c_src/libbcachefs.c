@@ -16,6 +16,8 @@
 
 #include <uuid/uuid.h>
 
+#include <linux/mm.h>
+
 #include "libbcachefs.h"
 #include "crypto.h"
 #include "libbcachefs/bcachefs_format.h"
@@ -66,35 +68,53 @@ static u64 min_size(unsigned bucket_size)
 	return BCH_MIN_NR_NBUCKETS * bucket_size;
 }
 
-u64 bch2_pick_bucket_size(struct bch_opts opts, struct dev_opts *dev)
+static u64 dev_max_bucket_size(u64 dev_size)
 {
-	if (dev->opts.fs_size < min_size(opts.block_size))
-		die("cannot format %s, too small (%llu bytes, min %llu)",
-		    dev->path, dev->opts.fs_size, min_size(opts.block_size));
+	return dev_size / BCH_MIN_NR_NBUCKETS;
+}
 
+u64 bch2_pick_bucket_size(struct bch_opts opts, dev_opts_list devs)
+{
 	/* Bucket size must be >= block size: */
 	u64 bucket_size = opts.block_size;
 
 	/* Bucket size must be >= btree node size: */
 	if (opt_defined(opts, btree_node_size))
-		bucket_size = max_t(unsigned, bucket_size, opts.btree_node_size);
+		bucket_size = max_t(u64, bucket_size, opts.btree_node_size);
 
-	/* Want a bucket size of at least 128k, if possible: */
-	bucket_size = max(bucket_size, 128ULL << 10);
+	u64 total_fs_size = 0;
+	darray_for_each(devs, i) {
+		if (i->opts.fs_size < min_size(opts.block_size))
+			die("cannot format %s, too small (%llu bytes, min %llu)",
+			    i->path, i->opts.fs_size, min_size(opts.block_size));
 
-	if (dev->opts.fs_size >= min_size(bucket_size)) {
-		unsigned scale = max(1,
-			ilog2(dev->opts.fs_size / min_size(bucket_size)) / 4);
-
-		scale = rounddown_pow_of_two(scale);
-
-		/* max bucket size 1 mb */
-		bucket_size = min(bucket_size * scale, 1ULL << 20);
-	} else {
-		do {
-			bucket_size /= 2;
-		} while (dev->opts.fs_size < min_size(bucket_size));
+		total_fs_size += i->opts.fs_size;
 	}
+
+	struct sysinfo info;
+	si_meminfo(&info);
+
+	/*
+	 * Large fudge factor to allow for other fsck processes and devices
+	 * being added after creation
+	 */
+	u64 mem_available_for_fsck = info.totalram / 8;
+	u64 buckets_can_fsck = mem_available_for_fsck / (sizeof(struct bucket) * 1.5);
+	u64 mem_lower_bound = roundup_pow_of_two(total_fs_size / buckets_can_fsck);
+
+	/*
+	 * Lower bound to avoid fragmenting encoded (checksummed, compressed)
+	 * extents too much as they're moved:
+	 */
+	bucket_size = max(bucket_size, opt_get(opts, encoded_extent_max) * 4);
+
+	/* Lower bound to ensure we can fsck: */
+	bucket_size = max(bucket_size, mem_lower_bound);
+
+	u64 perf_lower_bound = min(2ULL << 20, total_fs_size / (1ULL << 20));
+
+	/* We also prefer larger buckets for performance, up to 2MB at 2T */
+	bucket_size = max(bucket_size, perf_lower_bound);
 
 	return bucket_size;
 }
@@ -152,7 +172,6 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 {
 	struct bch_sb_handle sb = { NULL };
 	unsigned max_dev_block_size = 0;
-	u64 min_bucket_size = U64_MAX;
 
 	darray_for_each(devs, i)
 		max_dev_block_size = max(max_dev_block_size, get_blocksize(i->bdev->bd_fd));
@@ -171,13 +190,12 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 			opt_set(i->opts, fs_size, get_size(i->bdev->bd_fd));
 
 	/* calculate bucket sizes: */
-	darray_for_each(devs, i)
-		min_bucket_size = min(min_bucket_size,
-			i->opts.bucket_size ?: bch2_pick_bucket_size(fs_opts, i));
+	u64 fs_bucket_size = bch2_pick_bucket_size(fs_opts, devs);
 
 	darray_for_each(devs, i)
 		if (!opt_defined(i->opts, bucket_size))
-			opt_set(i->opts, bucket_size, min_bucket_size);
+			opt_set(i->opts, bucket_size,
+				min(fs_bucket_size, dev_max_bucket_size(i->opts.fs_size)));
 
 	darray_for_each(devs, i) {
 		i->nbuckets = i->opts.fs_size / i->opts.bucket_size;
