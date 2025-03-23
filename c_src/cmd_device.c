@@ -137,10 +137,11 @@ int cmd_device_add(int argc, char *argv[])
 	opt_set(fs_opts, btree_node_size,
 		read_file_u64(fs.sysfs_fd, "options/btree_node_size"));
 
-	struct bch_sb *sb = bch2_format(fs_opt_strs,
-					fs_opts,
-					format_opts,
-					&dev_opts, 1);
+	dev_opts_list devs = {};
+	darray_push(&devs, dev_opts);
+
+	struct bch_sb *sb = bch2_format(fs_opt_strs, fs_opts, format_opts, devs);
+	darray_exit(&devs);
 	free(sb);
 	bchu_disk_add(fs, dev_opts.path);
 	return 0;

@@ -126,8 +126,8 @@ void build_fs(struct bch_fs *c, const char *src_path)
 
 int cmd_format(int argc, char *argv[])
 {
-	DARRAY(struct dev_opts) devices = { 0 };
-	DARRAY(char *) device_paths = { 0 };
+	dev_opts_list devices = {};
+	darray_str device_paths = {};
 	struct format_opts opts	= format_opts_default();
 	struct dev_opts dev_opts = dev_opts_default();
 	bool force = false, no_passphrase = false, quiet = false, initialize = true, verbose = false;
@@ -277,11 +277,7 @@ int cmd_format(int argc, char *argv[])
 			die("Error opening %s: %s", dev_opts.path, strerror(-ret));
 	}
 
-	struct bch_sb *sb =
-		bch2_format(fs_opt_strs,
-			    fs_opts,
-			    opts,
-			    devices.data, devices.nr);
+	struct bch_sb *sb = bch2_format(fs_opt_strs, fs_opts, opts, devices);
 	bch2_opt_strs_free(&fs_opt_strs);
 
 	if (!quiet) {

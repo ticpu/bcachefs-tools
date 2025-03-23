@@ -239,8 +239,11 @@ static int migrate_fs(const char		*fs_path,
 
 	find_superblock_space(extents, format_opts, &dev);
 
-	struct bch_sb *sb = bch2_format(fs_opt_strs,
-					fs_opts, format_opts, &dev, 1);
+	dev_opts_list devs = {};
+	darray_push(&devs, dev);
+	struct bch_sb *sb = bch2_format(fs_opt_strs, fs_opts, format_opts, devs);
+	darray_exit(&devs);
+
 	u64 sb_offset = le64_to_cpu(sb->layout.sb_offset[0]);
 
 	if (format_opts.passphrase)

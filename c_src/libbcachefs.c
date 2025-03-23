@@ -116,20 +116,17 @@ void bch2_check_bucket_size(struct bch_opts opts, struct dev_opts *dev)
 }
 
 static unsigned parse_target(struct bch_sb_handle *sb,
-			     struct dev_opts *devs, size_t nr_devs,
+			     dev_opts_list devs,
 			     const char *s)
 {
-	struct dev_opts *i;
-	int idx;
-
 	if (!s)
 		return 0;
 
-	for (i = devs; i < devs + nr_devs; i++)
+	darray_for_each(devs, i)
 		if (!strcmp(s, i->path))
-			return dev_to_target(i - devs);
+			return dev_to_target(i - devs.data);
 
-	idx = bch2_disk_path_find(sb, s);
+	int idx = bch2_disk_path_find(sb, s);
 	if (idx >= 0)
 		return group_to_target(idx);
 
@@ -151,15 +148,13 @@ static void bch2_opt_set_sb_all(struct bch_sb *sb, int dev_idx, struct bch_opts 
 struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 			   struct bch_opts	fs_opts,
 			   struct format_opts	opts,
-			   struct dev_opts	*devs,
-			   size_t		nr_devs)
+			   dev_opts_list devs)
 {
 	struct bch_sb_handle sb = { NULL };
-	struct dev_opts *i;
 	unsigned max_dev_block_size = 0;
 	u64 min_bucket_size = U64_MAX;
 
-	for (i = devs; i < devs + nr_devs; i++)
+	darray_for_each(devs, i)
 		max_dev_block_size = max(max_dev_block_size, get_blocksize(i->bdev->bd_fd));
 
 	/* calculate block size: */
@@ -171,20 +166,20 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 		    fs_opts.block_size, max_dev_block_size);
 
 	/* get device size, if it wasn't specified: */
-	for (i = devs; i < devs + nr_devs; i++)
+	darray_for_each(devs, i)
 		if (!opt_defined(i->opts, fs_size))
 			opt_set(i->opts, fs_size, get_size(i->bdev->bd_fd));
 
 	/* calculate bucket sizes: */
-	for (i = devs; i < devs + nr_devs; i++)
+	darray_for_each(devs, i)
 		min_bucket_size = min(min_bucket_size,
 			i->opts.bucket_size ?: bch2_pick_bucket_size(fs_opts, i));
 
-	for (i = devs; i < devs + nr_devs; i++)
+	darray_for_each(devs, i)
 		if (!opt_defined(i->opts, bucket_size))
 			opt_set(i->opts, bucket_size, min_bucket_size);
 
-	for (i = devs; i < devs + nr_devs; i++) {
+	darray_for_each(devs, i) {
 		i->nbuckets = i->opts.fs_size / i->opts.bucket_size;
 		bch2_check_bucket_size(fs_opts, i);
 	}
@@ -193,7 +188,7 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	if (!opt_defined(fs_opts, btree_node_size)) {
 		unsigned s = bch2_opts_default.btree_node_size;
 
-		for (i = devs; i < devs + nr_devs; i++)
+		darray_for_each(devs, i)
 			s = min(s, i->opts.bucket_size);
 		opt_set(fs_opts, btree_node_size, s);
 	}
@@ -208,7 +203,7 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	sb.sb->version_min	= le16_to_cpu(opts.version);
 	sb.sb->magic		= BCHFS_MAGIC;
 	sb.sb->user_uuid	= opts.uuid;
-	sb.sb->nr_devices	= nr_devs;
+	sb.sb->nr_devices	= devs.nr;
 	SET_BCH_SB_VERSION_INCOMPAT_ALLOWED(sb.sb, opts.version);
 
 	if (opts.version == bcachefs_metadata_version_current)
@@ -233,11 +228,11 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	/* Member info: */
 	struct bch_sb_field_members_v2 *mi =
 		bch2_sb_field_resize(&sb, members_v2,
-			(sizeof(*mi) + sizeof(struct bch_member) *
-			nr_devs) / sizeof(u64));
+			(sizeof(*mi) + sizeof(struct bch_member) * devs.nr) / sizeof(u64));
+
 	mi->member_bytes = cpu_to_le16(sizeof(struct bch_member));
-	for (i = devs; i < devs + nr_devs; i++) {
-		unsigned idx = i - devs;
+	darray_for_each(devs, i) {
+		unsigned idx = i - devs.data;
 		struct bch_member *m = bch2_members_v2_get_mut(sb.sb, idx);
 
 		uuid_generate(m->uuid.b);
@@ -247,14 +242,11 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	}
 
 	/* Disk labels*/
-	for (i = devs; i < devs + nr_devs; i++) {
-		struct bch_member *m;
-		int idx;
-
+	darray_for_each(devs, i) {
 		if (!i->label)
 			continue;
 
-		idx = bch2_disk_path_find_or_create(&sb, i->label);
+		int idx = bch2_disk_path_find_or_create(&sb, i->label);
 		if (idx < 0)
 			die("error creating disk path: %s", strerror(-idx));
 
@@ -262,18 +254,18 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 		 * Recompute mi and m after each sb modification: its location
 		 * in memory may have changed due to reallocation.
 		 */
-		m = bch2_members_v2_get_mut(sb.sb, (i - devs));
+		struct bch_member *m = bch2_members_v2_get_mut(sb.sb, (i - devs.data));
 		SET_BCH_MEMBER_GROUP(m,	idx + 1);
 	}
 
 	SET_BCH_SB_FOREGROUND_TARGET(sb.sb,
-		parse_target(&sb, devs, nr_devs, fs_opt_strs.foreground_target));
+		parse_target(&sb, devs, fs_opt_strs.foreground_target));
 	SET_BCH_SB_BACKGROUND_TARGET(sb.sb,
-		parse_target(&sb, devs, nr_devs, fs_opt_strs.background_target));
+		parse_target(&sb, devs, fs_opt_strs.background_target));
 	SET_BCH_SB_PROMOTE_TARGET(sb.sb,
-		parse_target(&sb, devs, nr_devs, fs_opt_strs.promote_target));
+		parse_target(&sb, devs, fs_opt_strs.promote_target));
 	SET_BCH_SB_METADATA_TARGET(sb.sb,
-		parse_target(&sb, devs, nr_devs, fs_opt_strs.metadata_target));
+		parse_target(&sb, devs, fs_opt_strs.metadata_target));
 
 	/* Crypt: */
 	if (opts.encrypted) {
@@ -286,10 +278,10 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 
 	bch2_sb_members_cpy_v2_v1(&sb);
 
-	for (i = devs; i < devs + nr_devs; i++) {
+	darray_for_each(devs, i) {
 		u64 size_sectors = i->opts.fs_size >> 9;
 
-		sb.sb->dev_idx = i - devs;
+		sb.sb->dev_idx = i - devs.data;
 
 		if (!i->sb_offset) {
 			i->sb_offset	= BCH_SB_SECTOR;
