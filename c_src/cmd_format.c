@@ -121,7 +121,7 @@ void build_fs(struct bch_fs *c, const char *src_path)
 	if (!S_ISDIR(stat.st_mode))
 		die("%s is not a directory", src_path);
 
-	copy_fs(c, src_fd, src_path, &s);
+	copy_fs(c, src_fd, src_path, &s, 0);
 }
 
 int cmd_format(int argc, char *argv[])

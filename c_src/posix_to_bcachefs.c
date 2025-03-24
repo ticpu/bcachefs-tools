@@ -264,7 +264,8 @@ void copy_link(struct bch_fs *c, struct bch_inode_unpacked *dst,
 
 static void copy_file(struct bch_fs *c, struct bch_inode_unpacked *dst,
 		      int src_fd, u64 src_size,
-		      char *src_path, struct copy_fs_state *s)
+		      char *src_path, struct copy_fs_state *s,
+		      u64 reserve_start)
 {
 	struct fiemap_iter iter;
 	struct fiemap_extent e;
@@ -295,11 +296,8 @@ static void copy_file(struct bch_fs *c, struct bch_inode_unpacked *dst,
 			continue;
 		}
 
-		/*
-		 * if the data is below 1 MB, copy it so it doesn't conflict
-		 * with bcachefs's potentially larger superblock:
-		 */
-		if (e.fe_physical < 1 << 20) {
+		/* If the data is in bcachefs's superblock region, copy it: */
+		if (e.fe_physical < reserve_start) {
 			copy_data(c, dst, src_fd, e.fe_logical,
 				  e.fe_logical + min(src_size - e.fe_logical,
 				      e.fe_length));
@@ -318,7 +316,8 @@ static void copy_file(struct bch_fs *c, struct bch_inode_unpacked *dst,
 static void copy_dir(struct copy_fs_state *s,
 		     struct bch_fs *c,
 		     struct bch_inode_unpacked *dst,
-		     int src_fd, const char *src_path)
+		     int src_fd, const char *src_path,
+		     u64 reserve_start)
 {
 	DIR *dir = fdopendir(src_fd);
 	struct dirent *d;
@@ -369,7 +368,7 @@ static void copy_dir(struct copy_fs_state *s,
 		switch (mode_to_type(stat.st_mode)) {
 		case DT_DIR:
 			fd = xopen(d->d_name, O_RDONLY|O_NOATIME);
-			copy_dir(s, c, &inode, fd, child_path);
+			copy_dir(s, c, &inode, fd, child_path, reserve_start);
 			close(fd);
 			break;
 		case DT_REG:
@@ -377,7 +376,7 @@ static void copy_dir(struct copy_fs_state *s,
 
 			fd = xopen(d->d_name, O_RDONLY|O_NOATIME);
 			copy_file(c, &inode, fd, stat.st_size,
-				  child_path, s);
+				  child_path, s, reserve_start);
 			close(fd);
 			break;
 		case DT_LNK:
@@ -409,7 +408,8 @@ next:
 
 static void reserve_old_fs_space(struct bch_fs *c,
 				 struct bch_inode_unpacked *root_inode,
-				 ranges *extents)
+				 ranges *extents,
+				 u64 reserve_start)
 {
 	struct bch_dev *ca = c->devs[0];
 	struct bch_inode_unpacked dst;
@@ -422,14 +422,20 @@ static void reserve_old_fs_space(struct bch_fs *c,
 
 	ranges_sort_merge(extents);
 
-	for_each_hole(iter, *extents, bucket_to_sector(ca, ca->mi.nbuckets) << 9, i)
-		link_data(c, &dst, i.start, i.start, i.end - i.start);
+	for_each_hole(iter, *extents, bucket_to_sector(ca, ca->mi.nbuckets) << 9, i) {
+		if (i.end <= reserve_start)
+			continue;
+
+		u64 start = max(i.start, reserve_start);
+
+		link_data(c, &dst, start, start, i.end - start);
+	}
 
 	update_inode(c, &dst);
 }
 
 void copy_fs(struct bch_fs *c, int src_fd, const char *src_path,
-		    struct copy_fs_state *s)
+	     struct copy_fs_state *s, u64 reserve_start)
 {
 	syncfs(src_fd);
 
@@ -448,10 +454,10 @@ void copy_fs(struct bch_fs *c, int src_fd, const char *src_path,
 
 
 	/* now, copy: */
-	copy_dir(s, c, &root_inode, src_fd, src_path);
+	copy_dir(s, c, &root_inode, src_fd, src_path, reserve_start);
 
 	if (BCH_MIGRATE_migrate == s->type)
-		reserve_old_fs_space(c, &root_inode, &s->extents);
+		reserve_old_fs_space(c, &root_inode, &s->extents, reserve_start);
 
 	update_inode(c, &root_inode);
 
