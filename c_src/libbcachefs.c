@@ -64,7 +64,7 @@ void bch2_sb_layout_init(struct bch_sb_layout *l,
 
 static u64 dev_max_bucket_size(u64 dev_size)
 {
-	return dev_size / BCH_MIN_NR_NBUCKETS;
+	return rounddown_pow_of_two(dev_size / (BCH_MIN_NR_NBUCKETS * 4));
 }
 
 u64 bch2_pick_bucket_size(struct bch_opts opts, dev_opts_list devs)
