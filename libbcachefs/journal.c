@@ -62,8 +62,7 @@ static void bch2_journal_buf_to_text(struct printbuf *out, struct journal *j, u6
 		prt_newline(out);
 	}
 
-	prt_printf(out, "expires:\t");
-	prt_printf(out, "%li jiffies\n", buf->expires - jiffies);
+	prt_printf(out, "expires:\t%li jiffies\n", buf->expires - jiffies);
 
 	prt_printf(out, "flags:\t");
 	if (buf->noflush)
@@ -142,6 +141,8 @@ journal_error_check_stuck(struct journal *j, int error, unsigned flags)
 	bool stuck = false;
 	struct printbuf buf = PRINTBUF;
 
+	buf.atomic++;
+
 	if (!(error == -BCH_ERR_journal_full ||
 	      error == -BCH_ERR_journal_pin_full) ||
 	    nr_unwritten_journal_entries(j) ||
@@ -172,7 +173,7 @@ journal_error_check_stuck(struct journal *j, int error, unsigned flags)
 	bch_err(c, "Journal stuck! Hava a pre-reservation but journal full (error %s)",
 		bch2_err_str(error));
 	bch2_journal_debug_to_text(&buf, j);
-	bch_err(c, "%s", buf.buf);
+	bch2_print_string_as_lines(KERN_ERR, buf.buf);
 
 	printbuf_reset(&buf);
 	bch2_journal_pins_to_text(&buf, j);
@@ -726,10 +727,10 @@ int bch2_journal_res_get_slowpath(struct journal *j, struct journal_res *res,
 		   remaining_wait))
 		return ret;
 
+	bch_err(c, "Journal stuck? Waited for 10 seconds, err %s", bch2_err_str(ret));
 	struct printbuf buf = PRINTBUF;
 	bch2_journal_debug_to_text(&buf, j);
-	bch_err(c, "Journal stuck? Waited for 10 seconds...\n%s",
-		buf.buf);
+	bch2_print_string_as_lines(KERN_ERR, buf.buf);
 	printbuf_exit(&buf);
 
 	closure_wait_event(&j->async_wait,
@@ -1510,7 +1511,7 @@ int bch2_dev_journal_init(struct bch_dev *ca, struct bch_sb *sb)
 	unsigned nr_bvecs = DIV_ROUND_UP(JOURNAL_ENTRY_SIZE_MAX, PAGE_SIZE);
 
 	for (unsigned i = 0; i < ARRAY_SIZE(ja->bio); i++) {
-		ja->bio[i] = kmalloc(struct_size(ja->bio[i], bio.bi_inline_vecs,
+		ja->bio[i] = kzalloc(struct_size(ja->bio[i], bio.bi_inline_vecs,
 				     nr_bvecs), GFP_KERNEL);
 		if (!ja->bio[i])
 			return -BCH_ERR_ENOMEM_dev_journal_init;

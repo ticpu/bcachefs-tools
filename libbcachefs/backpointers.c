@@ -50,6 +50,8 @@ void bch2_backpointer_to_text(struct printbuf *out, struct bch_fs *c, struct bke
 	}
 
 	bch2_btree_id_level_to_text(out, bp.v->btree_id, bp.v->level);
+	prt_str(out, " data_type=");
+	bch2_prt_data_type(out, bp.v->data_type);
 	prt_printf(out, " suboffset=%u len=%u gen=%u pos=",
 		   (u32) bp.k->p.offset & ~(~0U << MAX_EXTENT_COMPRESS_RATIO_SHIFT),
 		   bp.v->bucket_len,
@@ -782,7 +784,7 @@ enum alloc_sector_counter {
 	ALLOC_SECTORS_NR
 };
 
-static enum alloc_sector_counter data_type_to_alloc_counter(enum bch_data_type t)
+static int data_type_to_alloc_counter(enum bch_data_type t)
 {
 	switch (t) {
 	case BCH_DATA_btree:
@@ -791,9 +793,10 @@ static enum alloc_sector_counter data_type_to_alloc_counter(enum bch_data_type t
 	case BCH_DATA_cached:
 		return ALLOC_cached;
 	case BCH_DATA_stripe:
+	case BCH_DATA_parity:
 		return ALLOC_stripe;
 	default:
-		BUG();
+		return -1;
 	}
 }
 
@@ -844,7 +847,11 @@ static int check_bucket_backpointer_mismatch(struct btree_trans *trans, struct b
 		if (bp.v->bucket_gen != a->gen)
 			continue;
 
-		sectors[data_type_to_alloc_counter(bp.v->data_type)] += bp.v->bucket_len;
+		int alloc_counter = data_type_to_alloc_counter(bp.v->data_type);
+		if (alloc_counter < 0)
+			continue;
+
+		sectors[alloc_counter] += bp.v->bucket_len;
 	};
 	bch2_trans_iter_exit(trans, &iter);
 	if (ret)

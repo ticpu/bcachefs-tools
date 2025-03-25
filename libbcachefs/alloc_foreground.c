@@ -127,14 +127,14 @@ void __bch2_open_bucket_put(struct bch_fs *c, struct open_bucket *ob)
 
 void bch2_open_bucket_write_error(struct bch_fs *c,
 				  struct open_buckets *obs,
-				  unsigned dev)
+				  unsigned dev, int err)
 {
 	struct open_bucket *ob;
 	unsigned i;
 
 	open_bucket_for_each(c, obs, ob, i)
 		if (ob->dev == dev && ob->ec)
-			bch2_ec_bucket_cancel(c, ob);
+			bch2_ec_bucket_cancel(c, ob, err);
 }
 
 static struct open_bucket *bch2_open_bucket_alloc(struct bch_fs *c)
@@ -631,7 +631,7 @@ static inline void bch2_dev_stripe_increment_inlined(struct bch_dev *ca,
 			       struct bch_dev_usage *usage)
 {
 	u64 *v = stripe->next_alloc + ca->dev_idx;
-	u64 free_space = dev_buckets_available(ca, BCH_WATERMARK_normal);
+	u64 free_space = __dev_buckets_available(ca, *usage, BCH_WATERMARK_normal);
 	u64 free_space_inv = free_space
 		? div64_u64(1ULL << 48, free_space)
 		: 1ULL << 48;

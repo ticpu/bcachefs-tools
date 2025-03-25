@@ -78,13 +78,13 @@ u64 bch2_pick_bucket_size(struct bch_opts opts, dev_opts_list devs)
 
 	u64 min_dev_size = BCH_MIN_NR_NBUCKETS * bucket_size;
 	darray_for_each(devs, i)
-		if (i->opts.fs_size < min_dev_size)
+		if (i->fs_size < min_dev_size)
 			die("cannot format %s, too small (%llu bytes, min %llu)",
-			    i->path, i->opts.fs_size, min_dev_size);
+			    i->path, i->fs_size, min_dev_size);
 
 	u64 total_fs_size = 0;
 	darray_for_each(devs, i)
-		total_fs_size += i->opts.fs_size;
+		total_fs_size += i->fs_size;
 
 	struct sysinfo info;
 	si_meminfo(&info);
@@ -181,8 +181,8 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 
 	/* get device size, if it wasn't specified: */
 	darray_for_each(devs, i)
-		if (!opt_defined(i->opts, fs_size))
-			opt_set(i->opts, fs_size, get_size(i->bdev->bd_fd));
+		if (!i->fs_size)
+			i->fs_size = get_size(i->bdev->bd_fd);
 
 	/* calculate bucket sizes: */
 	u64 fs_bucket_size = bch2_pick_bucket_size(fs_opts, devs);
@@ -190,10 +190,10 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	darray_for_each(devs, i)
 		if (!opt_defined(i->opts, bucket_size))
 			opt_set(i->opts, bucket_size,
-				min(fs_bucket_size, dev_max_bucket_size(i->opts.fs_size)));
+				min(fs_bucket_size, dev_max_bucket_size(i->fs_size)));
 
 	darray_for_each(devs, i) {
-		i->nbuckets = i->opts.fs_size / i->opts.bucket_size;
+		i->nbuckets = i->fs_size / i->opts.bucket_size;
 		bch2_check_bucket_size(fs_opts, i);
 	}
 
@@ -292,7 +292,7 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	bch2_sb_members_cpy_v2_v1(&sb);
 
 	darray_for_each(devs, i) {
-		u64 size_sectors = i->opts.fs_size >> 9;
+		u64 size_sectors = i->fs_size >> 9;
 
 		sb.sb->dev_idx = i - devs.data;
 

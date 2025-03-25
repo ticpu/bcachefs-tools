@@ -66,6 +66,7 @@ struct dev_opts {
 	u64		sb_end;
 
 	u64		nbuckets;
+	u64		fs_size;
 
 	const char	*label; /* make this a bch_opt */
 

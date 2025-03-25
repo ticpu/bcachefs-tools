@@ -12,6 +12,7 @@
 #include <linux/byteorder.h>
 #include <linux/compiler.h>
 #include <linux/dcache.h>
+#include <linux/kmsan-checks.h>
 #include <linux/math.h>
 #include <linux/minmax.h>
 

@@ -6,8 +6,8 @@
 #include "posix_to_bcachefs.h"
 #include "libbcachefs/alloc_foreground.h"
 #include "libbcachefs/buckets.h"
-#include "libbcachefs/fs-common.h"
 #include "libbcachefs/io_write.h"
+#include "libbcachefs/namei.h"
 #include "libbcachefs/str_hash.h"
 #include "libbcachefs/xattr.h"
 

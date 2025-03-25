@@ -67,6 +67,7 @@
 #define __same_type(a, b)	__builtin_types_compatible_p(typeof(a), typeof(b))
 #define fallthrough		__attribute__((__fallthrough__))
 #define __noreturn		__attribute__((__noreturn__))
+#define __no_kmsan_checks
 
 #ifndef __counted_by
 #define __counted_by(nr)

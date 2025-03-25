@@ -44,7 +44,7 @@ const char * const __bch2_btree_ids[] = {
 	NULL
 };
 
-static const char * const __bch2_csum_types[] = {
+const char * const __bch2_csum_types[] = {
 	BCH_CSUM_TYPES()
 	NULL
 };
@@ -219,10 +219,10 @@ typedef void (*sb_opt_set_fn)(struct bch_sb *, u64);
 typedef u64 (*member_opt_get_fn)(const struct bch_member *);
 typedef void (*member_opt_set_fn)(struct bch_member *, u64);
 
-static const sb_opt_get_fn	BCH2_NO_SB_OPT = NULL;
-static const sb_opt_set_fn	SET_BCH2_NO_SB_OPT = NULL;
-static const member_opt_get_fn	BCH2_NO_MEMBER_OPT = NULL;
-static const member_opt_set_fn	SET_BCH2_NO_MEMBER_OPT = NULL;
+__maybe_unused static const sb_opt_get_fn	BCH2_NO_SB_OPT = NULL;
+__maybe_unused static const sb_opt_set_fn	SET_BCH2_NO_SB_OPT = NULL;
+__maybe_unused static const member_opt_get_fn	BCH2_NO_MEMBER_OPT = NULL;
+__maybe_unused static const member_opt_set_fn	SET_BCH2_NO_MEMBER_OPT = NULL;
 
 #define type_compatible_or_null(_p, _type)				\
 	__builtin_choose_expr(						\
@@ -551,14 +551,15 @@ int bch2_parse_one_mount_opt(struct bch_fs *c, struct bch_opts *opts,
 		goto bad_opt;
 
 	ret = bch2_opt_parse(c, &bch2_opt_table[id], val, &v, &err);
-	if (ret == -BCH_ERR_option_needs_open_fs && parse_later) {
-		prt_printf(parse_later, "%s=%s,", name, val);
-		if (parse_later->allocation_failure) {
-			ret = -ENOMEM;
-			goto out;
+	if (ret == -BCH_ERR_option_needs_open_fs) {
+		ret = 0;
+
+		if (parse_later) {
+			prt_printf(parse_later, "%s=%s,", name, val);
+			if (parse_later->allocation_failure)
+				ret = -ENOMEM;
 		}
 
-		ret = 0;
 		goto out;
 	}
 
@@ -569,28 +570,24 @@ int bch2_parse_one_mount_opt(struct bch_fs *c, struct bch_opts *opts,
 		bch2_opt_set_by_id(opts, id, v);
 
 	ret = 0;
-	goto out;
-
-bad_opt:
-	pr_err("Bad mount option %s", name);
-	ret = -BCH_ERR_option_name;
-	goto out;
-
-bad_val:
-	pr_err("Invalid mount option %s", err.buf);
-	ret = -BCH_ERR_option_value;
-
 out:
 	printbuf_exit(&err);
 	return ret;
+bad_opt:
+	ret = -BCH_ERR_option_name;
+	goto out;
+bad_val:
+	ret = -BCH_ERR_option_value;
+	goto out;
 }
 
 int bch2_parse_mount_opts(struct bch_fs *c, struct bch_opts *opts,
-			  struct printbuf *parse_later, char *options)
+			  struct printbuf *parse_later, char *options,
+			  bool ignore_unknown)
 {
 	char *copied_opts, *copied_opts_start;
 	char *opt, *name, *val;
-	int ret;
+	int ret = 0;
 
 	if (!options)
 		return 0;
@@ -615,14 +612,14 @@ int bch2_parse_mount_opts(struct bch_fs *c, struct bch_opts *opts,
 		val	= opt;
 
 		ret = bch2_parse_one_mount_opt(c, opts, parse_later, name, val);
-		if (ret < 0)
-			goto out;
+		if (ret == -BCH_ERR_option_name && ignore_unknown)
+			ret = 0;
+		if (ret) {
+			pr_err("Error parsing option %s: %s", name, bch2_err_str(ret));
+			break;
+		}
 	}
 
-	ret = 0;
-	goto out;
-
-out:
 	kfree(copied_opts_start);
 	return ret;
 }

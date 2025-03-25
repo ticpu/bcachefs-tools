@@ -228,9 +228,10 @@ static int migrate_fs(const char		*fs_path,
 	printf("Creating new filesystem on %s in space reserved at %s\n",
 	       dev->path, file_path);
 
-	dev->opts.fs_size	= get_size(dev->bdev->bd_fd);
-	dev->opts.bucket_size	= bch2_pick_bucket_size(fs_opts, devs);
-	dev->nbuckets		= dev->opts.fs_size / dev->opts.bucket_size;
+	dev->fs_size		= get_size(dev->bdev->bd_fd);
+	opt_set(dev->opts, bucket_size, bch2_pick_bucket_size(fs_opts, devs));
+
+	dev->nbuckets		= dev->fs_size / dev->opts.bucket_size;
 
 	bch2_check_bucket_size(fs_opts, dev);
 

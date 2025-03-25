@@ -207,9 +207,8 @@ int cmd_format(int argc, char *argv[])
 			force = true;
 			break;
 		case O_fs_size:
-			if (bch2_strtoull_h(optarg, &dev_opts.opts.fs_size))
+			if (bch2_strtoull_h(optarg, &dev_opts.fs_size))
 				die("invalid filesystem size");
-			dev_opts.opts.fs_size_defined = true;
 			unconsumed_dev_option = true;
 			break;
 		case O_superblock_size:
@@ -233,8 +232,7 @@ int cmd_format(int argc, char *argv[])
 			darray_push(&device_paths, optarg);
 			dev_opts.path = optarg;
 			darray_push(&devices, dev_opts);
-			dev_opts.opts.fs_size = 0;
-			dev_opts.opts.fs_size_defined = 0;
+			dev_opts.fs_size = 0;
 			unconsumed_dev_option = false;
 			break;
 		case O_quiet:

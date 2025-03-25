@@ -326,7 +326,7 @@ kernel_fsck_err:
 	} else {
 userland_fsck:
 		printf("Running userspace offline fsck\n");
-		ret = bch2_parse_mount_opts(NULL, &opts, &parse_later, opts_str.buf);
+		ret = bch2_parse_mount_opts(NULL, &opts, &parse_later, opts_str.buf, false);
 		if (ret)
 			return ret;
 
