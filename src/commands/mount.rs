@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{ensure, Result};
 use bch_bindgen::{bcachefs, bcachefs::bch_sb_handle, opt_set, path_to_cstr};
+use bcachefs::bch_opts;
 use clap::Parser;
 use log::{debug, error, info};
 use uuid::Uuid;
@@ -78,7 +79,7 @@ fn mount_inner(
 
 /// Parse a comma-separated mount options and split out mountflags and filesystem
 /// specific options.
-fn parse_mount_options(options: impl AsRef<str>) -> (Option<String>, libc::c_ulong) {
+fn parse_mountflag_options(options: impl AsRef<str>) -> (Option<String>, libc::c_ulong) {
     use either::Either::{Left, Right};
 
     debug!("parsing mount options: {}", options.as_ref());
@@ -120,8 +121,7 @@ fn parse_mount_options(options: impl AsRef<str>) -> (Option<String>, libc::c_ulo
     )
 }
 
-fn read_super_silent(path: impl AsRef<Path>) -> anyhow::Result<bch_sb_handle> {
-    let mut opts = bcachefs::bch_opts::default();
+fn read_super_silent(path: impl AsRef<Path>, mut opts: bch_opts) -> anyhow::Result<bch_sb_handle> {
     opt_set!(opts, noexcl, 1);
 
     bch_bindgen::sb_io::read_super_silent(path.as_ref(), opts)
@@ -170,11 +170,11 @@ fn udev_bcachefs_info() -> anyhow::Result<HashMap<String, Vec<String>>> {
     Ok(info)
 }
 
-fn get_super_blocks(uuid: Uuid, devices: &[String]) -> Vec<(PathBuf, bch_sb_handle)> {
+fn get_super_blocks(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Vec<(PathBuf, bch_sb_handle)> {
     devices
         .iter()
         .filter_map(|dev| {
-            read_super_silent(PathBuf::from(dev))
+            read_super_silent(PathBuf::from(dev), *opts)
                 .ok()
                 .map(|sb| (PathBuf::from(dev), sb))
         })
@@ -202,6 +202,7 @@ fn get_all_block_devnodes() -> anyhow::Result<Vec<String>> {
 fn get_devices_by_uuid(
     udev_bcachefs: &HashMap<String, Vec<String>>,
     uuid: Uuid,
+    opts: &bch_opts
 ) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
     let devices = {
         if !udev_bcachefs.is_empty() {
@@ -216,16 +217,17 @@ fn get_devices_by_uuid(
         }
     };
 
-    Ok(get_super_blocks(uuid, &devices))
+    Ok(get_super_blocks(uuid, &devices, opts))
 }
 
 fn devs_str_sbs_from_uuid(
     udev_info: &HashMap<String, Vec<String>>,
     uuid: &str,
+    opts: &bch_opts
 ) -> anyhow::Result<(String, Vec<bch_sb_handle>)> {
     debug!("enumerating devices with UUID {}", uuid);
 
-    let devs_sbs = Uuid::parse_str(uuid).map(|uuid| get_devices_by_uuid(udev_info, uuid))??;
+    let devs_sbs = Uuid::parse_str(uuid).map(|uuid| get_devices_by_uuid(udev_info, uuid, opts))??;
 
     let devs_str = devs_sbs
         .iter()
@@ -241,15 +243,16 @@ fn devs_str_sbs_from_uuid(
 fn devs_str_sbs_from_device(
     udev_info: &HashMap<String, Vec<String>>,
     device: &Path,
+    opts: &bch_opts
 ) -> anyhow::Result<(String, Vec<bch_sb_handle>)> {
-    let dev_sb = read_super_silent(device)?;
+    let dev_sb = read_super_silent(device, *opts)?;
 
     if dev_sb.sb().number_of_devices() == 1 {
         Ok((device.as_os_str().to_str().unwrap().to_string(), vec![dev_sb]))
     } else {
         let uuid = dev_sb.sb().uuid();
 
-        devs_str_sbs_from_uuid(udev_info, &uuid.to_string())
+        devs_str_sbs_from_uuid(udev_info, &uuid.to_string(), opts)
     }
 }
 
@@ -271,12 +274,16 @@ fn handle_unlock(cli: &Cli, sb: &bch_sb_handle) -> Result<KeyHandle> {
 }
 
 fn cmd_mount_inner(cli: &Cli) -> Result<()> {
+    let (optstr, mountflags) = parse_mountflag_options(&cli.options);
+    let opts = bch_bindgen::opts::parse_mount_opts(None, optstr.as_deref(), true)
+        .unwrap_or_default();
+
     // Grab the udev information once
     let udev_info = udev_bcachefs_info()?;
 
     let (devices, mut sbs) =
         if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = cli.dev.split_once('=') {
-            devs_str_sbs_from_uuid(&udev_info, uuid)?
+            devs_str_sbs_from_uuid(&udev_info, uuid, &opts)?
         } else if cli.dev.contains(':') {
             // If the device string contains ":" we will assume the user knows the
             // entire list. If they supply a single device it could be either the FS
@@ -287,12 +294,12 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
             let sbs = cli
                 .dev
                 .split(':')
-                .map(read_super_silent)
+                .map(|path| read_super_silent(path, opts))
                 .collect::<Result<Vec<_>>>()?;
 
             (cli.dev.clone(), sbs)
         } else {
-            devs_str_sbs_from_device(&udev_info, Path::new(&cli.dev))?
+            devs_str_sbs_from_device(&udev_info, Path::new(&cli.dev), &opts)?
         };
 
     ensure!(!sbs.is_empty(), "No device(s) to mount specified");
@@ -317,8 +324,7 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
             &cli.options
         );
 
-        let (data, mountflags) = parse_mount_options(&cli.options);
-        mount_inner(devices, mountpoint, "bcachefs", mountflags, data)
+        mount_inner(devices, mountpoint, "bcachefs", mountflags, optstr)
     } else {
         info!(
             "would mount with params: device: {}, options: {}",
