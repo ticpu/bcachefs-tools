@@ -21,7 +21,6 @@ static void fsck_usage(void)
 	     "  -y                      Assume \"yes\" to all questions\n"
 	     "  -f                      Force checking even if filesystem is marked clean\n"
 	     "  -r, --ratelimit_errors  Don't display more than 10 errors of a given type\n"
-	     "  -R, --reconstruct_alloc Reconstruct the alloc btree\n"
 	     "  -k, --kernel            Use the in-kernel fsck implementation\n"
 	     "  -v                      Be verbose\n"
 	     "  -h, --help              Display this help and exit\n"
@@ -205,7 +204,6 @@ int cmd_fsck(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "ratelimit_errors",	no_argument,		NULL, 'r' },
-		{ "reconstruct_alloc",	no_argument,		NULL, 'R' },
 		{ "kernel",		no_argument,		NULL, 'k' },
 		{ "no-kernel",		no_argument,		NULL, 'K' },
 		{ "help",		no_argument,		NULL, 'h' },
@@ -224,7 +222,7 @@ int cmd_fsck(int argc, char *argv[])
 	append_opt(&opts_str, "read_only");
 
 	while ((opt = getopt_long(argc, argv,
-				  "apynfo:rRkKvh",
+				  "apynfo:rkKvh",
 				  longopts, NULL)) != -1)
 		switch (opt) {
 		case 'a':
@@ -247,9 +245,6 @@ int cmd_fsck(int argc, char *argv[])
 			break;
 		case 'r':
 			append_opt(&opts_str, "ratelimit_errors");
-			break;
-		case 'R':
-			append_opt(&opts_str, "reconstruct_alloc");
 			break;
 		case 'k':
 			kernel = true;
