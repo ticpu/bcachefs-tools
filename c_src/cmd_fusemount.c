@@ -19,7 +19,7 @@
 #include "libbcachefs/dirent.h"
 #include "libbcachefs/errcode.h"
 #include "libbcachefs/error.h"
-#include "libbcachefs/fs-common.h"
+#include "libbcachefs/namei.h"
 #include "libbcachefs/inode.h"
 #include "libbcachefs/io_read.h"
 #include "libbcachefs/io_write.h"
