@@ -419,6 +419,11 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	sb->layout.sb_offset[0] = cpu_to_le64(BCH_SB_SECTOR);
 	sb->layout.sb_offset[1] = cpu_to_le64(BCH_SB_SECTOR + sb_size);
 
+	/* also write first 0-3.5k bytes with zeroes, ensure we blow away old
+	 * superblock */
+	static const char zeroes[BCH_SB_SECTOR << 9];
+	xpwrite(fd, zeroes, BCH_SB_SECTOR << 9, 0, "zeroing start of disk");
+
 	bch2_super_write(fd, sb);
 	close(fd);
 
