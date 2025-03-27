@@ -18,12 +18,14 @@ enum Subcommands {
     #[command(visible_aliases = ["new"])]
     Create {
         /// Paths
+        #[arg(required = true)]
         targets: Vec<PathBuf>,
     },
 
     #[command(visible_aliases = ["del"])]
     Delete {
         /// Path
+        #[arg(required = true)]
         targets: Vec<PathBuf>,
     },
 
