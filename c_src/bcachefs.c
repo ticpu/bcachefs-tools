@@ -93,9 +93,11 @@ void bcachefs_usage(void)
 	     "  list                     List filesystem metadata in textual form\n"
 	     "  list_journal             List contents of journal\n"
 	     "\n"
+#ifdef BCACHEFS_FUSE
 	     "FUSE:\n"
 	     "  fusemount                Mount a filesystem via FUSE\n"
 	     "\n"
+#endif
 	     "Miscellaneous:\n"
          "  completions              Generate shell completions\n"
 	     "  version                  Display the version of the invoked bcachefs tool\n");
