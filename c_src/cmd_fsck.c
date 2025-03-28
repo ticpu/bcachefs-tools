@@ -116,9 +116,7 @@ static bool should_use_kernel_fsck(darray_str devs)
 {
 	system("modprobe bcachefs");
 
-	unsigned kernel_version = !access("/sys/module/bcachefs/parameters/version", R_OK)
-	    ? read_file_u64(AT_FDCWD, "/sys/module/bcachefs/parameters/version")
-	    : 0;
+	unsigned kernel_version = bcachefs_kernel_version();
 
 	if (!kernel_version)
 		return false;

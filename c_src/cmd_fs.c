@@ -239,9 +239,10 @@ static void accounting_sort(darray_accounting_p *sorted,
 
 static void accounting_swab_if_old(struct bch_ioctl_query_accounting *in)
 {
-	u64 kernel_version = read_file_u64(AT_FDCWD, "/sys/module/bcachefs/parameters/version");
+	unsigned kernel_version = bcachefs_kernel_version();
 
-	if (kernel_version < bcachefs_metadata_version_disk_accounting_big_endian)
+	if (kernel_version &&
+	    kernel_version < bcachefs_metadata_version_disk_accounting_big_endian)
 		for (struct bkey_i_accounting *a = in->accounting;
 		     a < (struct bkey_i_accounting *) ((u64 *) in->accounting + in->accounting_u64s);
 		     a = bkey_i_to_accounting(bkey_next(&a->k_i)))

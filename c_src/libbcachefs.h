@@ -45,14 +45,18 @@ struct format_opts {
 	char		*source;
 };
 
+static inline unsigned bcachefs_kernel_version(void)
+{
+	return !access("/sys/module/bcachefs/parameters/version", R_OK)
+	    ? read_file_u64(AT_FDCWD, "/sys/module/bcachefs/parameters/version")
+	    : 0;
+}
+
 static inline struct format_opts format_opts_default()
 {
-	unsigned version = !access(   "/sys/module/bcachefs/parameters/version", R_OK)
-	    ? read_file_u64(AT_FDCWD, "/sys/module/bcachefs/parameters/version")
-	    : bcachefs_metadata_version_current;
-
 	return (struct format_opts) {
-		.version		= version,
+		.version		= bcachefs_kernel_version() ?:
+			bcachefs_metadata_version_current,
 		.superblock_size	= SUPERBLOCK_SIZE_DEFAULT,
 	};
 }
