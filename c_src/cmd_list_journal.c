@@ -65,9 +65,21 @@ static bool bkey_matches_filter(d_bbpos_range filter, struct jset_entry *entry, 
 		struct bbpos k_start	= BBPOS(entry->btree_id, bkey_start_pos(&k->k));
 		struct bbpos k_end	= BBPOS(entry->btree_id, k->k.p);
 
-		if (bbpos_cmp(k_start, i->start) >= 0 &&
-		    bbpos_cmp(k_end, i->end) <= 0)
-			return true;
+		if (!i->start.pos.snapshot &&
+		    !i->end.pos.snapshot) {
+			k_start.pos.snapshot = 0;
+			k_end.pos.snapshot = 0;
+		}
+
+		if (!k->k.size) {
+			if (bbpos_cmp(k_start, i->start) >= 0 &&
+			    bbpos_cmp(k_end, i->end) <= 0)
+				return true;
+		} else {
+			if (bbpos_cmp(i->start, k_end) <= 0 &&
+			    bbpos_cmp(i->end, k_start) >= 0)
+				return true;
+		}
 	}
 	return false;
 }
@@ -75,9 +87,9 @@ static bool bkey_matches_filter(d_bbpos_range filter, struct jset_entry *entry, 
 static bool entry_matches_transaction_filter(struct jset_entry *entry,
 					     d_bbpos_range filter)
 {
-	if (entry->type == BCH_JSET_ENTRY_btree_root ||
-	    entry->type == BCH_JSET_ENTRY_btree_keys ||
-	    entry->type == BCH_JSET_ENTRY_overwrite)
+	if (!entry->level &&
+	    (entry->type == BCH_JSET_ENTRY_btree_keys ||
+	     entry->type == BCH_JSET_ENTRY_overwrite))
 		jset_entry_for_each_key(entry, k)
 			if (bkey_matches_filter(filter, entry, k))
 				return true;
@@ -90,6 +102,8 @@ static bool should_print_transaction(struct jset_entry *entry, struct jset_entry
 {
 	struct jset_entry_log *l = container_of(entry, struct jset_entry_log, entry);
 	unsigned b = jset_entry_log_msg_bytes(l);
+	bool have_log_messages = false;
+	bool have_non_log_messages = false;
 
 	darray_for_each(msg_filter, i)
 		if (!strncmp(*i, l->d, b))
@@ -100,10 +114,18 @@ static bool should_print_transaction(struct jset_entry *entry, struct jset_entry
 
 	for (entry = vstruct_next(entry);
 	     entry != end && !entry_is_transaction_start(entry);
-	     entry = vstruct_next(entry))
-		if (entry_is_log_msg(entry) ||
-		    entry_matches_transaction_filter(entry, key_filter))
+	     entry = vstruct_next(entry)) {
+		if (entry_matches_transaction_filter(entry, key_filter))
 			return true;
+
+		if (entry_is_log_msg(entry))
+			have_log_messages = true;
+		else
+			have_non_log_messages = true;
+	}
+
+	if (have_log_messages && !have_non_log_messages)
+		return true;
 
 	return false;
 }
@@ -134,6 +156,7 @@ static void journal_entry_header_to_text(struct printbuf *out,
 		prt_str(out, "blacklisted ");
 
 	prt_printf(out,
+		   "\n"
 		   "journal entry     %llu\n"
 		   "  version         %u\n"
 		   "  last seq        %llu\n"
