@@ -11,7 +11,7 @@
 #include "time_stats.h"
 
 /* disable automatic switching to percpu mode */
-#define TIME_STATS_NONPCPU	((struct time_stat_buffer *) 1)
+#define TIME_STATS_NONPCPU	((unsigned long) 1)
 
 static const struct time_unit time_units[] = {
 	{ "ns",		1		 },
@@ -126,7 +126,7 @@ void __bch2_time_stats_update(struct bch2_time_stats *stats, u64 start, u64 end)
 {
 	unsigned long flags;
 
-	if ((unsigned long) stats->buffer <= 1) {
+	if ((unsigned long) stats->buffer <= TIME_STATS_NONPCPU) {
 		spin_lock_irqsave(&stats->lock, flags);
 		time_stats_update_one(stats, start, end);
 
@@ -161,8 +161,7 @@ void bch2_time_stats_reset(struct bch2_time_stats *stats)
 	unsigned offset = offsetof(struct bch2_time_stats, min_duration);
 	memset((void *) stats + offset, 0, sizeof(*stats) - offset);
 
-	if (stats->buffer &&
-	    stats->buffer != TIME_STATS_NONPCPU) {
+	if ((unsigned long) stats->buffer > TIME_STATS_NONPCPU) {
 		int cpu;
 		for_each_possible_cpu(cpu)
 			per_cpu_ptr(stats->buffer, cpu)->nr = 0;
@@ -172,10 +171,9 @@ void bch2_time_stats_reset(struct bch2_time_stats *stats)
 
 void bch2_time_stats_exit(struct bch2_time_stats *stats)
 {
-	if (stats->buffer != TIME_STATS_NONPCPU) {
+	if ((unsigned long) stats->buffer > TIME_STATS_NONPCPU)
 		free_percpu(stats->buffer);
-		stats->buffer = NULL;
-	}
+	stats->buffer = NULL;
 }
 
 void bch2_time_stats_init(struct bch2_time_stats *stats)
@@ -189,5 +187,5 @@ void bch2_time_stats_init(struct bch2_time_stats *stats)
 void bch2_time_stats_init_no_pcpu(struct bch2_time_stats *stats)
 {
 	bch2_time_stats_init(stats);
-	stats->buffer = TIME_STATS_NONPCPU;
+	stats->buffer = (struct time_stat_buffer __percpu *) TIME_STATS_NONPCPU;
 }

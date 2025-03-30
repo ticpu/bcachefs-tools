@@ -543,6 +543,7 @@ static long bch2_ioctl_subvolume_destroy(struct bch_fs *c, struct file *filp,
 	}
 	ret = __bch2_unlink(dir, victim, true);
 	if (!ret) {
+		shrink_dcache_parent(victim);
 		fsnotify_rmdir(dir, victim);
 		d_delete(victim);
 	}
