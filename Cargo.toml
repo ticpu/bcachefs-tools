@@ -1,3 +1,7 @@
+[workspace]
+resolver = "2"
+default-members = [".", "bch_bindgen"]
+
 [package]
 name = "bcachefs-tools"
 version = "1.25.0"
