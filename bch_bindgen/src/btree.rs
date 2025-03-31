@@ -25,7 +25,7 @@ impl<'f> BtreeTrans<'f> {
     }
 }
 
-impl<'f> Drop for BtreeTrans<'f> {
+impl Drop for BtreeTrans<'_> {
     fn drop(&mut self) {
         unsafe { c::bch2_trans_put(&mut *self.raw) }
     }
@@ -81,7 +81,7 @@ impl<'t> BtreeIter<'t> {
         }
     }
 
-    pub fn peek_max<'i>(&'i mut self, end: c::bpos) -> Result<Option<BkeySC<'i>>, bch_errcode> {
+    pub fn peek_max(&mut self, end: c::bpos) -> Result<Option<BkeySC<'_>>, bch_errcode> {
         unsafe {
             let k = c::bch2_btree_iter_peek_max(&mut self.raw, end);
             errptr_to_result_c(k.k).map(|_| {
@@ -127,7 +127,7 @@ impl<'t> BtreeIter<'t> {
     }
 }
 
-impl<'t> Drop for BtreeIter<'t> {
+impl Drop for BtreeIter<'_> {
     fn drop(&mut self) {
         unsafe { c::bch2_trans_iter_exit(self.raw.trans, &mut self.raw) }
     }
@@ -166,27 +166,28 @@ impl<'t> BtreeNodeIter<'t> {
         }
     }
 
-    pub fn peek<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
+    pub fn peek(&mut self) -> Result<Option<&c::btree>, bch_errcode> {
         unsafe {
             let b = c::bch2_btree_iter_peek_node(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
         }
     }
 
-    pub fn peek_and_restart<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
+    pub fn peek_and_restart(&mut self) -> Result<Option<&c::btree>, bch_errcode> {
         unsafe {
             let b = c::bch2_btree_iter_peek_node_and_restart(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
         }
     }
 
-    pub fn advance<'i>(&'i mut self) {
+    pub fn advance(&mut self) {
         unsafe {
             c::bch2_btree_iter_next_node(&mut self.raw);
         }
     }
 
-    pub fn next<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<Option<&c::btree>, bch_errcode> {
         unsafe {
             let b = c::bch2_btree_iter_next_node(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
@@ -194,7 +195,7 @@ impl<'t> BtreeNodeIter<'t> {
     }
 }
 
-impl<'t> Drop for BtreeNodeIter<'t> {
+impl Drop for BtreeNodeIter<'_> {
     fn drop(&mut self) {
         unsafe { c::bch2_trans_iter_exit(self.raw.trans, &mut self.raw) }
     }
@@ -202,11 +203,11 @@ impl<'t> Drop for BtreeNodeIter<'t> {
 
 impl<'b, 'f> c::btree {
     pub fn to_text(&'b self, fs: &'f Fs) -> BtreeNodeToText<'b, 'f> {
-        BtreeNodeToText { b: &self, fs }
+        BtreeNodeToText { b: self, fs }
     }
 
     pub fn ondisk_to_text(&'b self, fs: &'f Fs) -> BtreeNodeOndiskToText<'b, 'f> {
-        BtreeNodeOndiskToText { b: &self, fs }
+        BtreeNodeOndiskToText { b: self, fs }
     }
 }
 
@@ -215,7 +216,7 @@ pub struct BtreeNodeToText<'b, 'f> {
     fs: &'f Fs,
 }
 
-impl<'b, 'f> fmt::Display for BtreeNodeToText<'b, 'f> {
+impl fmt::Display for BtreeNodeToText<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         printbuf_to_formatter(f, |buf| unsafe {
             c::bch2_btree_node_to_text(buf, self.fs.raw, self.b)
@@ -228,7 +229,7 @@ pub struct BtreeNodeOndiskToText<'b, 'f> {
     fs: &'f Fs,
 }
 
-impl<'b, 'f> fmt::Display for BtreeNodeOndiskToText<'b, 'f> {
+impl fmt::Display for BtreeNodeOndiskToText<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         printbuf_to_formatter(f, |buf| unsafe {
             c::bch2_btree_node_ondisk_to_text(buf, self.fs.raw, self.b)

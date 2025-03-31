@@ -9,7 +9,7 @@ pub struct Fs {
 }
 
 impl Fs {
-    pub fn open(devs: &Vec<PathBuf>, opts: c::bch_opts) -> Result<Fs, bch_errcode> {
+    pub fn open(devs: &[PathBuf], opts: c::bch_opts) -> Result<Fs, bch_errcode> {
         let devs: Vec<_> = devs
             .iter()
             .map(|i| CString::new(i.as_os_str().as_bytes()).unwrap().into_raw())

@@ -109,15 +109,10 @@ impl FromStr for c::btree_id {
         let s = CString::new(s).unwrap();
         let p = s.as_ptr();
 
-        let v = unsafe {
-            c::match_string(
-                c::__bch2_btree_ids[..].as_ptr(),
-                (-(1 as isize)) as usize,
-                p,
-            )
-        };
+        let v =
+            unsafe { c::match_string(c::__bch2_btree_ids[..].as_ptr(), (-1_isize) as usize, p) };
         if v >= 0 {
-            Ok(unsafe { std::mem::transmute(v) })
+            Ok(unsafe { std::mem::transmute::<i32, bcachefs::btree_id>(v) })
         } else {
             Err(BchToolsErr::InvalidBtreeId)
         }
@@ -131,11 +126,9 @@ impl FromStr for c::bch_bkey_type {
         let s = CString::new(s).unwrap();
         let p = s.as_ptr();
 
-        let v = unsafe {
-            c::match_string(c::bch2_bkey_types[..].as_ptr(), (-(1 as isize)) as usize, p)
-        };
+        let v = unsafe { c::match_string(c::bch2_bkey_types[..].as_ptr(), (-1_isize) as usize, p) };
         if v >= 0 {
-            Ok(unsafe { std::mem::transmute(v) })
+            Ok(unsafe { std::mem::transmute::<i32, bcachefs::bch_bkey_type>(v) })
         } else {
             Err(BchToolsErr::InvalidBkeyType)
         }
@@ -192,7 +185,7 @@ impl FromStr for c::bpos {
 
         let ino: u64 = ino_str.parse().map_err(|_| BchToolsErr::InvalidBpos)?;
         let off: u64 = off_str.parse().map_err(|_| BchToolsErr::InvalidBpos)?;
-        let snp: u32 = snp_str.map(|s| s.parse().ok()).flatten().unwrap_or(0);
+        let snp: u32 = snp_str.and_then(|s| s.parse().ok()).unwrap_or(0);
 
         Ok(c::bpos {
             inode:    ino,

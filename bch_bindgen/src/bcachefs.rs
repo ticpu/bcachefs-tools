@@ -1,3 +1,8 @@
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::transmute_int_to_bool)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::useless_transmute)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]

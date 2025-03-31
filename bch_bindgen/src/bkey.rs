@@ -65,6 +65,7 @@ impl<'a, 'b> BkeySC<'a> {
         BkeySCToText { k: self, fs }
     }
 
+    #[allow(clippy::missing_transmute_annotations)]
     pub fn v(&'a self) -> BkeyValC<'a> {
         unsafe {
             let ty: c::bch_bkey_type = transmute(self.k.type_ as u32);
@@ -129,7 +130,7 @@ pub struct BkeySCToText<'a, 'b> {
     fs: &'b Fs,
 }
 
-impl<'a, 'b> fmt::Display for BkeySCToText<'a, 'b> {
+impl fmt::Display for BkeySCToText<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         unsafe {
             printbuf_to_formatter(f, |buf| {
