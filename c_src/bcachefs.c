@@ -118,16 +118,15 @@ int fs_cmds(int argc, char *argv[])
 {
 	char *cmd = pop_cmd(&argc, argv);
 
-	if (argc < 1) {
-		bcachefs_usage();
-		exit(EXIT_FAILURE);
-	}
+	if (argc < 1)
+		return fs_usage();
 	if (!strcmp(cmd, "usage"))
 		return cmd_fs_usage(argc, argv);
 	if (!strcmp(cmd, "top"))
 		return cmd_fs_top(argc, argv);
 
-	return 0;
+	fs_usage();
+	return -EINVAL;
 }
 
 int device_cmds(int argc, char *argv[])
@@ -153,7 +152,8 @@ int device_cmds(int argc, char *argv[])
 	if (!strcmp(cmd, "resize-journal"))
 		return cmd_device_resize_journal(argc, argv);
 
-	return 0;
+	device_usage();
+	return -EINVAL;
 }
 
 int data_cmds(int argc, char *argv[])
@@ -169,5 +169,6 @@ int data_cmds(int argc, char *argv[])
 	if (!strcmp(cmd, "job"))
 		return cmd_data_job(argc, argv);
 
-	return 0;
+	data_usage();
+	return -EINVAL;
 }

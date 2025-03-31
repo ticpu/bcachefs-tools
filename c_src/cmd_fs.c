@@ -491,6 +491,19 @@ devs:
 	bcache_fs_close(fs);
 }
 
+int fs_usage(void)
+{
+	puts("bcachefs fs - manage a running filesystem\n"
+	     "Usage: bcachefs fs <CMD> [OPTIONS]\n"
+	     "\n"
+	     "Commands:\n"
+	     "  usage                   Display detailed filesystem usage\n"
+	     "  top                     Show runtime performance information\n"
+	     "\n"
+	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	return 0;
+}
+
 static void fs_usage_usage(void)
 {
 	puts("bcachefs fs usage - display detailed filesystem usage\n"
