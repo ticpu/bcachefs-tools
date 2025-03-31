@@ -54,6 +54,12 @@ static inline unsigned bcachefs_kernel_version(void)
 
 static inline struct format_opts format_opts_default()
 {
+	/*
+	 * Ensure bcachefs module is loaded so we know the supported on disk
+	 * format version:
+	 */
+	system("modprobe bcachefs > /dev/null 2>&1");
+
 	return (struct format_opts) {
 		.version		= bcachefs_kernel_version() ?:
 			bcachefs_metadata_version_current,
