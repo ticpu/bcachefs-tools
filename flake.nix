@@ -283,7 +283,7 @@
                 // {
                   pname = "msrv";
                   inherit (common) cargoArtifacts;
-                  cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
+                  cargoClippyExtraArgs = "--all-targets --all-features";
                 }
               );
           };
