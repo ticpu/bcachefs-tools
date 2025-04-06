@@ -94,7 +94,7 @@ long schedule_timeout(long timeout)
 	timer_setup_on_stack(&timer.timer, process_timeout, 0);
 	mod_timer(&timer.timer, expire);
 	schedule();
-	del_timer_sync(&timer.timer);
+	timer_delete_sync(&timer.timer);
 
 	timeout = expire - jiffies;
 out:

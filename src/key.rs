@@ -12,7 +12,7 @@ use std::{
 use anyhow::{anyhow, ensure, Result};
 use bch_bindgen::{
     bcachefs::{self, bch_key, bch_sb_handle},
-    c::{bch2_chacha_encrypt_key, bch_encrypted_key, bch_sb_field_crypt},
+    c::{bch2_chacha20, bch_encrypted_key, bch_sb_field_crypt},
     keyutils::{self, keyctl_search},
 };
 use log::{debug, info};
@@ -240,15 +240,14 @@ impl Passphrase {
 
         let mut passphrase_key: bch_key = self.derive(crypt);
 
-        let ret = unsafe {
-            bch2_chacha_encrypt_key(
+        unsafe {
+            bch2_chacha20(
                 ptr::addr_of_mut!(passphrase_key),
                 sb.sb().nonce(),
                 ptr::addr_of_mut!(sb_key).cast(),
                 mem::size_of_val(&sb_key),
             )
         };
-        ensure!(ret == 0, "error encrypting key");
         ensure!(sb_key.magic == bch_key_magic, "incorrect passphrase");
 
         Ok((passphrase_key, sb_key))

@@ -188,4 +188,6 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 #define is_signed_type(type) (((type)(-1)) < (__force type)1)
 #define is_unsigned_type(type) (!is_signed_type(type))
 
+#define TYPEOF_UNQUAL(exp) __typeof__(exp)
+
 #endif /* _TOOLS_LINUX_COMPILER_H */

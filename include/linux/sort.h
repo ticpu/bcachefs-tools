@@ -16,4 +16,6 @@ static inline void sort(void *base, size_t num, size_t size,
 	return qsort(base, num, size, cmp_func);
 }
 
+#define sort_nonatomic(...)	sort(__VA_ARGS__)
+
 #endif

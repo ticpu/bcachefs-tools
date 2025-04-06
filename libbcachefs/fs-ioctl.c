@@ -537,10 +537,6 @@ static long bch2_ioctl_subvolume_destroy(struct bch_fs *c, struct file *filp,
 		ret = -EXDEV;
 		goto err;
 	}
-	if (!d_is_positive(victim)) {
-		ret = -ENOENT;
-		goto err;
-	}
 
 	ret =   inode_permission(file_mnt_idmap(filp), d_inode(victim), MAY_WRITE) ?:
 		__bch2_unlink(dir, victim, true);

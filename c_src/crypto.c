@@ -124,10 +124,7 @@ void bch2_passphrase_check(struct bch_sb *sb, const char *passphrase,
 
 	*passphrase_key = derive_passphrase(crypt, passphrase);
 
-	/* Check if the user supplied the correct passphrase: */
-	if (bch2_chacha_encrypt_key(passphrase_key, __bch2_sb_key_nonce(sb),
-				    sb_key, sizeof(*sb_key)))
-		die("error encrypting key");
+	bch2_chacha20(passphrase_key, __bch2_sb_key_nonce(sb), sb_key, sizeof(*sb_key));
 
 	if (bch2_key_is_encrypted(sb_key))
 		die("incorrect passphrase");
@@ -211,9 +208,7 @@ void bch_crypt_update_passphrase(
 
 	struct bch_key passphrase_key = derive_passphrase(crypt, new_passphrase);
 
-	if (bch2_chacha_encrypt_key(&passphrase_key, __bch2_sb_key_nonce(sb),
-				    &new_key, sizeof(new_key)))
-		die("error encrypting key");
+	bch2_chacha20(&passphrase_key, __bch2_sb_key_nonce(sb), &new_key, sizeof(new_key));
 
 	memzero_explicit(&passphrase_key, sizeof(passphrase_key));
 

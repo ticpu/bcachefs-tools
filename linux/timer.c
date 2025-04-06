@@ -182,7 +182,7 @@ void flush_timers(void)
 	pthread_mutex_unlock(&timer_lock);
 }
 
-int del_timer_sync(struct timer_list *timer)
+int timer_delete_sync(struct timer_list *timer)
 {
 	unsigned long seq;
 	ssize_t idx;
