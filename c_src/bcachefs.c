@@ -103,17 +103,6 @@ void bcachefs_usage(void)
 	     "  version                  Display the version of the invoked bcachefs tool\n");
 }
 
-static char *pop_cmd(int *argc, char *argv[])
-{
-	char *cmd = argv[1];
-	if (!(*argc < 2))
-		memmove(&argv[1], &argv[2], (*argc - 2) * sizeof(argv[0]));
-	(*argc)--;
-	argv[*argc] = NULL;
-
-	return cmd;
-}
-
 int fs_cmds(int argc, char *argv[])
 {
 	char *cmd = pop_cmd(&argc, argv);
@@ -126,49 +115,5 @@ int fs_cmds(int argc, char *argv[])
 		return cmd_fs_top(argc, argv);
 
 	fs_usage();
-	return -EINVAL;
-}
-
-int device_cmds(int argc, char *argv[])
-{
-	char *cmd = pop_cmd(&argc, argv);
-
-	if (argc < 1)
-		return device_usage();
-	if (!strcmp(cmd, "add"))
-		return cmd_device_add(argc, argv);
-	if (!strcmp(cmd, "remove"))
-		return cmd_device_remove(argc, argv);
-	if (!strcmp(cmd, "online"))
-		return cmd_device_online(argc, argv);
-	if (!strcmp(cmd, "offline"))
-		return cmd_device_offline(argc, argv);
-	if (!strcmp(cmd, "evacuate"))
-		return cmd_device_evacuate(argc, argv);
-	if (!strcmp(cmd, "set-state"))
-		return cmd_device_set_state(argc, argv);
-	if (!strcmp(cmd, "resize"))
-		return cmd_device_resize(argc, argv);
-	if (!strcmp(cmd, "resize-journal"))
-		return cmd_device_resize_journal(argc, argv);
-
-	device_usage();
-	return -EINVAL;
-}
-
-int data_cmds(int argc, char *argv[])
-{
-	char *cmd = pop_cmd(&argc, argv);
-
-	if (argc < 1)
-		return data_usage();
-	if (!strcmp(cmd, "rereplicate"))
-		return cmd_data_rereplicate(argc, argv);
-	if (!strcmp(cmd, "scrub"))
-		return cmd_data_scrub(argc, argv);
-	if (!strcmp(cmd, "job"))
-		return cmd_data_job(argc, argv);
-
-	data_usage();
 	return -EINVAL;
 }

@@ -19,20 +19,9 @@ int fs_usage(void);
 int cmd_fs_usage(int argc, char *argv[]);
 int cmd_fs_top(int argc, char *argv[]);
 
-int device_usage(void);
-int cmd_device_add(int argc, char *argv[]);
-int cmd_device_remove(int argc, char *argv[]);
-int cmd_device_online(int argc, char *argv[]);
-int cmd_device_offline(int argc, char *argv[]);
-int cmd_device_evacuate(int argc, char *argv[]);
-int cmd_device_set_state(int argc, char *argv[]);
-int cmd_device_resize(int argc, char *argv[]);
-int cmd_device_resize_journal(int argc, char *argv[]);
+int device_cmds(int argc, char *argv[]);
 
-int data_usage(void);
-int cmd_data_rereplicate(int argc, char *argv[]);
-int cmd_data_scrub(int argc, char *argv[]);
-int cmd_data_job(int argc, char *argv[]);
+int data_cmds(int argc, char *argv[]);
 
 int cmd_unlock(int argc, char *argv[]);
 int cmd_set_passphrase(int argc, char *argv[]);
@@ -59,9 +48,7 @@ int cmd_subvolume_snapshot(int argc, char *argv[]);
 int cmd_fusemount(int argc, char *argv[]);
 
 void bcachefs_usage(void);
-int device_cmds(int argc, char *argv[]);
 int fs_cmds(int argc, char *argv[]);
-int data_cmds(int argc, char *argv[]);
 int subvolume_cmds(int argc, char *argv[]);
 
 #endif /* _CMDS_H */

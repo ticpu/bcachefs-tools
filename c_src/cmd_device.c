@@ -23,25 +23,6 @@
 #include "libbcachefs/opts.h"
 #include "tools-util.h"
 
-int device_usage(void)
-{
-       puts("bcachefs device - manage devices within a running filesystem\n"
-            "Usage: bcachefs device <CMD> [OPTION]\n"
-            "\n"
-            "Commands:\n"
-            "  add                     add a new device to an existing filesystem\n"
-            "  remove                  remove a device from an existing filesystem\n"
-            "  online                  re-add an existing member to a filesystem\n"
-            "  offline                 take a device offline, without removing it\n"
-            "  evacuate                migrate data off a specific device\n"
-            "  set-state               mark a device as failed\n"
-            "  resize                  resize filesystem on a device\n"
-            "  resize-journal          resize journal on a device\n"
-            "\n"
-            "Report bugs to <linux-bcachefs@vger.kernel.org>");
-       return 0;
-}
-
 static void device_add_usage(void)
 {
 	puts("bcachefs device add - add a device to an existing filesystem\n"
@@ -58,7 +39,7 @@ static void device_add_usage(void)
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
-int cmd_device_add(int argc, char *argv[])
+static int cmd_device_add(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "label",		required_argument,	NULL, 'l' },
@@ -163,7 +144,7 @@ static void device_remove_usage(void)
 	exit(EXIT_SUCCESS);
 }
 
-int cmd_device_remove(int argc, char *argv[])
+static int cmd_device_remove(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "by-id",              0, NULL, 'i' },
@@ -229,7 +210,7 @@ static void device_online_usage(void)
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
-int cmd_device_online(int argc, char *argv[])
+static int cmd_device_online(int argc, char *argv[])
 {
 	int opt;
 
@@ -266,7 +247,7 @@ static void device_offline_usage(void)
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
-int cmd_device_offline(int argc, char *argv[])
+static int cmd_device_offline(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "force",		0, NULL, 'f' },
@@ -310,7 +291,7 @@ static void device_evacuate_usage(void)
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
-int cmd_device_evacuate(int argc, char *argv[])
+static int cmd_device_evacuate(int argc, char *argv[])
 {
 	int opt;
 
@@ -368,7 +349,7 @@ static void device_set_state_usage(void)
 	exit(EXIT_SUCCESS);
 }
 
-int cmd_device_set_state(int argc, char *argv[])
+static int cmd_device_set_state(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "force",			0, NULL, 'f' },
@@ -472,7 +453,7 @@ static void device_resize_usage(void)
 	exit(EXIT_SUCCESS);
 }
 
-int cmd_device_resize(int argc, char *argv[])
+static int cmd_device_resize(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "help",			0, NULL, 'h' },
@@ -574,7 +555,7 @@ static void device_resize_journal_usage(void)
 	exit(EXIT_SUCCESS);
 }
 
-int cmd_device_resize_journal(int argc, char *argv[])
+static int cmd_device_resize_journal(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "help",			0, NULL, 'h' },
@@ -655,4 +636,50 @@ int cmd_device_resize_journal(int argc, char *argv[])
 		bch2_fs_stop(c);
 	}
 	return 0;
+}
+
+static int device_usage(void)
+{
+       puts("bcachefs device - manage devices within a running filesystem\n"
+            "Usage: bcachefs device <CMD> [OPTION]\n"
+            "\n"
+            "Commands:\n"
+            "  add                     add a new device to an existing filesystem\n"
+            "  remove                  remove a device from an existing filesystem\n"
+            "  online                  re-add an existing member to a filesystem\n"
+            "  offline                 take a device offline, without removing it\n"
+            "  evacuate                migrate data off a specific device\n"
+            "  set-state               mark a device as failed\n"
+            "  resize                  resize filesystem on a device\n"
+            "  resize-journal          resize journal on a device\n"
+            "\n"
+            "Report bugs to <linux-bcachefs@vger.kernel.org>");
+       return 0;
+}
+
+int device_cmds(int argc, char *argv[])
+{
+	char *cmd = pop_cmd(&argc, argv);
+
+	if (argc < 1)
+		return device_usage();
+	if (!strcmp(cmd, "add"))
+		return cmd_device_add(argc, argv);
+	if (!strcmp(cmd, "remove"))
+		return cmd_device_remove(argc, argv);
+	if (!strcmp(cmd, "online"))
+		return cmd_device_online(argc, argv);
+	if (!strcmp(cmd, "offline"))
+		return cmd_device_offline(argc, argv);
+	if (!strcmp(cmd, "evacuate"))
+		return cmd_device_evacuate(argc, argv);
+	if (!strcmp(cmd, "set-state"))
+		return cmd_device_set_state(argc, argv);
+	if (!strcmp(cmd, "resize"))
+		return cmd_device_resize(argc, argv);
+	if (!strcmp(cmd, "resize-journal"))
+		return cmd_device_resize_journal(argc, argv);
+
+	device_usage();
+	return -EINVAL;
 }
