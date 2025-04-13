@@ -137,9 +137,6 @@ int cmd_format(int argc, char *argv[])
 	struct bch_opt_strs fs_opt_strs = {};
 	struct bch_opts fs_opts = bch2_opts_empty();
 
-	if (getenv("BCACHEFS_KERNEL_ONLY"))
-		initialize = false;
-
 	while (true) {
 		const struct bch_option *opt =
 			bch2_cmdline_opt_parse(argc, argv, OPT_FORMAT|OPT_FS|OPT_DEVICE);
@@ -258,34 +255,43 @@ int cmd_format(int argc, char *argv[])
 	if (unconsumed_dev_option)
 		die("Options for devices apply to subsequent devices; got a device option with no device");
 
-	if (opts.version != bcachefs_metadata_version_current)
-		initialize = false;
-
 	if (!devices.nr)
 		die("Please supply a device");
+
+	if (opts.source && !initialize)
+		die("--source, --no_initialize are incompatible");
 
 	if (opts.encrypted && !no_passphrase) {
 		opts.passphrase = read_passphrase_twice("Enter passphrase: ");
 		initialize = false;
 	}
 
+	if (!opts.source) {
+		if (getenv("BCACHEFS_KERNEL_ONLY"))
+			initialize = false;
+
+		if (opts.version != bcachefs_metadata_version_current) {
+			printf("version mismatch, not initializing");
+			if (opts.source)
+				die("--source, --version are incompatible");
+			initialize = false;
+		}
+	}
+
 	darray_for_each(devices, dev) {
 		int ret = open_for_format(dev, force);
 		if (ret)
-			die("Error opening %s: %s", dev_opts.path, strerror(-ret));
+			die("Error opening %s: %s", dev->path, strerror(-ret));
 	}
 
 	struct bch_sb *sb = bch2_format(fs_opt_strs, fs_opts, opts, devices);
-	bch2_opt_strs_free(&fs_opt_strs);
 
 	if (!quiet) {
 		struct printbuf buf = PRINTBUF;
-
 		buf.human_readable_units = true;
 
 		bch2_sb_to_text(&buf, sb, false, 1 << BCH_SB_FIELD_members_v2);
 		printf("%s", buf.buf);
-
 		printbuf_exit(&buf);
 	}
 	free(sb);
@@ -293,14 +299,6 @@ int cmd_format(int argc, char *argv[])
 	if (opts.passphrase) {
 		memzero_explicit(opts.passphrase, strlen(opts.passphrase));
 		free(opts.passphrase);
-	}
-
-	darray_exit(&devices);
-
-	/* don't skip initialization when we have to build an image from a source */
-	if (opts.source && !initialize) {
-		printf("Warning: Forcing the initialization because the source flag was supplied\n");
-		initialize = 1;
 	}
 
 	if (initialize) {
@@ -320,9 +318,9 @@ int cmd_format(int argc, char *argv[])
 
 		bch2_fs_stop(c);
 	}
-
+	bch2_opt_strs_free(&fs_opt_strs);
+	darray_exit(&devices);
 	darray_exit(&device_paths);
-
 	return 0;
 }
 
