@@ -16,6 +16,7 @@
 
 #include <uuid/uuid.h>
 
+#include <linux/fs.h>
 #include <linux/mm.h>
 
 #include "libbcachefs.h"
@@ -447,12 +448,19 @@ int bcache_fs_open_fallible(const char *path, struct bchfs_handle *fs)
 
 		fs->uuid = uuid.uuid;
 
-		char uuid_str[40];
-		uuid_unparse(uuid.uuid.b, uuid_str);
+		struct fs_sysfs_path fs_sysfs_path;
+		if (!ioctl(path_fd, FS_IOC_GETFSSYSFSPATH, &fs_sysfs_path)) {
+			char *sysfs = mprintf("/sys/fs/%s", fs_sysfs_path.name);
+			fs->sysfs_fd = xopen(sysfs, O_RDONLY);
+			free(sysfs);
+		} else {
+			char uuid_str[40];
+			uuid_unparse(uuid.uuid.b, uuid_str);
 
-		char *sysfs = mprintf(SYSFS_BASE "%s", uuid_str);
-		fs->sysfs_fd = xopen(sysfs, O_RDONLY);
-		free(sysfs);
+			char *sysfs = mprintf(SYSFS_BASE "%s", uuid_str);
+			fs->sysfs_fd = xopen(sysfs, O_RDONLY);
+			free(sysfs);
+		}
 		return 0;
 	}
 
