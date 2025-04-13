@@ -116,10 +116,6 @@ static void build_fs(struct bch_fs *c, const char *src_path)
 {
 	struct copy_fs_state s = {};
 	int src_fd = xopen(src_path, O_RDONLY|O_NOATIME);
-	struct stat stat = xfstat(src_fd);
-
-	if (!S_ISDIR(stat.st_mode))
-		die("%s is not a directory", src_path);
 
 	copy_fs(c, src_fd, src_path, &s, 0);
 }

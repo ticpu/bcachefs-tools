@@ -147,7 +147,7 @@ static ranges reserve_new_fs_space(const char *file_path, unsigned block_size,
 		range_add(&extents, e.fe_physical, e.fe_length);
 	}
 	fiemap_iter_exit(&iter);
-	close(fd);
+	xclose(fd);
 
 	ranges_sort_merge(&extents);
 	return extents;
@@ -425,7 +425,7 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	xpwrite(fd, zeroes, BCH_SB_SECTOR << 9, 0, "zeroing start of disk");
 
 	bch2_super_write(fd, sb);
-	close(fd);
+	xclose(fd);
 
 	/* mark new superblocks */
 

@@ -48,7 +48,7 @@ static void propagate_recurse(int dirfd)
 			continue;
 		}
 		propagate_recurse(fd);
-		close(fd);
+		xclose(fd);
 	}
 
 	if (errno)
@@ -80,7 +80,7 @@ static void do_setattr(char *path, struct bch_opt_strs opts)
 		die("error opening %s: %m", path);
 
 	propagate_recurse(dirfd);
-	close(dirfd);
+	xclose(dirfd);
 }
 
 static void setattr_usage(void)

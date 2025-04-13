@@ -356,8 +356,8 @@ static void aio_cleanup(void)
 
 	put_task_struct(p);
 
-	close(fds[0]);
-	close(fds[1]);
+	xclose(fds[0]);
+	xclose(fds[1]);
 }
 
 static void aio_op(struct bio *bio, struct iovec *iov, unsigned i, int opcode)

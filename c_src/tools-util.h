@@ -82,6 +82,12 @@ static inline void *xrealloc(void *p, size_t size)
 	_ret;								\
 })
 
+#define xclose(_fd)							\
+do {									\
+	if (close(_fd))							\
+		die("error closing fd: %m at %s:%u", __FILE__, __LINE__);\
+} while (0)
+
 void write_file_str(int, const char *, const char *);
 char *read_file_str(int, const char *);
 u64 read_file_u64(int, const char *);

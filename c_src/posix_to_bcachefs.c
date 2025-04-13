@@ -160,7 +160,7 @@ static void write_data(struct bch_fs *c,
 	op.nr_replicas	= 1;
 	op.subvol	= 1;
 	op.pos		= SPOS(dst_inode->bi_inum, dst_offset >> 9, U32_MAX);
-	op.flags |= BCH_WRITE_sync;
+	op.flags |= BCH_WRITE_sync|BCH_WRITE_only_specified_devs;
 
 	int ret = bch2_disk_reservation_get(c, &op.res, len >> 9,
 					    c->opts.data_replicas, 0);
@@ -345,7 +345,7 @@ static void copy_dir(struct copy_fs_state *s,
 		int fd;
 
 		if (fchdir(src_fd))
-			die("chdir error: %m");
+			die("fchdir error: %m");
 
 		struct stat stat =
 			xfstatat(src_fd, d->d_name, AT_SYMLINK_NOFOLLOW);
@@ -387,7 +387,7 @@ static void copy_dir(struct copy_fs_state *s,
 		case DT_DIR:
 			fd = xopen(d->d_name, O_RDONLY|O_NOATIME);
 			copy_dir(s, c, &inode, fd, child_path, reserve_start);
-			close(fd);
+			xclose(fd);
 			break;
 		case DT_REG:
 			inode.bi_size = stat.st_size;
@@ -395,7 +395,7 @@ static void copy_dir(struct copy_fs_state *s,
 			fd = xopen(d->d_name, O_RDONLY|O_NOATIME);
 			copy_file(c, &inode, fd, stat.st_size,
 				  child_path, s, reserve_start);
-			close(fd);
+			xclose(fd);
 			break;
 		case DT_LNK:
 			inode.bi_size = stat.st_size;
@@ -420,7 +420,6 @@ next:
 	}
 
 	darray_exit(&dirents);
-	closedir(dir);
 }
 
 static void reserve_old_fs_space(struct bch_fs *c,
@@ -454,7 +453,11 @@ static void reserve_old_fs_space(struct bch_fs *c,
 void copy_fs(struct bch_fs *c, int src_fd, const char *src_path,
 	     struct copy_fs_state *s, u64 reserve_start)
 {
-	syncfs(src_fd);
+	if (!S_ISDIR(xfstat(src_fd).st_mode))
+		die("%s is not a directory", src_path);
+
+	if (s->type == BCH_MIGRATE_migrate)
+		syncfs(src_fd);
 
 	struct bch_inode_unpacked root_inode;
 	int ret = bch2_inode_find_by_inum(c, (subvol_inum) { 1, BCACHEFS_ROOT_INO },
@@ -463,23 +466,20 @@ void copy_fs(struct bch_fs *c, int src_fd, const char *src_path,
 		die("error looking up root directory: %s", bch2_err_str(ret));
 
 	if (fchdir(src_fd))
-		die("chdir error: %m");
+		die("fchdir error: %m");
 
 	struct stat stat = xfstat(src_fd);
 	copy_times(c, &root_inode, &stat);
 	copy_xattrs(c, &root_inode, ".");
 
-
 	/* now, copy: */
 	copy_dir(s, c, &root_inode, src_fd, src_path, reserve_start);
 
-	if (BCH_MIGRATE_migrate == s->type)
+	if (s->type == BCH_MIGRATE_migrate)
 		reserve_old_fs_space(c, &root_inode, &s->extents, reserve_start);
 
 	update_inode(c, &root_inode);
 
-	if (BCH_MIGRATE_migrate == s->type)
-		darray_exit(&s->extents);
-
+	darray_exit(&s->extents);
 	genradix_free(&s->hardlinks);
 }

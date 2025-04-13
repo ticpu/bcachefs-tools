@@ -86,7 +86,8 @@ static int splice_fd_to_stdinout(int fd)
 			stdin_closed = true;
 	}
 
-	return close(fd);
+	xclose(fd);
+	return 0;
 }
 
 static int fsck_online(const char *dev_path, const char *opt_str)

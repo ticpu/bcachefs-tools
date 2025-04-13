@@ -107,7 +107,7 @@ void write_file_str(int dirfd, const char *path, const char *str)
 	wrote = write(fd, str, len);
 	if (wrote != len)
 		die("read error: %m");
-	close(fd);
+	xclose(fd);
 }
 
 char *read_file_str(int dirfd, const char *path)
@@ -129,7 +129,7 @@ char *read_file_str(int dirfd, const char *path)
 		buf = NULL;
 	}
 
-	close(fd);
+	xclose(fd);
 
 	return buf;
 }

@@ -167,7 +167,7 @@ static int cmd_data_scrub(int argc, char *argv[])
 
 			if (dev->progress_fd >= 0 &&
 			    read(dev->progress_fd, &e, sizeof(e)) != sizeof(e)) {
-				close(dev->progress_fd);
+				xclose(dev->progress_fd);
 				dev->progress_fd = -1;
 			}
 
@@ -186,7 +186,7 @@ static int cmd_data_scrub(int argc, char *argv[])
 			}
 
 			if (dev->progress_fd >= 0 && e.ret) {
-				close(dev->progress_fd);
+				xclose(dev->progress_fd);
 				dev->progress_fd = -1;
 				dev->ret = e.ret;
 			}

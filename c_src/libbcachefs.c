@@ -329,7 +329,7 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 		}
 
 		bch2_super_write(i->bdev->bd_fd, sb.sb);
-		close(i->bdev->bd_fd);
+		xclose(i->bdev->bd_fd);
 	}
 
 	return sb.sb;
@@ -402,8 +402,8 @@ int bcachectl_open(void)
 
 void bcache_fs_close(struct bchfs_handle fs)
 {
-	close(fs.ioctl_fd);
-	close(fs.sysfs_fd);
+	xclose(fs.ioctl_fd);
+	xclose(fs.sysfs_fd);
 }
 
 static int bcache_fs_open_by_uuid(const char *uuid_str, struct bchfs_handle *fs)
@@ -460,7 +460,7 @@ int bcache_fs_open_fallible(const char *path, struct bchfs_handle *fs)
 	char buf[1024], *uuid_str;
 
 	struct stat stat = xstat(path);
-	close(path_fd);
+	xclose(path_fd);
 
 	if (S_ISBLK(stat.st_mode)) {
 		char *sysfs = mprintf("/sys/dev/block/%u:%u/bcachefs",
@@ -607,7 +607,7 @@ int bchu_data(struct bchfs_handle fs, struct bch_ioctl_data cmd)
 	}
 	printf("\nDone\n");
 
-	close(progress_fd);
+	xclose(progress_fd);
 	return 0;
 }
 
@@ -830,7 +830,7 @@ void bch2_opts_usage(unsigned opt_types)
 
 dev_names bchu_fs_get_devices(struct bchfs_handle fs)
 {
-	DIR *dir = fdopendir(fs.sysfs_fd);
+	DIR *dir = fdopendir(dup(fs.sysfs_fd));
 	struct dirent *d;
 	dev_names devs;
 

@@ -172,7 +172,7 @@ int cmd_dump(int argc, char *argv[])
 		free(path);
 
 		dump_one_device(c, ca, fd, entire_journal);
-		close(fd);
+		xclose(fd);
 	}
 
 	up_read(&c->state_lock);

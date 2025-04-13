@@ -50,5 +50,5 @@ struct copy_fs_state {
  * initialized (`hardlinks` is initialized with zeroes).
  */
 void copy_fs(struct bch_fs *c, int src_fd, const char *src_path,
-		    struct copy_fs_state *s, u64);
+	     struct copy_fs_state *s, u64);
 #endif /* _LIBBCACHE_H */
