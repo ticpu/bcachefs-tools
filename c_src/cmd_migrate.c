@@ -281,8 +281,10 @@ static int migrate_fs(const char		*fs_path,
 		.type		= BCH_MIGRATE_migrate,
 	};
 
-	u64 reserve_start = round_up((format_opts.superblock_size * 2 + 8) << 9,
-				     dev->opts.bucket_size);
+
+	u64 reserve_start = roundup((format_opts.superblock_size * 2 + 8) << 9,
+				    bucket_bytes(c->devs[0]));
+	BUG_ON(!reserve_start);
 
 	copy_fs(c, fs_fd, fs_path, &s, reserve_start);
 
