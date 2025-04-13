@@ -112,7 +112,7 @@ u64 read_flag_list_or_die(char *opt, const char * const list[],
 	return v;
 }
 
-void build_fs(struct bch_fs *c, const char *src_path)
+static void build_fs(struct bch_fs *c, const char *src_path)
 {
 	struct copy_fs_state s = {};
 	int src_fd = xopen(src_path, O_RDONLY|O_NOATIME);
@@ -320,10 +320,8 @@ int cmd_format(int argc, char *argv[])
 			die("error opening %s: %s", device_paths.data[0],
 			    bch2_err_str(PTR_ERR(c)));
 
-		if (opts.source) {
+		if (opts.source)
 			build_fs(c, opts.source);
-		}
-
 
 		bch2_fs_stop(c);
 	}
