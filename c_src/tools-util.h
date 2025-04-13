@@ -98,7 +98,7 @@ ssize_t read_string_list_or_die(const char *, const char * const[],
 u64 get_size(int);
 unsigned get_blocksize(int);
 struct dev_opts;
-int open_for_format(struct dev_opts *, bool);
+int open_for_format(struct dev_opts *, blk_mode_t, bool);
 
 bool ask_yn(void);
 

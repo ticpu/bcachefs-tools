@@ -275,7 +275,7 @@ int cmd_format(int argc, char *argv[])
 	}
 
 	darray_for_each(devices, dev) {
-		int ret = open_for_format(dev, force);
+		int ret = open_for_format(dev, 0, force);
 		if (ret)
 			die("Error opening %s: %s", dev->path, strerror(-ret));
 	}

@@ -190,7 +190,10 @@ struct file *bdev_file_open_by_path(const char *path, blk_mode_t mode,
 	if (mode & BLK_OPEN_EXCL)
 		flags |= O_EXCL;
 
-	fd = open(path, flags);
+	if (mode & BLK_OPEN_CREAT)
+		flags |= O_CREAT;
+
+	fd = open(path, flags, 0600);
 	if (fd < 0)
 		return ERR_PTR(-errno);
 

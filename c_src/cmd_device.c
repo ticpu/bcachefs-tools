@@ -104,7 +104,7 @@ static int cmd_device_add(int argc, char *argv[])
 
 	struct bchfs_handle fs = bcache_fs_open(fs_path);
 
-	int ret = open_for_format(&dev_opts, force);
+	int ret = open_for_format(&dev_opts, 0, force);
 	if (ret)
 		die("Error opening %s: %s", dev_opts.path, strerror(-ret));
 

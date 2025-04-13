@@ -33,6 +33,7 @@ typedef unsigned int __bitwise blk_mode_t;
 #define BLK_OPEN_WRITE_IOCTL	((__force blk_mode_t)(1 << 4))
 
 #define BLK_OPEN_BUFFERED	((__force blk_mode_t)(1 << 5))
+#define BLK_OPEN_CREAT		((__force blk_mode_t)(1 << 6))
 
 struct inode {
 	unsigned long		i_ino;
