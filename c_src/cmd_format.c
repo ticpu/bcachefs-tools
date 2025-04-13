@@ -304,18 +304,13 @@ int cmd_format(int argc, char *argv[])
 	}
 
 	if (initialize) {
-		struct bch_opts mount_opts = bch2_opts_empty();
-
-
-		opt_set(mount_opts, verbose, verbose);
-
 		/*
 		 * Start the filesystem once, to allocate the journal and create
 		 * the root directory:
 		 */
 		struct bch_fs *c = bch2_fs_open(device_paths.data,
 						device_paths.nr,
-						mount_opts);
+						bch2_opts_empty());
 		if (IS_ERR(c))
 			die("error opening %s: %s", device_paths.data[0],
 			    bch2_err_str(PTR_ERR(c)));
