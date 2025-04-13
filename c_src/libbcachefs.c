@@ -315,7 +315,7 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 		 * means we're being run from the migrate tool and we could be
 		 * overwriting existing data if we write to the end of the disk:
 		 */
-		if (i->sb_offset == BCH_SB_SECTOR) {
+		if (i->sb_offset == BCH_SB_SECTOR && !opts.no_sb_at_end) {
 			struct bch_sb_layout *l = &sb.sb->layout;
 			u64 backup_sb = size_sectors - (1 << l->sb_max_size_bits);
 

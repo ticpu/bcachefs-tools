@@ -43,6 +43,7 @@ struct format_opts {
 	bool		encrypted;
 	char		*passphrase;
 	char		*source;
+	bool		no_sb_at_end;
 };
 
 static inline unsigned bcachefs_kernel_version(void)
