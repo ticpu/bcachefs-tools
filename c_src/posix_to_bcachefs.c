@@ -319,7 +319,8 @@ static int dirent_cmp(const void *_l, const void *_r)
 	const struct dirent *l = _l;
 	const struct dirent *r = _r;
 
-	return strcmp(l->d_name, r->d_name);
+	return  cmp_int(l->d_type, r->d_type) ?:
+		strcmp(l->d_name, r->d_name);
 }
 
 static void copy_dir(struct copy_fs_state *s,
