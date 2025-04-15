@@ -125,7 +125,7 @@ static ranges reserve_new_fs_space(const char *file_path, unsigned block_size,
 	*bcachefs_inum = statbuf.st_ino;
 
 	if (fallocate(fd, 0, 0, size))
-		die("Error reserving space for bcachefs metadata: %m");
+		die("Error reserving space (%llu bytes) for bcachefs metadata: %m", size);
 
 	fsync(fd);
 
@@ -238,7 +238,7 @@ static int migrate_fs(const char		*fs_path,
 	u64 bcachefs_inum;
 	ranges extents = reserve_new_fs_space(file_path,
 				fs_opts.block_size >> 9,
-				get_size(dev->bdev->bd_fd) / 5,
+				get_size(dev->bdev->bd_fd) / 10,
 				&bcachefs_inum, stat.st_dev, force);
 
 	find_superblock_space(extents, format_opts, dev);
