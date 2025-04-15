@@ -428,6 +428,14 @@ static int bcache_fs_open_by_name(const char *name, struct bchfs_handle *fs)
 	return fs->ioctl_fd < 0 ? -errno : 0;
 }
 
+#ifndef FS_IOC_GETFSSYSFSPATH
+struct fs_sysfs_path {
+	__u8			len;
+	__u8			name[128];
+};
+#define FS_IOC_GETFSSYSFSPATH	_IOR(0x15, 1, struct fs_sysfs_path)
+#endif
+
 int bcache_fs_open_fallible(const char *path, struct bchfs_handle *fs)
 {
 	memset(fs, 0, sizeof(*fs));
