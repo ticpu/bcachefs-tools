@@ -407,12 +407,12 @@ void bcache_fs_close(struct bchfs_handle fs)
 	xclose(fs.sysfs_fd);
 }
 
-static int bcache_fs_open_by_uuid(const char *uuid_str, struct bchfs_handle *fs)
+static int bcache_fs_open_by_name(const char *name, struct bchfs_handle *fs)
 {
-	if (uuid_parse(uuid_str, fs->uuid.b))
-		return -1;
+	if (uuid_parse(name, fs->uuid.b))
+		memset(&fs->uuid, 0, sizeof(fs->uuid));
 
-	char *sysfs = mprintf(SYSFS_BASE "%s", uuid_str);
+	char *sysfs = mprintf(SYSFS_BASE "%s", name);
 	fs->sysfs_fd = open(sysfs, O_RDONLY);
 	free(sysfs);
 
@@ -434,7 +434,7 @@ int bcache_fs_open_fallible(const char *path, struct bchfs_handle *fs)
 	fs->dev_idx = -1;
 
 	if (!uuid_parse(path, fs->uuid.b))
-		return bcache_fs_open_by_uuid(path, fs);
+		return bcache_fs_open_by_name(path, fs);
 
 	/* It's a path: */
 	int path_fd = open(path, O_RDONLY);
@@ -505,7 +505,7 @@ read_super:
 		bch2_free_super(&sb);
 	}
 
-	return bcache_fs_open_by_uuid(uuid_str, fs);
+	return bcache_fs_open_by_name(uuid_str, fs);
 }
 
 struct bchfs_handle bcache_fs_open(const char *path)
@@ -524,14 +524,14 @@ struct bchfs_handle bcache_fs_open(const char *path)
 struct bchfs_handle bchu_fs_open_by_dev(const char *path, int *idx)
 {
 	struct bch_opts opts = bch2_opts_empty();
-	char buf[1024], *uuid_str;
+	char buf[1024], *fs_str;
 
 	struct stat stat = xstat(path);
 
 	if (S_ISBLK(stat.st_mode)) {
 		char *sysfs = mprintf("/sys/dev/block/%u:%u/bcachefs",
-				      major(stat.st_dev),
-				      minor(stat.st_dev));
+				      major(stat.st_rdev),
+				      minor(stat.st_rdev));
 
 		ssize_t len = readlink(sysfs, buf, sizeof(buf));
 		free(sysfs);
@@ -539,13 +539,19 @@ struct bchfs_handle bchu_fs_open_by_dev(const char *path, int *idx)
 		if (len <= 0)
 			goto read_super;
 
-		char *p = strrchr(buf, '/');
-		if (!p || sscanf(p + 1, "dev-%u", idx) != 1)
+		fs_str = strstr(buf, "bcachefs/");
+		if (!fs_str)
 			die("error parsing sysfs");
 
-		*p = '\0';
-		p = strrchr(buf, '/');
-		uuid_str = p + 1;
+		fs_str += 9;
+		char *dev_str = strchr(fs_str, '/');
+		if (!dev_str)
+			die("error parsing sysfs");
+
+		*dev_str = '\0';
+		dev_str++;
+		if (sscanf(dev_str, "dev-%u", idx) != 1)
+			die("error parsing sysfs");
 	} else {
 read_super:
 		opt_set(opts, noexcl,	true);
@@ -557,13 +563,18 @@ read_super:
 			die("Error opening %s: %s", path, strerror(-ret));
 
 		*idx = sb.sb->dev_idx;
-		uuid_str = buf;
-		uuid_unparse(sb.sb->user_uuid.b, uuid_str);
+		fs_str = buf;
+		uuid_unparse(sb.sb->user_uuid.b, fs_str);
 
 		bch2_free_super(&sb);
 	}
 
-	return bcache_fs_open(uuid_str);
+	struct bchfs_handle fs;
+	int ret = bcache_fs_open_by_name(fs_str, &fs);
+	if (ret)
+		die("Error opening filesystem at %s (%s): %s",
+		    path, fs_str, strerror(-ret));
+	return fs;
 }
 
 int bchu_dev_path_to_idx(struct bchfs_handle fs, const char *dev_path)
