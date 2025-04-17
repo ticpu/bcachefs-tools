@@ -61,6 +61,7 @@ fn main() {
         .allowlist_function("keyctl_search")
         .allowlist_function("match_string")
         .allowlist_function("printbuf.*")
+        .blocklist_function("bch2_prt_vprintf")
         .blocklist_type("rhash_lock_head")
         .blocklist_type("srcu_struct")
         .allowlist_var("BCH_.*")
