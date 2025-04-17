@@ -192,8 +192,6 @@
 	x(BCH_ERR_data_update_done,	data_update_done_no_rw_devs)		\
 	x(EINVAL,			device_state_not_allowed)		\
 	x(EINVAL,			member_info_missing)			\
-	x(EINVAL,			single_device_filesystem)		\
-	x(EINVAL,			not_single_device_filesystem)		\
 	x(EINVAL,			mismatched_block_size)			\
 	x(EINVAL,			block_size_too_small)			\
 	x(EINVAL,			bucket_size_too_small)			\
@@ -203,6 +201,7 @@
 	x(EINVAL,			device_has_been_removed)		\
 	x(EINVAL,			device_splitbrain)			\
 	x(EINVAL,			device_already_online)			\
+	x(EINVAL,			filesystem_uuid_already_open)		\
 	x(EINVAL,			insufficient_devices_to_start)		\
 	x(EINVAL,			invalid)				\
 	x(EINVAL,			internal_fsck_err)			\
@@ -222,6 +221,8 @@
 	x(EROFS,			erofs_unfixed_errors)			\
 	x(EROFS,			erofs_norecovery)			\
 	x(EROFS,			erofs_nochanges)			\
+	x(EROFS,			erofs_no_alloc_info)			\
+	x(EROFS,			erofs_filesystem_full)			\
 	x(EROFS,			insufficient_devices)			\
 	x(0,				operation_blocked)			\
 	x(BCH_ERR_operation_blocked,	btree_cache_cannibalize_lock_blocked)	\
@@ -290,7 +291,7 @@
 	x(EIO,				mark_stripe)				\
 	x(EIO,				stripe_reconstruct)			\
 	x(EIO,				key_type_error)				\
-	x(EIO,				extent_poisened)			\
+	x(EIO,				extent_poisoned)			\
 	x(EIO,				missing_indirect_extent)		\
 	x(EIO,				invalidate_stripe_to_dev)		\
 	x(EIO,				no_encryption_key)			\

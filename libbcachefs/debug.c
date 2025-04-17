@@ -933,7 +933,7 @@ void bch2_fs_debug_init(struct bch_fs *c)
 	if (IS_ERR_OR_NULL(bch_debug))
 		return;
 
-	if (!c->opts.single_device)
+	if (c->sb.multi_device)
 		snprintf(name, sizeof(name), "%pU", c->sb.user_uuid.b);
 	else
 		strscpy(name, c->name, sizeof(name));

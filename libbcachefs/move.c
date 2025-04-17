@@ -423,6 +423,9 @@ static struct bch_io_opts *bch2_move_get_io_opts(struct btree_trans *trans,
 	struct bch_io_opts *opts_ret = &io_opts->fs_io_opts;
 	int ret = 0;
 
+	if (extent_iter->min_depth)
+		return opts_ret;
+
 	if (extent_k.k->type == KEY_TYPE_reflink_v)
 		goto out;
 
@@ -573,11 +576,11 @@ static struct bkey_s_c bch2_lookup_indirect_extent_for_move(struct btree_trans *
 	return k;
 }
 
-static int bch2_move_data_btree(struct moving_context *ctxt,
-				struct bpos start,
-				struct bpos end,
-				move_pred_fn pred, void *arg,
-				enum btree_id btree_id)
+int bch2_move_data_btree(struct moving_context *ctxt,
+			 struct bpos start,
+			 struct bpos end,
+			 move_pred_fn pred, void *arg,
+			 enum btree_id btree_id, unsigned level)
 {
 	struct btree_trans *trans = ctxt->trans;
 	struct bch_fs *c = trans->c;
@@ -603,11 +606,56 @@ static int bch2_move_data_btree(struct moving_context *ctxt,
 		ctxt->stats->pos	= BBPOS(btree_id, start);
 	}
 
+retry_root:
 	bch2_trans_begin(trans);
-	bch2_trans_iter_init(trans, &iter, btree_id, start,
-			     BTREE_ITER_prefetch|
-			     BTREE_ITER_not_extents|
-			     BTREE_ITER_all_snapshots);
+
+	if (level == bch2_btree_id_root(c, btree_id)->level + 1) {
+		bch2_trans_node_iter_init(trans, &iter, btree_id, start, 0, level - 1,
+					  BTREE_ITER_prefetch|
+					  BTREE_ITER_not_extents|
+					  BTREE_ITER_all_snapshots);
+		struct btree *b = bch2_btree_iter_peek_node(trans, &iter);
+		ret = PTR_ERR_OR_ZERO(b);
+		if (ret)
+			goto root_err;
+
+		if (b != btree_node_root(c, b)) {
+			bch2_trans_iter_exit(trans, &iter);
+			goto retry_root;
+		}
+
+		k = bkey_i_to_s_c(&b->key);
+
+		io_opts = bch2_move_get_io_opts(trans, &snapshot_io_opts,
+						iter.pos, &iter, k);
+		ret = PTR_ERR_OR_ZERO(io_opts);
+		if (ret)
+			goto root_err;
+
+		memset(&data_opts, 0, sizeof(data_opts));
+		if (!pred(c, arg, iter.btree_id, k, io_opts, &data_opts))
+			goto out;
+
+
+		if (!data_opts.scrub)
+			ret = bch2_btree_node_rewrite_pos(trans, btree_id, level,
+							  k.k->p, data_opts.target, 0);
+		else
+			ret = bch2_btree_node_scrub(trans, btree_id, level, k, data_opts.read_dev);
+
+root_err:
+		if (bch2_err_matches(ret, BCH_ERR_transaction_restart)) {
+			bch2_trans_iter_exit(trans, &iter);
+			goto retry_root;
+		}
+
+		goto out;
+	}
+
+	bch2_trans_node_iter_init(trans, &iter, btree_id, start, 0, level,
+				  BTREE_ITER_prefetch|
+				  BTREE_ITER_not_extents|
+				  BTREE_ITER_all_snapshots);
 
 	if (ctxt->rate)
 		bch2_ratelimit_reset(ctxt->rate);
@@ -667,7 +715,7 @@ static int bch2_move_data_btree(struct moving_context *ctxt,
 			continue;
 
 		memset(&data_opts, 0, sizeof(data_opts));
-		if (!pred(c, arg, k, io_opts, &data_opts))
+		if (!pred(c, arg, extent_iter->btree_id, k, io_opts, &data_opts))
 			goto next;
 
 		/*
@@ -677,7 +725,14 @@ static int bch2_move_data_btree(struct moving_context *ctxt,
 		bch2_bkey_buf_reassemble(&sk, c, k);
 		k = bkey_i_to_s_c(sk.k);
 
-		ret2 = bch2_move_extent(ctxt, NULL, extent_iter, k, *io_opts, data_opts);
+		if (!level)
+			ret2 = bch2_move_extent(ctxt, NULL, extent_iter, k, *io_opts, data_opts);
+		else if (!data_opts.scrub)
+			ret2 = bch2_btree_node_rewrite_pos(trans, btree_id, level,
+							  k.k->p, data_opts.target, 0);
+		else
+			ret2 = bch2_btree_node_scrub(trans, btree_id, level, k, data_opts.read_dev);
+
 		if (ret2) {
 			if (bch2_err_matches(ret2, BCH_ERR_transaction_restart))
 				continue;
@@ -697,7 +752,7 @@ next:
 next_nondata:
 		bch2_btree_iter_advance(trans, &iter);
 	}
-
+out:
 	bch2_trans_iter_exit(trans, &reflink_iter);
 	bch2_trans_iter_exit(trans, &iter);
 	bch2_bkey_buf_exit(&sk, c);
@@ -727,7 +782,7 @@ int __bch2_move_data(struct moving_context *ctxt,
 		ret = bch2_move_data_btree(ctxt,
 				       id == start.btree ? start.pos : POS_MIN,
 				       id == end.btree   ? end.pos   : POS_MAX,
-				       pred, arg, id);
+				       pred, arg, id, 0);
 		if (ret)
 			break;
 	}
@@ -850,7 +905,7 @@ static int __bch2_move_data_phys(struct moving_context *ctxt,
 		}
 
 		struct data_update_opts data_opts = {};
-		if (!pred(c, arg, k, &io_opts, &data_opts)) {
+		if (!pred(c, arg, bp.v->btree_id, k, &io_opts, &data_opts)) {
 			bch2_trans_iter_exit(trans, &iter);
 			goto next;
 		}
@@ -871,7 +926,8 @@ static int __bch2_move_data_phys(struct moving_context *ctxt,
 		if (!bp.v->level)
 			ret = bch2_move_extent(ctxt, bucket_in_flight, &iter, k, io_opts, data_opts);
 		else if (!data_opts.scrub)
-			ret = bch2_btree_node_rewrite_pos(trans, bp.v->btree_id, bp.v->level, k.k->p, 0);
+			ret = bch2_btree_node_rewrite_pos(trans, bp.v->btree_id, bp.v->level,
+							  k.k->p, data_opts.target, 0);
 		else
 			ret = bch2_btree_node_scrub(trans, bp.v->btree_id, bp.v->level, k, data_opts.read_dev);
 
@@ -899,16 +955,16 @@ err:
 	return ret;
 }
 
-static int bch2_move_data_phys(struct bch_fs *c,
-			       unsigned dev,
-			       u64 start,
-			       u64 end,
-			       unsigned data_types,
-			       struct bch_ratelimit *rate,
-			       struct bch_move_stats *stats,
-			       struct write_point_specifier wp,
-			       bool wait_on_copygc,
-			       move_pred_fn pred, void *arg)
+int bch2_move_data_phys(struct bch_fs *c,
+			unsigned dev,
+			u64 start,
+			u64 end,
+			unsigned data_types,
+			struct bch_ratelimit *rate,
+			struct bch_move_stats *stats,
+			struct write_point_specifier wp,
+			bool wait_on_copygc,
+			move_pred_fn pred, void *arg)
 {
 	struct moving_context ctxt;
 
@@ -932,7 +988,8 @@ struct evacuate_bucket_arg {
 	struct data_update_opts	data_opts;
 };
 
-static bool evacuate_bucket_pred(struct bch_fs *c, void *_arg, struct bkey_s_c k,
+static bool evacuate_bucket_pred(struct bch_fs *c, void *_arg,
+				 enum btree_id btree, struct bkey_s_c k,
 				 struct bch_io_opts *io_opts,
 				 struct data_update_opts *data_opts)
 {
@@ -1021,7 +1078,7 @@ retry:
 			if (!pred(c, arg, b, &io_opts, &data_opts))
 				goto next;
 
-			ret = bch2_btree_node_rewrite(trans, &iter, b, 0) ?: ret;
+			ret = bch2_btree_node_rewrite(trans, &iter, b, 0, 0) ?: ret;
 			if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 				continue;
 			if (ret)
@@ -1046,7 +1103,7 @@ next:
 }
 
 static bool rereplicate_pred(struct bch_fs *c, void *arg,
-			     struct bkey_s_c k,
+			     enum btree_id btree, struct bkey_s_c k,
 			     struct bch_io_opts *io_opts,
 			     struct data_update_opts *data_opts)
 {
@@ -1078,7 +1135,7 @@ static bool rereplicate_pred(struct bch_fs *c, void *arg,
 }
 
 static bool migrate_pred(struct bch_fs *c, void *arg,
-			 struct bkey_s_c k,
+			 enum btree_id btree, struct bkey_s_c k,
 			 struct bch_io_opts *io_opts,
 			 struct data_update_opts *data_opts)
 {
@@ -1105,7 +1162,7 @@ static bool rereplicate_btree_pred(struct bch_fs *c, void *arg,
 				   struct bch_io_opts *io_opts,
 				   struct data_update_opts *data_opts)
 {
-	return rereplicate_pred(c, arg, bkey_i_to_s_c(&b->key), io_opts, data_opts);
+	return rereplicate_pred(c, arg, b->c.btree_id, bkey_i_to_s_c(&b->key), io_opts, data_opts);
 }
 
 /*
@@ -1161,7 +1218,7 @@ int bch2_scan_old_btree_nodes(struct bch_fs *c, struct bch_move_stats *stats)
 }
 
 static bool drop_extra_replicas_pred(struct bch_fs *c, void *arg,
-			     struct bkey_s_c k,
+			     enum btree_id btree, struct bkey_s_c k,
 			     struct bch_io_opts *io_opts,
 			     struct data_update_opts *data_opts)
 {
@@ -1194,11 +1251,12 @@ static bool drop_extra_replicas_btree_pred(struct bch_fs *c, void *arg,
 				   struct bch_io_opts *io_opts,
 				   struct data_update_opts *data_opts)
 {
-	return drop_extra_replicas_pred(c, arg, bkey_i_to_s_c(&b->key), io_opts, data_opts);
+	return drop_extra_replicas_pred(c, arg, b->c.btree_id, bkey_i_to_s_c(&b->key),
+					io_opts, data_opts);
 }
 
 static bool scrub_pred(struct bch_fs *c, void *_arg,
-		       struct bkey_s_c k,
+		       enum btree_id btree, struct bkey_s_c k,
 		       struct bch_io_opts *io_opts,
 		       struct data_update_opts *data_opts)
 {

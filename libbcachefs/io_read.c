@@ -35,12 +35,6 @@ module_param_named(read_corrupt_ratio, bch2_read_corrupt_ratio, uint, 0644);
 MODULE_PARM_DESC(read_corrupt_ratio, "");
 #endif
 
-static bool bch2_poison_extents_on_checksum_error;
-module_param_named(poison_extents_on_checksum_error,
-		   bch2_poison_extents_on_checksum_error, bool, 0644);
-MODULE_PARM_DESC(poison_extents_on_checksum_error,
-		 "Extents with checksum errors are marked as poisoned - unsafe without read fua support");
-
 #ifndef CONFIG_BCACHEFS_NO_LATENCY_ACCT
 
 static bool bch2_target_congested(struct bch_fs *c, u16 target)
@@ -469,9 +463,6 @@ static void get_rbio_extent(struct btree_trans *trans,
 static noinline int maybe_poison_extent(struct btree_trans *trans, struct bch_read_bio *rbio,
 					enum btree_id btree, struct bkey_s_c read_k)
 {
-	if (!bch2_poison_extents_on_checksum_error)
-		return 0;
-
 	struct bch_fs *c = trans->c;
 
 	struct data_update *u = rbio_data_update(rbio);
@@ -570,6 +561,7 @@ static void bch2_rbio_retry(struct work_struct *work)
 		.inum	= rbio->read_pos.inode,
 	};
 	struct bch_io_failures failed = { .nr = 0 };
+	int orig_error = rbio->ret;
 
 	struct btree_trans *trans = bch2_trans_get(c);
 
@@ -610,7 +602,9 @@ static void bch2_rbio_retry(struct work_struct *work)
 	if (ret) {
 		rbio->ret = ret;
 		rbio->bio.bi_status = BLK_STS_IOERR;
-	} else {
+	} else if (orig_error != -BCH_ERR_data_read_retry_csum_err_maybe_userspace &&
+		   orig_error != -BCH_ERR_data_read_ptr_stale_race &&
+		   !failed.nr) {
 		struct printbuf buf = PRINTBUF;
 
 		lockrestart_do(trans,
@@ -1054,7 +1048,7 @@ int __bch2_read_extent(struct btree_trans *trans, struct bch_read_bio *orig,
 
 	if ((bch2_bkey_extent_flags(k) & BIT_ULL(BCH_EXTENT_FLAG_poisoned)) &&
 	    !orig->data_update)
-		return -BCH_ERR_extent_poisened;
+		return -BCH_ERR_extent_poisoned;
 retry_pick:
 	ret = bch2_bkey_pick_read_device(c, k, failed, &pick, dev);
 
@@ -1239,6 +1233,10 @@ retry_pick:
 	rbio->bio.bi_opf	= orig->bio.bi_opf;
 	rbio->bio.bi_iter.bi_sector = pick.ptr.offset;
 	rbio->bio.bi_end_io	= bch2_read_endio;
+
+	/* XXX: also nvme read recovery level */
+	if (unlikely(failed && bch2_dev_io_failures(failed, pick.ptr.dev)))
+		rbio->bio.bi_opf |= REQ_FUA;
 
 	if (rbio->bounce)
 		trace_and_count(c, io_read_bounce, &rbio->bio);
@@ -1459,13 +1457,15 @@ err:
 	}
 
 	if (unlikely(ret)) {
-		struct printbuf buf = PRINTBUF;
-		lockrestart_do(trans,
-			bch2_inum_offset_err_msg_trans(trans, &buf, inum,
-						       bvec_iter.bi_sector << 9));
-		prt_printf(&buf, "read error: %s", bch2_err_str(ret));
-		bch_err_ratelimited(c, "%s", buf.buf);
-		printbuf_exit(&buf);
+		if (ret != -BCH_ERR_extent_poisoned) {
+			struct printbuf buf = PRINTBUF;
+			lockrestart_do(trans,
+				       bch2_inum_offset_err_msg_trans(trans, &buf, inum,
+								      bvec_iter.bi_sector << 9));
+			prt_printf(&buf, "data read error: %s", bch2_err_str(ret));
+			bch_err_ratelimited(c, "%s", buf.buf);
+			printbuf_exit(&buf);
+		}
 
 		rbio->bio.bi_status	= BLK_STS_IOERR;
 		rbio->ret		= ret;

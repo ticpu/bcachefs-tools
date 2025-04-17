@@ -842,7 +842,7 @@ LE64_BITMASK(BCH_SB_SHARD_INUMS,	struct bch_sb, flags[3], 28, 29);
 LE64_BITMASK(BCH_SB_INODES_USE_KEY_CACHE,struct bch_sb, flags[3], 29, 30);
 LE64_BITMASK(BCH_SB_JOURNAL_FLUSH_DELAY,struct bch_sb, flags[3], 30, 62);
 LE64_BITMASK(BCH_SB_JOURNAL_FLUSH_DISABLED,struct bch_sb, flags[3], 62, 63);
-LE64_BITMASK(BCH_SB_SINGLE_DEVICE,	struct bch_sb,	flags[3], 63, 64);
+LE64_BITMASK(BCH_SB_MULTI_DEVICE,	struct bch_sb,	flags[3], 63, 64);
 LE64_BITMASK(BCH_SB_JOURNAL_RECLAIM_DELAY,struct bch_sb, flags[4], 0, 32);
 LE64_BITMASK(BCH_SB_JOURNAL_TRANSACTION_NAMES,struct bch_sb, flags[4], 32, 33);
 LE64_BITMASK(BCH_SB_NOCOW,		struct bch_sb, flags[4], 33, 34);
@@ -918,7 +918,9 @@ static inline void SET_BCH_SB_BACKGROUND_COMPRESSION_TYPE(struct bch_sb *sb, __u
 	x(alloc_v2,			17)	\
 	x(extents_across_btree_nodes,	18)	\
 	x(incompat_version_field,	19)	\
-	x(casefolding,			20)
+	x(casefolding,			20)	\
+	x(no_alloc_info,		21)	\
+	x(small_image,			22)
 
 #define BCH_SB_FEATURES_ALWAYS				\
 	(BIT_ULL(BCH_FEATURE_new_extent_overwrite)|	\

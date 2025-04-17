@@ -445,7 +445,7 @@ enum fsck_err_opts {
 	  BCH2_NO_SB_OPT,		false,				\
 	  NULL,		"Reconstruct alloc btree")			\
 	x(version_upgrade,		u8,				\
-	  OPT_FS|OPT_MOUNT,						\
+	  OPT_FS|OPT_MOUNT|OPT_RUNTIME,					\
 	  OPT_STR(bch2_version_upgrade_opts),				\
 	  BCH_SB_VERSION_UPGRADE,	BCH_VERSION_UPGRADE_compatible,	\
 	  NULL,		"Set superblock to latest version,\n"		\
@@ -522,12 +522,7 @@ enum fsck_err_opts {
 	  OPT_BOOL(),							\
 	  BCH2_NO_SB_OPT,		true,				\
 	  NULL,		"BTREE_ITER_prefetch causes btree nodes to be\n"\
-	  " prefetched sequentially")					\
-	x(single_device,		u8,				\
-	  OPT_FS|OPT_MOUNT|OPT_RUNTIME,					\
-	  OPT_BOOL(),							\
-	  BCH_SB_SINGLE_DEVICE,		false,				\
-	  NULL,		"Devices with the same UUID may be mounted simultaneously")
+	  " prefetched sequentially")
 
 struct bch_opts {
 #define x(_name, _bits, ...)	unsigned _name##_defined:1;
@@ -612,10 +607,10 @@ void bch2_opt_set_by_id(struct bch_opts *, enum bch_opt_id, u64);
 
 u64 bch2_opt_from_sb(struct bch_sb *, enum bch_opt_id, int);
 int bch2_opts_from_sb(struct bch_opts *, struct bch_sb *);
-void __bch2_opt_set_sb(struct bch_sb *, int, const struct bch_option *, u64);
+bool __bch2_opt_set_sb(struct bch_sb *, int, const struct bch_option *, u64);
 
 struct bch_dev;
-void bch2_opt_set_sb(struct bch_fs *, struct bch_dev *, const struct bch_option *, u64);
+bool bch2_opt_set_sb(struct bch_fs *, struct bch_dev *, const struct bch_option *, u64);
 
 int bch2_opt_lookup(const char *);
 int bch2_opt_validate(const struct bch_option *, u64, struct printbuf *);
@@ -632,8 +627,11 @@ void bch2_opts_to_text(struct printbuf *,
 		       struct bch_fs *, struct bch_sb *,
 		       unsigned, unsigned, unsigned);
 
-int bch2_opt_check_may_set(struct bch_fs *, struct bch_dev *, int, u64);
-int bch2_opts_check_may_set(struct bch_fs *);
+int bch2_opt_hook_pre_set(struct bch_fs *, struct bch_dev *, enum bch_opt_id, u64);
+int bch2_opts_hooks_pre_set(struct bch_fs *);
+void bch2_opt_hook_post_set(struct bch_fs *, struct bch_dev *, u64,
+			    struct bch_opts *, enum bch_opt_id);
+
 int bch2_parse_one_mount_opt(struct bch_fs *, struct bch_opts *,
 			     struct printbuf *, const char *, const char *);
 int bch2_parse_mount_opts(struct bch_fs *, struct bch_opts *, struct printbuf *,

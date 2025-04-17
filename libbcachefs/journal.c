@@ -173,7 +173,7 @@ journal_error_check_stuck(struct journal *j, int error, unsigned flags)
 	spin_unlock(&j->lock);
 	prt_printf(&buf, bch2_fmt(c, "Journal stuck! Hava a pre-reservation but journal full (error %s)"),
 				  bch2_err_str(error));
-	bch2_print_string_as_lines(KERN_ERR, buf.buf);
+	bch2_print_str(c, KERN_ERR, buf.buf);
 
 	printbuf_reset(&buf);
 	bch2_journal_pins_to_text(&buf, j);
@@ -314,16 +314,6 @@ static void __journal_entry_close(struct journal *j, unsigned closed_val, bool t
 	__bch2_journal_buf_put(j, le64_to_cpu(buf->data->seq));
 }
 
-void bch2_journal_halt(struct journal *j)
-{
-	spin_lock(&j->lock);
-	__journal_entry_close(j, JOURNAL_ENTRY_ERROR_VAL, true);
-	if (!j->err_seq)
-		j->err_seq = journal_cur_seq(j);
-	journal_wake(j);
-	spin_unlock(&j->lock);
-}
-
 void bch2_journal_halt_locked(struct journal *j)
 {
 	lockdep_assert_held(&j->lock);
@@ -332,6 +322,13 @@ void bch2_journal_halt_locked(struct journal *j)
 	if (!j->err_seq)
 		j->err_seq = journal_cur_seq(j);
 	journal_wake(j);
+}
+
+void bch2_journal_halt(struct journal *j)
+{
+	spin_lock(&j->lock);
+	bch2_journal_halt_locked(j);
+	spin_unlock(&j->lock);
 }
 
 static bool journal_entry_want_write(struct journal *j)
@@ -729,7 +726,7 @@ int bch2_journal_res_get_slowpath(struct journal *j, struct journal_res *res,
 
 	struct printbuf buf = PRINTBUF;
 	bch2_journal_debug_to_text(&buf, j);
-	bch2_print_string_as_lines(KERN_ERR, buf.buf);
+	bch2_print_str(c, KERN_ERR, buf.buf);
 	prt_printf(&buf, bch2_fmt(c, "Journal stuck? Waited for 10 seconds, err %s"), bch2_err_str(ret));
 	printbuf_exit(&buf);
 
@@ -1281,6 +1278,16 @@ int bch2_set_nr_journal_buckets(struct bch_fs *c, struct bch_dev *ca,
 
 int bch2_dev_journal_alloc(struct bch_dev *ca, bool new_fs)
 {
+	struct bch_fs *c = ca->fs;
+
+	if (!(ca->mi.data_allowed & BIT(BCH_DATA_journal)))
+		return 0;
+
+	if (c->sb.features & BIT_ULL(BCH_FEATURE_small_image)) {
+		bch_err(c, "cannot allocate journal, filesystem is an unresized image file");
+		return -BCH_ERR_erofs_filesystem_full;
+	}
+
 	unsigned nr;
 	int ret;
 
@@ -1301,7 +1308,7 @@ int bch2_dev_journal_alloc(struct bch_dev *ca, bool new_fs)
 		     min(1 << 13,
 			 (1 << 24) / ca->mi.bucket_size));
 
-	ret = bch2_set_nr_journal_buckets_loop(ca->fs, ca, nr, new_fs);
+	ret = bch2_set_nr_journal_buckets_loop(c, ca, nr, new_fs);
 err:
 	bch_err_fn(ca, ret);
 	return ret;
