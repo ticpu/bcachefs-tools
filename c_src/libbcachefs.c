@@ -112,6 +112,8 @@ u64 bch2_pick_bucket_size(struct bch_opts opts, dev_opts_list devs)
 	/* We also prefer larger buckets for performance, up to 2MB at 2T */
 	bucket_size = max(bucket_size, perf_lower_bound);
 
+	bucket_size = roundup_pow_of_two(bucket_size);
+
 	return bucket_size;
 }
 
