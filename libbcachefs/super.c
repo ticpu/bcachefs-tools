@@ -492,28 +492,27 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 
 	clear_bit(BCH_FS_clean_shutdown, &c->flags);
 
-	/*
-	 * First journal write must be a flush write: after a clean shutdown we
-	 * don't read the journal, so the first journal write may end up
-	 * overwriting whatever was there previously, and there must always be
-	 * at least one non-flush write in the journal or recovery will fail:
-	 */
-	set_bit(JOURNAL_need_flush_write, &c->journal.flags);
-	set_bit(JOURNAL_running, &c->journal.flags);
-
 	__for_each_online_member(c, ca, BIT(BCH_MEMBER_STATE_rw), READ) {
 		bch2_dev_allocator_add(c, ca);
 		percpu_ref_reinit(&ca->io_ref[WRITE]);
 	}
 	bch2_recalc_capacity(c);
 
+	/*
+	 * First journal write must be a flush write: after a clean shutdown we
+	 * don't read the journal, so the first journal write may end up
+	 * overwriting whatever was there previously, and there must always be
+	 * at least one non-flush write in the journal or recovery will fail:
+	 */
+	spin_lock(&c->journal.lock);
+	set_bit(JOURNAL_need_flush_write, &c->journal.flags);
+	set_bit(JOURNAL_running, &c->journal.flags);
+	bch2_journal_space_available(&c->journal);
+	spin_unlock(&c->journal.lock);
+
 	ret = bch2_fs_mark_dirty(c);
 	if (ret)
 		goto err;
-
-	spin_lock(&c->journal.lock);
-	bch2_journal_space_available(&c->journal);
-	spin_unlock(&c->journal.lock);
 
 	ret = bch2_journal_reclaim_start(&c->journal);
 	if (ret)
@@ -582,6 +581,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 
 	bch2_find_btree_nodes_exit(&c->found_btree_nodes);
 	bch2_free_pending_node_rewrites(c);
+	bch2_free_fsck_errs(c);
 	bch2_fs_accounting_exit(c);
 	bch2_fs_sb_errors_exit(c);
 	bch2_fs_counters_exit(c);
