@@ -1,3 +1,11 @@
+bcachefs-tools (1:1.25.2-1) unstable; urgency=medium
+
+  * don't pick a non power of two bucket size
+  * pick_bucket_size() was picking non blocksize aligned bucket sizes, which
+    uncovered a few bugs.
+
+ -- Kent Overstreet <kent.overstreet@linux.dev>  Sat, 19 Apr 2025 00:24:19 +0300
+
 bcachefs-tools (1:1.25.1-1) unstable; urgency=medium
 
   * bcachefs migrate now works
@@ -5,7 +13,7 @@ bcachefs-tools (1:1.25.1-1) unstable; urgency=medium
   * bcachefs format now loads the bcachefs module, so that we can correctly
   * detect the version supported by the running kernel
 
- -- Kent Overstreet <kent.overstreet@linux.dev>  Tue Apr 1 13:06:37 2025 -0400
+ -- Kent Overstreet <kent.overstreet@linux.dev>  Tue, 01 Apr 2025 13:06:37 -0400
 
 bcachefs-tools (1:1.9.1-1) unstable; urgency=medium
 
