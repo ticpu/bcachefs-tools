@@ -25,6 +25,7 @@
 #include "disk_accounting.h"
 #include "disk_groups.h"
 #include "ec.h"
+#include "enumerated_ref.h"
 #include "inode.h"
 #include "journal.h"
 #include "journal_reclaim.h"
@@ -178,24 +179,8 @@ read_attribute(open_buckets);
 read_attribute(open_buckets_partial);
 read_attribute(nocow_lock_table);
 
-#ifdef BCH_WRITE_REF_DEBUG
+read_attribute(read_refs);
 read_attribute(write_refs);
-
-static const char * const bch2_write_refs[] = {
-#define x(n)	#n,
-	BCH_WRITE_REFS()
-#undef x
-	NULL
-};
-
-static void bch2_write_refs_to_text(struct printbuf *out, struct bch_fs *c)
-{
-	bch2_printbuf_tabstop_push(out, 24);
-
-	for (unsigned i = 0; i < ARRAY_SIZE(c->writes); i++)
-		prt_printf(out, "%s\t%li\n", bch2_write_refs[i], atomic_long_read(&c->writes[i]));
-}
-#endif
 
 read_attribute(internal_uuid);
 read_attribute(disk_groups);
@@ -324,7 +309,7 @@ static int bch2_read_fua_test(struct printbuf *out, struct bch_dev *ca)
 	bch2_time_stats_init_no_pcpu(&stats_fua);
 	bch2_time_stats_init_no_pcpu(&stats_random);
 
-	if (!bch2_dev_get_ioref(c, ca->dev_idx, READ)) {
+	if (!bch2_dev_get_ioref(c, ca->dev_idx, READ, BCH_DEV_READ_REF_read_fua_test)) {
 		prt_str(out, "offline\n");
 		return 0;
 	}
@@ -415,7 +400,7 @@ static int bch2_read_fua_test(struct printbuf *out, struct bch_dev *ca)
 err:
 	kfree(buf);
 	kfree(bio);
-	percpu_ref_put(&ca->io_ref[READ]);
+	enumerated_ref_put(&ca->io_ref[READ], BCH_DEV_READ_REF_read_fua_test);
 	bch_err_fn(c, ret);
 	return ret;
 }
@@ -481,10 +466,8 @@ SHOW(bch2_fs)
 	if (attr == &sysfs_moving_ctxts)
 		bch2_fs_moving_ctxts_to_text(out, c);
 
-#ifdef BCH_WRITE_REF_DEBUG
 	if (attr == &sysfs_write_refs)
-		bch2_write_refs_to_text(out, c);
-#endif
+		enumerated_ref_to_text(out, &c->writes, bch2_write_refs);
 
 	if (attr == &sysfs_nocow_lock_table)
 		bch2_nocow_locks_to_text(out, &c->nocow_locks);
@@ -517,7 +500,7 @@ STORE(bch2_fs)
 	if (attr == &sysfs_trigger_btree_updates)
 		queue_work(c->btree_interior_update_worker, &c->btree_interior_update_work);
 
-	if (!bch2_write_ref_tryget(c, BCH_WRITE_REF_sysfs))
+	if (!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_sysfs))
 		return -EROFS;
 
 	if (attr == &sysfs_trigger_btree_cache_shrink) {
@@ -577,7 +560,7 @@ STORE(bch2_fs)
 			size = ret;
 	}
 #endif
-	bch2_write_ref_put(c, BCH_WRITE_REF_sysfs);
+	enumerated_ref_put(&c->writes, BCH_WRITE_REF_sysfs);
 	return size;
 }
 SYSFS_OPS(bch2_fs);
@@ -670,9 +653,7 @@ struct attribute *bch2_fs_internal_files[] = {
 	&sysfs_new_stripes,
 	&sysfs_open_buckets,
 	&sysfs_open_buckets_partial,
-#ifdef BCH_WRITE_REF_DEBUG
 	&sysfs_write_refs,
-#endif
 	&sysfs_nocow_lock_table,
 	&sysfs_io_timers_read,
 	&sysfs_io_timers_write,
@@ -738,7 +719,7 @@ static ssize_t sysfs_opt_store(struct bch_fs *c,
 	 * We don't need to take c->writes for correctness, but it eliminates an
 	 * unsightly error message in the dmesg log when we're RO:
 	 */
-	if (unlikely(!bch2_write_ref_tryget(c, BCH_WRITE_REF_sysfs)))
+	if (unlikely(!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_sysfs)))
 		return -EROFS;
 
 	char *tmp = kstrdup(buf, GFP_KERNEL);
@@ -765,7 +746,7 @@ static ssize_t sysfs_opt_store(struct bch_fs *c,
 
 	ret = size;
 err:
-	bch2_write_ref_put(c, BCH_WRITE_REF_sysfs);
+	enumerated_ref_put(&c->writes, BCH_WRITE_REF_sysfs);
 	return ret;
 }
 
@@ -919,6 +900,12 @@ SHOW(bch2_dev)
 	if (opt_id >= 0)
 		return sysfs_opt_show(c, ca, opt_id, out);
 
+	if (attr == &sysfs_read_refs)
+		enumerated_ref_to_text(out, &ca->io_ref[READ], bch2_dev_read_refs);
+
+	if (attr == &sysfs_write_refs)
+		enumerated_ref_to_text(out, &ca->io_ref[WRITE], bch2_dev_write_refs);
+
 	return 0;
 }
 
@@ -976,6 +963,9 @@ struct attribute *bch2_dev_files[] = {
 	/* debug: */
 	&sysfs_alloc_debug,
 	&sysfs_open_buckets,
+
+	&sysfs_read_refs,
+	&sysfs_write_refs,
 	NULL
 };
 

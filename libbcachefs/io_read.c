@@ -9,6 +9,7 @@
 #include "bcachefs.h"
 #include "alloc_background.h"
 #include "alloc_foreground.h"
+#include "async_objs.h"
 #include "btree_update.h"
 #include "buckets.h"
 #include "checksum.h"
@@ -17,6 +18,7 @@
 #include "data_update.h"
 #include "disk_groups.h"
 #include "ec.h"
+#include "enumerated_ref.h"
 #include "error.h"
 #include "io_read.h"
 #include "io_misc.h"
@@ -80,18 +82,6 @@ static bool bch2_target_congested(struct bch_fs *c, u16 target)
 #endif
 
 /* Cache promotion on read */
-
-struct promote_op {
-	struct rcu_head		rcu;
-	u64			start_time;
-
-	struct rhash_head	hash;
-	struct bpos		pos;
-
-	struct work_struct	work;
-	struct data_update	write;
-	struct bio_vec		bi_inline_vecs[]; /* must be last */
-};
 
 static const struct rhashtable_params bch_promote_params = {
 	.head_offset		= offsetof(struct promote_op, hash),
@@ -170,9 +160,11 @@ static noinline void promote_free(struct bch_read_bio *rbio)
 					 bch_promote_params);
 	BUG_ON(ret);
 
+	async_object_list_del(c, promote, op->list_idx);
+
 	bch2_data_update_exit(&op->write);
 
-	bch2_write_ref_put(c, BCH_WRITE_REF_promote);
+	enumerated_ref_put(&c->writes, BCH_WRITE_REF_promote);
 	kfree_rcu(op, rcu);
 }
 
@@ -237,7 +229,7 @@ static struct bch_read_bio *__promote_alloc(struct btree_trans *trans,
 			return NULL;
 	}
 
-	if (!bch2_write_ref_tryget(c, BCH_WRITE_REF_promote))
+	if (!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_promote))
 		return ERR_PTR(-BCH_ERR_nopromote_no_writes);
 
 	struct promote_op *op = kzalloc(sizeof(*op), GFP_KERNEL);
@@ -255,6 +247,10 @@ static struct bch_read_bio *__promote_alloc(struct btree_trans *trans,
 		goto err;
 	}
 
+	ret = async_object_list_add(c, promote, op, &op->list_idx);
+	if (ret < 0)
+		goto err_remove_hash;
+
 	ret = bch2_data_update_init(trans, NULL, NULL, &op->write,
 			writepoint_hashed((unsigned long) current),
 			&orig->opts,
@@ -266,7 +262,7 @@ static struct bch_read_bio *__promote_alloc(struct btree_trans *trans,
 	 * -BCH_ERR_ENOSPC_disk_reservation:
 	 */
 	if (ret)
-		goto err_remove_hash;
+		goto err_remove_list;
 
 	rbio_init_fragment(&op->write.rbio.bio, orig);
 	op->write.rbio.bounce	= true;
@@ -274,6 +270,8 @@ static struct bch_read_bio *__promote_alloc(struct btree_trans *trans,
 	op->write.op.end_io = promote_done;
 
 	return &op->write.rbio;
+err_remove_list:
+	async_object_list_del(c, promote, op->list_idx);
 err_remove_hash:
 	BUG_ON(rhashtable_remove_fast(&c->promote_table, &op->hash,
 				      bch_promote_params));
@@ -282,7 +280,7 @@ err:
 	/* We may have added to the rhashtable and thus need rcu freeing: */
 	kfree_rcu(op, rcu);
 err_put:
-	bch2_write_ref_put(c, BCH_WRITE_REF_promote);
+	enumerated_ref_put(&c->writes, BCH_WRITE_REF_promote);
 	return ERR_PTR(ret);
 }
 
@@ -346,6 +344,18 @@ nopromote:
 	return NULL;
 }
 
+void bch2_promote_op_to_text(struct printbuf *out, struct promote_op *op)
+{
+	if (!op->write.read_done) {
+		prt_printf(out, "parent read: %px\n", op->write.rbio.parent);
+		printbuf_indent_add(out, 2);
+		bch2_read_bio_to_text(out, op->write.rbio.parent);
+		printbuf_indent_sub(out, 2);
+	}
+
+	bch2_data_update_to_text(out, &op->write);
+}
+
 /* Read */
 
 static int bch2_read_err_msg_trans(struct btree_trans *trans, struct printbuf *out,
@@ -402,7 +412,7 @@ static inline struct bch_read_bio *bch2_rbio_free(struct bch_read_bio *rbio)
 
 	if (rbio->have_ioref) {
 		struct bch_dev *ca = bch2_dev_have_ref(rbio->c, rbio->pick.ptr.dev);
-		percpu_ref_put(&ca->io_ref[READ]);
+		enumerated_ref_put(&ca->io_ref[READ], BCH_DEV_READ_REF_io_read);
 	}
 
 	if (rbio->split) {
@@ -414,6 +424,8 @@ static inline struct bch_read_bio *bch2_rbio_free(struct bch_read_bio *rbio)
 			else
 				promote_free(rbio);
 		} else {
+			async_object_list_del(rbio->c, rbio, rbio->list_idx);
+
 			if (rbio->bounce)
 				bch2_bio_free_pages_pool(rbio->c, &rbio->bio);
 
@@ -1090,7 +1102,8 @@ retry_pick:
 		goto err;
 	}
 
-	struct bch_dev *ca = bch2_dev_get_ioref(c, pick.ptr.dev, READ);
+	struct bch_dev *ca = bch2_dev_get_ioref(c, pick.ptr.dev, READ,
+					BCH_DEV_READ_REF_io_read);
 
 	/*
 	 * Stale dirty pointers are treated as IO errors, but @failed isn't
@@ -1104,7 +1117,7 @@ retry_pick:
 	    unlikely(dev_ptr_stale(ca, &pick.ptr))) {
 		read_from_stale_dirty_pointer(trans, ca, k, pick.ptr);
 		bch2_mark_io_failure(failed, &pick, false);
-		percpu_ref_put(&ca->io_ref[READ]);
+		enumerated_ref_put(&ca->io_ref[READ], BCH_DEV_READ_REF_io_read);
 		goto retry_pick;
 	}
 
@@ -1137,7 +1150,8 @@ retry_pick:
 		 */
 		if (pick.crc.compressed_size > u->op.wbio.bio.bi_iter.bi_size) {
 			if (ca)
-				percpu_ref_put(&ca->io_ref[READ]);
+				enumerated_ref_put(&ca->io_ref[READ],
+					BCH_DEV_READ_REF_io_read);
 			rbio->ret = -BCH_ERR_data_read_buffer_too_small;
 			goto out_read_done;
 		}
@@ -1191,6 +1205,8 @@ retry_pick:
 
 		bch2_bio_alloc_pages_pool(c, &rbio->bio, sectors << 9);
 		rbio->bounce	= true;
+
+		async_object_list_add(c, rbio, rbio, &rbio->list_idx);
 	} else if (flags & BCH_READ_must_clone) {
 		/*
 		 * Have to clone if there were any splits, due to error
@@ -1204,6 +1220,8 @@ retry_pick:
 						 &c->bio_read_split),
 				 orig);
 		rbio->bio.bi_iter = iter;
+
+		async_object_list_add(c, rbio, rbio, &rbio->list_idx);
 	} else {
 		rbio = orig;
 		rbio->bio.bi_iter = iter;
@@ -1477,6 +1495,41 @@ err:
 	bch2_trans_iter_exit(trans, &iter);
 	bch2_bkey_buf_exit(&sk, c);
 	return ret;
+}
+
+static const char * const bch2_read_bio_flags[] = {
+#define x(n)	#n,
+	BCH_READ_FLAGS()
+#undef x
+	NULL
+};
+
+void bch2_read_bio_to_text(struct printbuf *out, struct bch_read_bio *rbio)
+{
+	u64 now = local_clock();
+	prt_printf(out, "start_time:\t%llu\n", rbio->start_time ? now - rbio->start_time : 0);
+	prt_printf(out, "submit_time:\t%llu\n", rbio->submit_time ? now - rbio->submit_time : 0);
+
+	if (!rbio->split)
+		prt_printf(out, "end_io:\t%ps\n", rbio->end_io);
+	else
+		prt_printf(out, "parent:\t%px\n", rbio->parent);
+
+	prt_printf(out, "bi_end_io:\t%ps\n", rbio->bio.bi_end_io);
+
+	prt_printf(out, "promote:\t%u\n",	rbio->promote);
+	prt_printf(out, "bounce:\t%u\n",	rbio->bounce);
+	prt_printf(out, "split:\t%u\n",		rbio->split);
+	prt_printf(out, "have_ioref:\t%u\n",	rbio->have_ioref);
+	prt_printf(out, "narrow_crcs:\t%u\n",	rbio->narrow_crcs);
+	prt_printf(out, "context:\t%u\n",	rbio->context);
+	prt_printf(out, "ret:\t%s\n",		bch2_err_str(rbio->ret));
+
+	prt_printf(out, "flags:\t");
+	bch2_prt_bitflags(out, bch2_read_bio_flags, rbio->flags);
+	prt_newline(out);
+
+	bch2_bio_to_text(out, &rbio->bio);
 }
 
 void bch2_fs_io_read_exit(struct bch_fs *c)

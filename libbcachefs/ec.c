@@ -16,6 +16,7 @@
 #include "disk_accounting.h"
 #include "disk_groups.h"
 #include "ec.h"
+#include "enumerated_ref.h"
 #include "error.h"
 #include "io_read.h"
 #include "io_write.h"
@@ -706,6 +707,9 @@ static void ec_block_endio(struct bio *bio)
 	struct bch_dev *ca = ec_bio->ca;
 	struct closure *cl = bio->bi_private;
 	int rw = ec_bio->rw;
+	unsigned ref = rw == READ
+		? BCH_DEV_READ_REF_ec_block
+		: BCH_DEV_WRITE_REF_ec_block;
 
 	bch2_account_io_completion(ca, bio_data_dir(bio),
 				   ec_bio->submit_time, !bio->bi_status);
@@ -727,7 +731,7 @@ static void ec_block_endio(struct bio *bio)
 	}
 
 	bio_put(&ec_bio->bio);
-	percpu_ref_put(&ca->io_ref[rw]);
+	enumerated_ref_put(&ca->io_ref[rw], ref);
 	closure_put(cl);
 }
 
@@ -741,8 +745,11 @@ static void ec_block_io(struct bch_fs *c, struct ec_stripe_buf *buf,
 		? BCH_DATA_user
 		: BCH_DATA_parity;
 	int rw = op_is_write(opf);
+	unsigned ref = rw == READ
+		? BCH_DEV_READ_REF_ec_block
+		: BCH_DEV_WRITE_REF_ec_block;
 
-	struct bch_dev *ca = bch2_dev_get_ioref(c, ptr->dev, rw);
+	struct bch_dev *ca = bch2_dev_get_ioref(c, ptr->dev, rw, ref);
 	if (!ca) {
 		clear_bit(idx, buf->valid);
 		return;
@@ -788,14 +795,14 @@ static void ec_block_io(struct bch_fs *c, struct ec_stripe_buf *buf,
 		bch2_bio_map(&ec_bio->bio, buf->data[idx] + offset, b);
 
 		closure_get(cl);
-		percpu_ref_get(&ca->io_ref[rw]);
+		enumerated_ref_get(&ca->io_ref[rw], ref);
 
 		submit_bio(&ec_bio->bio);
 
 		offset += b;
 	}
 
-	percpu_ref_put(&ca->io_ref[rw]);
+	enumerated_ref_put(&ca->io_ref[rw], ref);
 }
 
 static int get_stripe_key_trans(struct btree_trans *trans, u64 idx,
@@ -1017,14 +1024,14 @@ static void ec_stripe_delete_work(struct work_struct *work)
 				BCH_TRANS_COMMIT_no_enospc, ({
 			ec_stripe_delete(trans, lru_k.k->p.offset);
 		})));
-	bch2_write_ref_put(c, BCH_WRITE_REF_stripe_delete);
+	enumerated_ref_put(&c->writes, BCH_WRITE_REF_stripe_delete);
 }
 
 void bch2_do_stripe_deletes(struct bch_fs *c)
 {
-	if (bch2_write_ref_tryget(c, BCH_WRITE_REF_stripe_delete) &&
+	if (enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_stripe_delete) &&
 	    !queue_work(c->write_ref_wq, &c->ec_stripe_delete_work))
-		bch2_write_ref_put(c, BCH_WRITE_REF_stripe_delete);
+		enumerated_ref_put(&c->writes, BCH_WRITE_REF_stripe_delete);
 }
 
 /* stripe creation: */
@@ -1252,7 +1259,8 @@ static void zero_out_rest_of_ec_bucket(struct bch_fs *c,
 				       unsigned block,
 				       struct open_bucket *ob)
 {
-	struct bch_dev *ca = bch2_dev_get_ioref(c, ob->dev, WRITE);
+	struct bch_dev *ca = bch2_dev_get_ioref(c, ob->dev, WRITE,
+				BCH_DEV_WRITE_REF_ec_bucket_zero);
 	if (!ca) {
 		s->err = -BCH_ERR_erofs_no_writes;
 		return;
@@ -1268,7 +1276,7 @@ static void zero_out_rest_of_ec_bucket(struct bch_fs *c,
 			ob->sectors_free,
 			GFP_KERNEL, 0);
 
-	percpu_ref_put(&ca->io_ref[WRITE]);
+	enumerated_ref_put(&ca->io_ref[WRITE], BCH_DEV_WRITE_REF_ec_bucket_zero);
 
 	if (ret)
 		s->err = ret;
@@ -1418,15 +1426,15 @@ static void ec_stripe_create_work(struct work_struct *work)
 	while ((s = get_pending_stripe(c)))
 		ec_stripe_create(s);
 
-	bch2_write_ref_put(c, BCH_WRITE_REF_stripe_create);
+	enumerated_ref_put(&c->writes, BCH_WRITE_REF_stripe_create);
 }
 
 void bch2_ec_do_stripe_creates(struct bch_fs *c)
 {
-	bch2_write_ref_get(c, BCH_WRITE_REF_stripe_create);
+	enumerated_ref_get(&c->writes, BCH_WRITE_REF_stripe_create);
 
 	if (!queue_work(system_long_wq, &c->ec_stripe_create_work))
-		bch2_write_ref_put(c, BCH_WRITE_REF_stripe_create);
+		enumerated_ref_put(&c->writes, BCH_WRITE_REF_stripe_create);
 }
 
 static void ec_stripe_new_set_pending(struct bch_fs *c, struct ec_stripe_head *h)

@@ -12,6 +12,7 @@
 #include "btree_update.h"
 #include "btree_write_buffer.h"
 #include "buckets.h"
+#include "enumerated_ref.h"
 #include "error.h"
 #include "journal.h"
 #include "journal_io.h"
@@ -699,8 +700,10 @@ static unsigned max_dev_latency(struct bch_fs *c)
 {
 	u64 nsecs = 0;
 
-	for_each_rw_member(c, ca)
+	rcu_read_lock();
+	for_each_rw_member_rcu(c, ca)
 		nsecs = max(nsecs, ca->io_latency[WRITE].stats.max_duration);
+	rcu_read_unlock();
 
 	return nsecs_to_jiffies(nsecs);
 }
@@ -987,11 +990,11 @@ int bch2_journal_meta(struct journal *j)
 {
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
 
-	if (!bch2_write_ref_tryget(c, BCH_WRITE_REF_journal))
+	if (!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_journal))
 		return -BCH_ERR_erofs_no_writes;
 
 	int ret = __bch2_journal_meta(j);
-	bch2_write_ref_put(c, BCH_WRITE_REF_journal);
+	enumerated_ref_put(&c->writes, BCH_WRITE_REF_journal);
 	return ret;
 }
 
@@ -1333,13 +1336,14 @@ err:
 
 int bch2_fs_journal_alloc(struct bch_fs *c)
 {
-	for_each_online_member(c, ca) {
+	for_each_online_member(c, ca, BCH_DEV_READ_REF_fs_journal_alloc) {
 		if (ca->journal.nr)
 			continue;
 
 		int ret = bch2_dev_journal_alloc(ca, true);
 		if (ret) {
-			percpu_ref_put(&ca->io_ref[READ]);
+			enumerated_ref_put(&ca->io_ref[READ],
+					   BCH_DEV_READ_REF_fs_journal_alloc);
 			return ret;
 		}
 	}

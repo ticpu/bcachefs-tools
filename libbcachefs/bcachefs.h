@@ -209,6 +209,7 @@
 #include "btree_journal_iter_types.h"
 #include "disk_accounting_types.h"
 #include "errcode.h"
+#include "fast_list.h"
 #include "fifo.h"
 #include "nocow_locking_types.h"
 #include "opts.h"
@@ -219,7 +220,7 @@
 #include "util.h"
 
 #ifdef CONFIG_BCACHEFS_DEBUG
-#define BCH_WRITE_REF_DEBUG
+#define ENUMERATED_REF_DEBUG
 #endif
 
 #ifndef dynamic_fault
@@ -474,6 +475,7 @@ enum bch_time_stats {
 };
 
 #include "alloc_types.h"
+#include "async_objs_types.h"
 #include "btree_gc_types.h"
 #include "btree_types.h"
 #include "btree_node_scan_types.h"
@@ -483,6 +485,7 @@ enum bch_time_stats {
 #include "clock_types.h"
 #include "disk_groups_types.h"
 #include "ec_types.h"
+#include "enumerated_ref_types.h"
 #include "journal_types.h"
 #include "keylist_types.h"
 #include "quota_types.h"
@@ -515,6 +518,51 @@ struct discard_in_flight {
 	u64			bucket:63;
 };
 
+#define BCH_DEV_READ_REFS()				\
+	x(bch2_online_devs)				\
+	x(trans_mark_dev_sbs)				\
+	x(read_fua_test)				\
+	x(sb_field_resize)				\
+	x(write_super)					\
+	x(journal_read)					\
+	x(fs_journal_alloc)				\
+	x(fs_resize_on_mount)				\
+	x(btree_node_read)				\
+	x(btree_node_read_all_replicas)			\
+	x(btree_node_scrub)				\
+	x(btree_node_write)				\
+	x(btree_node_scan)				\
+	x(btree_verify_replicas)			\
+	x(btree_node_ondisk_to_text)			\
+	x(io_read)					\
+	x(check_extent_checksums)			\
+	x(ec_block)
+
+enum bch_dev_read_ref {
+#define x(n) BCH_DEV_READ_REF_##n,
+	BCH_DEV_READ_REFS()
+#undef x
+	BCH_DEV_READ_REF_NR,
+};
+
+#define BCH_DEV_WRITE_REFS()				\
+	x(journal_write)				\
+	x(journal_do_discards)				\
+	x(dev_do_discards)				\
+	x(discard_one_bucket_fast)			\
+	x(do_invalidates)				\
+	x(nocow_flush)					\
+	x(io_write)					\
+	x(ec_block)					\
+	x(ec_bucket_zero)
+
+enum bch_dev_write_ref {
+#define x(n) BCH_DEV_WRITE_REF_##n,
+	BCH_DEV_WRITE_REFS()
+#undef x
+	BCH_DEV_WRITE_REF_NR,
+};
+
 struct bch_dev {
 	struct kobject		kobj;
 #ifdef CONFIG_BCACHEFS_DEBUG
@@ -525,8 +573,7 @@ struct bch_dev {
 	struct percpu_ref	ref;
 #endif
 	struct completion	ref_completion;
-	struct percpu_ref	io_ref[2];
-	struct completion	io_ref_completion[2];
+	struct enumerated_ref	io_ref[2];
 
 	struct bch_fs		*fs;
 
@@ -733,11 +780,7 @@ struct bch_fs {
 	struct rw_semaphore	state_lock;
 
 	/* Counts outstanding writes, for clean transition to read-only */
-#ifdef BCH_WRITE_REF_DEBUG
-	atomic_long_t		writes[BCH_WRITE_REF_NR];
-#else
-	struct percpu_ref	writes;
-#endif
+	struct enumerated_ref	writes;
 	/*
 	 * Certain operations are only allowed in single threaded mode, during
 	 * recovery, and we want to assert that this is the case:
@@ -891,6 +934,7 @@ struct bch_fs {
 	struct workqueue_struct *write_ref_wq;
 
 	/* ALLOCATION */
+	struct bch_devs_mask	online_devs;
 	struct bch_devs_mask	rw_devs[BCH_DATA_NR];
 	unsigned long		rw_devs_change_count;
 
@@ -985,6 +1029,10 @@ struct bch_fs {
 				nocow_locks;
 	struct rhashtable	promote_table;
 
+#ifdef CONFIG_BCACHEFS_ASYNC_OBJECT_LISTS
+	struct async_obj_list	async_objs[BCH_ASYNC_OBJ_NR];
+#endif
+
 	mempool_t		compression_bounce[2];
 	mempool_t		compress_workspace[BCH_COMPRESSION_OPT_NR];
 	size_t			zstd_workspace_size;
@@ -1073,6 +1121,7 @@ struct bch_fs {
 	/* DEBUG JUNK */
 	struct dentry		*fs_debug_dir;
 	struct dentry		*btree_debug_dir;
+	struct dentry		*async_obj_dir;
 	struct btree_debug	btree_debug[BTREE_ID_NR];
 	struct btree		*verify_data;
 	struct btree_node	*verify_ondisk;
@@ -1113,54 +1162,6 @@ struct bch_fs {
 };
 
 extern struct wait_queue_head bch2_read_only_wait;
-
-static inline void bch2_write_ref_get(struct bch_fs *c, enum bch_write_ref ref)
-{
-#ifdef BCH_WRITE_REF_DEBUG
-	atomic_long_inc(&c->writes[ref]);
-#else
-	percpu_ref_get(&c->writes);
-#endif
-}
-
-static inline bool __bch2_write_ref_tryget(struct bch_fs *c, enum bch_write_ref ref)
-{
-#ifdef BCH_WRITE_REF_DEBUG
-	return !test_bit(BCH_FS_going_ro, &c->flags) &&
-		atomic_long_inc_not_zero(&c->writes[ref]);
-#else
-	return percpu_ref_tryget(&c->writes);
-#endif
-}
-
-static inline bool bch2_write_ref_tryget(struct bch_fs *c, enum bch_write_ref ref)
-{
-#ifdef BCH_WRITE_REF_DEBUG
-	return !test_bit(BCH_FS_going_ro, &c->flags) &&
-		atomic_long_inc_not_zero(&c->writes[ref]);
-#else
-	return percpu_ref_tryget_live(&c->writes);
-#endif
-}
-
-static inline void bch2_write_ref_put(struct bch_fs *c, enum bch_write_ref ref)
-{
-#ifdef BCH_WRITE_REF_DEBUG
-	long v = atomic_long_dec_return(&c->writes[ref]);
-
-	BUG_ON(v < 0);
-	if (v)
-		return;
-	for (unsigned i = 0; i < BCH_WRITE_REF_NR; i++)
-		if (atomic_long_read(&c->writes[i]))
-			return;
-
-	set_bit(BCH_FS_write_disable_complete, &c->flags);
-	wake_up(&bch2_read_only_wait);
-#else
-	percpu_ref_put(&c->writes);
-#endif
-}
 
 static inline bool bch2_ro_ref_tryget(struct bch_fs *c)
 {

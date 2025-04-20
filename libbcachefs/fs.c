@@ -33,6 +33,7 @@
 #include <linux/backing-dev.h>
 #include <linux/exportfs.h>
 #include <linux/fiemap.h>
+#include <linux/fileattr.h>
 #include <linux/fs_context.h>
 #include <linux/module.h>
 #include <linux/pagemap.h>
@@ -50,6 +51,22 @@ static void bch2_vfs_inode_init(struct btree_trans *, subvol_inum,
 				struct bch_inode_info *,
 				struct bch_inode_unpacked *,
 				struct bch_subvolume *);
+
+/* Set VFS inode flags from bcachefs inode: */
+static inline void bch2_inode_flags_to_vfs(struct bch_inode_info *inode)
+{
+	static const __maybe_unused unsigned bch_flags_to_vfs[] = {
+		[__BCH_INODE_sync]		= S_SYNC,
+		[__BCH_INODE_immutable]		= S_IMMUTABLE,
+		[__BCH_INODE_append]		= S_APPEND,
+		[__BCH_INODE_noatime]		= S_NOATIME,
+	};
+
+	set_flags(bch_flags_to_vfs, inode->ei_inode.bi_flags, inode->v.i_flags);
+
+	if (inode->ei_inode.bi_casefold)
+		inode->v.i_flags |= S_CASEFOLD;
+}
 
 void bch2_inode_update_after_write(struct btree_trans *trans,
 				   struct bch_inode_info *inode,
@@ -1448,6 +1465,165 @@ static int bch2_open(struct inode *vinode, struct file *file)
 	return generic_file_open(vinode, file);
 }
 
+/* bcachefs inode flags -> FS_IOC_GETFLAGS: */
+static const __maybe_unused unsigned bch_flags_to_uflags[] = {
+	[__BCH_INODE_sync]		= FS_SYNC_FL,
+	[__BCH_INODE_immutable]		= FS_IMMUTABLE_FL,
+	[__BCH_INODE_append]		= FS_APPEND_FL,
+	[__BCH_INODE_nodump]		= FS_NODUMP_FL,
+	[__BCH_INODE_noatime]		= FS_NOATIME_FL,
+};
+
+/* bcachefs inode flags -> FS_IOC_FSGETXATTR: */
+static const __maybe_unused unsigned bch_flags_to_xflags[] = {
+	[__BCH_INODE_sync]	= FS_XFLAG_SYNC,
+	[__BCH_INODE_immutable]	= FS_XFLAG_IMMUTABLE,
+	[__BCH_INODE_append]	= FS_XFLAG_APPEND,
+	[__BCH_INODE_nodump]	= FS_XFLAG_NODUMP,
+	[__BCH_INODE_noatime]	= FS_XFLAG_NOATIME,
+};
+
+static int bch2_fileattr_get(struct dentry *dentry,
+			     struct fileattr *fa)
+{
+	struct bch_inode_info *inode = to_bch_ei(d_inode(dentry));
+
+	fileattr_fill_xflags(fa, map_flags(bch_flags_to_xflags, inode->ei_inode.bi_flags));
+
+	if (inode->ei_inode.bi_fields_set & (1 << Inode_opt_project))
+		fa->fsx_xflags |= FS_XFLAG_PROJINHERIT;
+
+	if (inode->ei_inode.bi_casefold)
+		fa->flags |= FS_CASEFOLD_FL;
+
+	fa->fsx_projid = inode->ei_qid.q[QTYP_PRJ];
+	return 0;
+}
+
+struct flags_set {
+	unsigned		mask;
+	unsigned		flags;
+	unsigned		projid;
+	bool			set_project;
+	bool			set_casefold;
+	bool			casefold;
+};
+
+static int fssetxattr_inode_update_fn(struct btree_trans *trans,
+				      struct bch_inode_info *inode,
+				      struct bch_inode_unpacked *bi,
+				      void *p)
+{
+	struct bch_fs *c = trans->c;
+	struct flags_set *s = p;
+
+	/*
+	 * We're relying on btree locking here for exclusion with other ioctl
+	 * calls - use the flags in the btree (@bi), not inode->i_flags:
+	 */
+	if (!S_ISREG(bi->bi_mode) &&
+	    !S_ISDIR(bi->bi_mode) &&
+	    (s->flags & (BCH_INODE_nodump|BCH_INODE_noatime)) != s->flags)
+		return -EINVAL;
+
+	if (s->casefold != bi->bi_casefold) {
+#ifdef CONFIG_UNICODE
+		int ret = 0;
+		/* Not supported on individual files. */
+		if (!S_ISDIR(bi->bi_mode))
+			return -EOPNOTSUPP;
+
+		/*
+		 * Make sure the dir is empty, as otherwise we'd need to
+		 * rehash everything and update the dirent keys.
+		 */
+		ret = bch2_empty_dir_trans(trans, inode_inum(inode));
+		if (ret < 0)
+			return ret;
+
+		ret = bch2_request_incompat_feature(c, bcachefs_metadata_version_casefolding);
+		if (ret)
+			return ret;
+
+		bch2_check_set_feature(c, BCH_FEATURE_casefolding);
+
+		bi->bi_casefold = s->casefold;
+		bi->bi_fields_set &= ~BIT(Inode_opt_casefold);
+		bi->bi_fields_set |= s->casefold << Inode_opt_casefold;
+
+#else
+		printk(KERN_ERR "Cannot use casefolding on a kernel without CONFIG_UNICODE\n");
+		return -EOPNOTSUPP;
+#endif
+	}
+
+	if (s->set_project) {
+		bi->bi_project = s->projid;
+		bi->bi_fields_set |= BIT(Inode_opt_project);
+	}
+
+	bi->bi_flags &= ~s->mask;
+	bi->bi_flags |= s->flags;
+
+	bi->bi_ctime = timespec_to_bch2_time(c, current_time(&inode->v));
+	return 0;
+}
+
+static int bch2_fileattr_set(struct mnt_idmap *idmap,
+			     struct dentry *dentry,
+			     struct fileattr *fa)
+{
+	struct bch_inode_info *inode = to_bch_ei(d_inode(dentry));
+	struct bch_fs *c = inode->v.i_sb->s_fs_info;
+	struct flags_set s = {};
+	int ret;
+
+	if (fa->fsx_valid) {
+		fa->fsx_xflags &= ~FS_XFLAG_PROJINHERIT;
+
+		s.mask = map_defined(bch_flags_to_xflags);
+		s.flags |= map_flags_rev(bch_flags_to_xflags, fa->fsx_xflags);
+		if (fa->fsx_xflags)
+			return -EOPNOTSUPP;
+
+		if (fa->fsx_projid >= U32_MAX)
+			return -EINVAL;
+
+		/*
+		 * inode fields accessible via the xattr interface are stored with a +1
+		 * bias, so that 0 means unset:
+		 */
+		if ((inode->ei_inode.bi_project ||
+		     fa->fsx_projid) &&
+		    inode->ei_inode.bi_project != fa->fsx_projid + 1) {
+			s.projid = fa->fsx_projid + 1;
+			s.set_project = true;
+		}
+	}
+
+	if (fa->flags_valid) {
+		s.mask = map_defined(bch_flags_to_uflags);
+
+		s.set_casefold = true;
+		s.casefold = (fa->flags & FS_CASEFOLD_FL) != 0;
+		fa->flags &= ~FS_CASEFOLD_FL;
+
+		s.flags |= map_flags_rev(bch_flags_to_uflags, fa->flags);
+		if (fa->flags)
+			return -EOPNOTSUPP;
+	}
+
+	mutex_lock(&inode->ei_update_lock);
+	ret   = bch2_subvol_is_ro(c, inode->ei_inum.subvol) ?:
+		(s.set_project
+		 ? bch2_set_projid(c, inode, fa->fsx_projid)
+		 : 0) ?:
+		bch2_write_inode(c, inode, fssetxattr_inode_update_fn, &s,
+			       ATTR_CTIME);
+	mutex_unlock(&inode->ei_update_lock);
+	return ret;
+}
+
 static const struct file_operations bch_file_operations = {
 	.open		= bch2_open,
 	.llseek		= bch2_llseek,
@@ -1475,6 +1651,8 @@ static const struct inode_operations bch_file_inode_operations = {
 	.get_inode_acl	= bch2_get_acl,
 	.set_acl	= bch2_set_acl,
 #endif
+	.fileattr_get	= bch2_fileattr_get,
+	.fileattr_set	= bch2_fileattr_set,
 };
 
 static const struct inode_operations bch_dir_inode_operations = {
@@ -1495,6 +1673,8 @@ static const struct inode_operations bch_dir_inode_operations = {
 	.get_inode_acl	= bch2_get_acl,
 	.set_acl	= bch2_set_acl,
 #endif
+	.fileattr_get	= bch2_fileattr_get,
+	.fileattr_set	= bch2_fileattr_set,
 };
 
 static const struct file_operations bch_dir_file_operations = {
@@ -1517,6 +1697,8 @@ static const struct inode_operations bch_symlink_inode_operations = {
 	.get_inode_acl	= bch2_get_acl,
 	.set_acl	= bch2_set_acl,
 #endif
+	.fileattr_get	= bch2_fileattr_get,
+	.fileattr_set	= bch2_fileattr_set,
 };
 
 static const struct inode_operations bch_special_inode_operations = {
@@ -1527,6 +1709,8 @@ static const struct inode_operations bch_special_inode_operations = {
 	.get_inode_acl	= bch2_get_acl,
 	.set_acl	= bch2_set_acl,
 #endif
+	.fileattr_get	= bch2_fileattr_get,
+	.fileattr_set	= bch2_fileattr_set,
 };
 
 static const struct address_space_operations bch_address_space_operations = {
@@ -2032,12 +2216,14 @@ static int bch2_show_devname(struct seq_file *seq, struct dentry *root)
 	struct bch_fs *c = root->d_sb->s_fs_info;
 	bool first = true;
 
-	for_each_online_member(c, ca) {
+	rcu_read_lock();
+	for_each_online_member_rcu(c, ca) {
 		if (!first)
 			seq_putc(seq, ':');
 		first = false;
 		seq_puts(seq, ca->disk_sb.sb_name);
 	}
+	rcu_read_unlock();
 
 	return 0;
 }
@@ -2235,15 +2421,16 @@ got_sb:
 
 	sb->s_bdi->ra_pages		= VM_READAHEAD_PAGES;
 
-	for_each_online_member(c, ca) {
+	rcu_read_lock();
+	for_each_online_member_rcu(c, ca) {
 		struct block_device *bdev = ca->disk_sb.bdev;
 
 		/* XXX: create an anonymous device for multi device filesystems */
 		sb->s_bdev	= bdev;
 		sb->s_dev	= bdev->bd_dev;
-		percpu_ref_put(&ca->io_ref[READ]);
 		break;
 	}
+	rcu_read_unlock();
 
 	c->dev = sb->s_dev;
 

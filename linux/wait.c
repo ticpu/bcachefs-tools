@@ -248,3 +248,28 @@ void wait_for_completion(struct completion *x)
 out:
 	spin_unlock_irq(&x->wait.lock);
 }
+
+unsigned long wait_for_completion_timeout(struct completion *x, unsigned long timeout)
+{
+	spin_lock_irq(&x->wait.lock);
+
+	if (!x->done) {
+		DECLARE_WAITQUEUE(wait, current);
+
+		__add_wait_queue_tail_exclusive(&x->wait, &wait);
+		do {
+			__set_current_state(TASK_UNINTERRUPTIBLE);
+			spin_unlock_irq(&x->wait.lock);
+
+			timeout = schedule_timeout(timeout);
+			spin_lock_irq(&x->wait.lock);
+		} while (!x->done);
+		__remove_wait_queue(&x->wait, &wait);
+		if (!x->done)
+			goto out;
+	}
+	x->done--;
+out:
+	spin_unlock_irq(&x->wait.lock);
+	return timeout;
+}

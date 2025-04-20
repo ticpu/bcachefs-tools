@@ -153,12 +153,12 @@ int cmd_dump(int argc, char *argv[])
 
 	down_read(&c->state_lock);
 
-	for_each_online_member(c, ca)
+	for_each_online_member(c, ca, 0)
 		nr_devices++;
 
 	BUG_ON(!nr_devices);
 
-	for_each_online_member(c, ca) {
+	for_each_online_member(c, ca, 0) {
 		int flags = O_WRONLY|O_CREAT|O_TRUNC;
 
 		if (!force)

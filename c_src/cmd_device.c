@@ -521,11 +521,11 @@ static int cmd_device_resize(int argc, char *argv[])
 
 		struct bch_dev *resize = NULL;
 
-		for_each_online_member(c, ca) {
+		for_each_online_member(c, ca, 0) {
 			if (resize)
 				die("confused: more than one online device?");
 			resize = ca;
-			percpu_ref_get(&resize->io_ref[READ]);
+			enumerated_ref_get(&resize->io_ref[READ], 0);
 		}
 
 		u64 nbuckets = size / le16_to_cpu(resize->mi.bucket_size);
@@ -538,7 +538,7 @@ static int cmd_device_resize(int argc, char *argv[])
 		if (ret)
 			fprintf(stderr, "resize error: %s\n", bch2_err_str(ret));
 
-		percpu_ref_put(&resize->io_ref[READ]);
+		enumerated_ref_put(&resize->io_ref[READ], 0);
 		bch2_fs_stop(c);
 	}
 	return 0;
@@ -618,11 +618,11 @@ static int cmd_device_resize_journal(int argc, char *argv[])
 
 		struct bch_dev *resize = NULL;
 
-		for_each_online_member(c, ca) {
+		for_each_online_member(c, ca, 0) {
 			if (resize)
 				die("confused: more than one online device?");
 			resize = ca;
-			percpu_ref_get(&resize->io_ref[READ]);
+			enumerated_ref_get(&resize->io_ref[READ], 0);
 		}
 
 		u64 nbuckets = size / le16_to_cpu(resize->mi.bucket_size);
@@ -632,7 +632,7 @@ static int cmd_device_resize_journal(int argc, char *argv[])
 		if (ret)
 			fprintf(stderr, "resize error: %s\n", bch2_err_str(ret));
 
-		percpu_ref_put(&resize->io_ref[READ]);
+		enumerated_ref_put(&resize->io_ref[READ], 0);
 		bch2_fs_stop(c);
 	}
 	return 0;
