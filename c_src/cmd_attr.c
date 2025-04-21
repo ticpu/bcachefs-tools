@@ -48,11 +48,11 @@ static void propagate_recurse(int dirfd)
 			continue;
 		}
 		propagate_recurse(fd);
-		xclose(fd);
 	}
 
 	if (errno)
 		die("readdir error: %m");
+	closedir(dir);
 }
 
 static void do_setattr(char *path, struct bch_opt_strs opts)
@@ -80,7 +80,6 @@ static void do_setattr(char *path, struct bch_opt_strs opts)
 		die("error opening %s: %m", path);
 
 	propagate_recurse(dirfd);
-	xclose(dirfd);
 }
 
 static void setattr_usage(void)

@@ -387,7 +387,6 @@ static void copy_dir(struct copy_fs_state *s,
 		case DT_DIR:
 			fd = xopen(d->d_name, O_RDONLY|O_NOATIME);
 			copy_dir(s, c, &inode, fd, child_path, reserve_start);
-			xclose(fd);
 			break;
 		case DT_REG:
 			inode.bi_size = stat.st_size;
@@ -420,6 +419,7 @@ next:
 	}
 
 	darray_exit(&dirents);
+	closedir(dir);
 }
 
 static void reserve_old_fs_space(struct bch_fs *c,
@@ -473,7 +473,7 @@ void copy_fs(struct bch_fs *c, int src_fd, const char *src_path,
 	copy_xattrs(c, &root_inode, ".");
 
 	/* now, copy: */
-	copy_dir(s, c, &root_inode, src_fd, src_path, reserve_start);
+	copy_dir(s, c, &root_inode, dup(src_fd), src_path, reserve_start);
 
 	if (s->type == BCH_MIGRATE_migrate)
 		reserve_old_fs_space(c, &root_inode, &s->extents, reserve_start);
