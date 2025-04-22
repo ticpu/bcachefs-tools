@@ -64,6 +64,7 @@ fn main() {
         .blocklist_function("bch2_prt_vprintf")
         .blocklist_type("rhash_lock_head")
         .blocklist_type("srcu_struct")
+        .blocklist_type("bch_ioctl_data_event")
         .allowlist_var("BCH_.*")
         .allowlist_var("KEY_SPEC_.*")
         .allowlist_var("Fix753_.*")
