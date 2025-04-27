@@ -176,7 +176,7 @@ static void write_data(struct bch_fs *c,
 		die("write error: %s", bch2_err_str(op.error));
 }
 
-void copy_data(struct bch_fs *c,
+static void copy_data(struct bch_fs *c,
 		      struct bch_inode_unpacked *dst_inode,
 		      int src_fd, u64 start, u64 end)
 {
