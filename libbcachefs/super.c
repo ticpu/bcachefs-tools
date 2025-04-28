@@ -214,6 +214,7 @@ static int bch2_dev_sysfs_online(struct bch_fs *, struct bch_dev *);
 static void bch2_dev_io_ref_stop(struct bch_dev *, int);
 static void __bch2_dev_read_only(struct bch_fs *, struct bch_dev *);
 static int bch2_fs_init_rw(struct bch_fs *);
+static int bch2_fs_resize_on_mount(struct bch_fs *);
 
 struct bch_fs *bch2_dev_to_fs(dev_t dev)
 {
@@ -567,6 +568,10 @@ static void __bch2_fs_free(struct bch_fs *c)
 	for (unsigned i = 0; i < BCH_TIME_STAT_NR; i++)
 		bch2_time_stats_exit(&c->times[i]);
 
+#ifdef CONFIG_UNICODE
+	utf8_unload(c->cf_encoding);
+#endif
+
 	bch2_find_btree_nodes_exit(&c->found_btree_nodes);
 	bch2_free_pending_node_rewrites(c);
 	bch2_free_fsck_errs(c);
@@ -898,25 +903,6 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts,
 	if (ret)
 		goto err;
 
-#ifdef CONFIG_UNICODE
-	/* Default encoding until we can potentially have more as an option. */
-	c->cf_encoding = utf8_load(BCH_FS_DEFAULT_UTF8_ENCODING);
-	if (IS_ERR(c->cf_encoding)) {
-		printk(KERN_ERR "Cannot load UTF-8 encoding for filesystem. Version: %u.%u.%u",
-			unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
-			unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
-			unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
-		ret = -EINVAL;
-		goto err;
-	}
-#else
-	if (c->sb.features & BIT_ULL(BCH_FEATURE_casefolding)) {
-		printk(KERN_ERR "Cannot mount a filesystem with casefolding on a kernel without CONFIG_UNICODE\n");
-		ret = -EINVAL;
-		goto err;
-	}
-#endif
-
 	/* Compat: */
 	if (le16_to_cpu(sb->version) <= bcachefs_metadata_version_inode_v2 &&
 	    !BCH_SB_JOURNAL_FLUSH_DELAY(sb))
@@ -1002,6 +988,29 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts,
 	if (ret)
 		goto err;
 
+#ifdef CONFIG_UNICODE
+	/* Default encoding until we can potentially have more as an option. */
+	c->cf_encoding = utf8_load(BCH_FS_DEFAULT_UTF8_ENCODING);
+	if (IS_ERR(c->cf_encoding)) {
+		printk(KERN_ERR "Cannot load UTF-8 encoding for filesystem. Version: %u.%u.%u",
+			unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
+			unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
+			unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
+		ret = -EINVAL;
+		goto err;
+	}
+	bch_info(c, "Using encoding defined by superblock: utf8-%u.%u.%u",
+		 unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
+		 unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
+		 unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
+#else
+	if (c->sb.features & BIT_ULL(BCH_FEATURE_casefolding)) {
+		printk(KERN_ERR "Cannot mount a filesystem with casefolding on a kernel without CONFIG_UNICODE\n");
+		ret = -EINVAL;
+		goto err;
+	}
+#endif
+
 	for (i = 0; i < c->sb.nr_devices; i++) {
 		if (!bch2_member_exists(c->disk_sb.sb, i))
 			continue;
@@ -1070,12 +1079,49 @@ static void print_mount_opts(struct bch_fs *c)
 	printbuf_exit(&p);
 }
 
+static bool bch2_fs_may_start(struct bch_fs *c)
+{
+	struct bch_dev *ca;
+	unsigned flags = 0;
+
+	switch (c->opts.degraded) {
+	case BCH_DEGRADED_very:
+		flags |= BCH_FORCE_IF_DEGRADED|BCH_FORCE_IF_LOST;
+		break;
+	case BCH_DEGRADED_yes:
+		flags |= BCH_FORCE_IF_DEGRADED;
+		break;
+	default:
+		mutex_lock(&c->sb_lock);
+		for (unsigned i = 0; i < c->disk_sb.sb->nr_devices; i++) {
+			if (!bch2_member_exists(c->disk_sb.sb, i))
+				continue;
+
+			ca = bch2_dev_locked(c, i);
+
+			if (!bch2_dev_is_online(ca) &&
+			    (ca->mi.state == BCH_MEMBER_STATE_rw ||
+			     ca->mi.state == BCH_MEMBER_STATE_ro)) {
+				mutex_unlock(&c->sb_lock);
+				return false;
+			}
+		}
+		mutex_unlock(&c->sb_lock);
+		break;
+	}
+
+	return bch2_have_enough_devs(c, c->online_devs, flags, true);
+}
+
 int bch2_fs_start(struct bch_fs *c)
 {
 	time64_t now = ktime_get_real_seconds();
 	int ret = 0;
 
 	print_mount_opts(c);
+
+	if (!bch2_fs_may_start(c))
+		return -BCH_ERR_insufficient_devices_to_start;
 
 	down_write(&c->state_lock);
 	mutex_lock(&c->sb_lock);
@@ -1105,6 +1151,12 @@ int bch2_fs_start(struct bch_fs *c)
 
 	bch2_write_super(c);
 	mutex_unlock(&c->sb_lock);
+
+	ret = bch2_fs_resize_on_mount(c);
+	if (ret) {
+		up_write(&c->state_lock);
+		goto err;
+	}
 
 	rcu_read_lock();
 	for_each_online_member_rcu(c, ca)
@@ -1593,40 +1645,6 @@ bool bch2_dev_state_allowed(struct bch_fs *c, struct bch_dev *ca,
 	}
 }
 
-static bool bch2_fs_may_start(struct bch_fs *c)
-{
-	struct bch_dev *ca;
-	unsigned flags = 0;
-
-	switch (c->opts.degraded) {
-	case BCH_DEGRADED_very:
-		flags |= BCH_FORCE_IF_DEGRADED|BCH_FORCE_IF_LOST;
-		break;
-	case BCH_DEGRADED_yes:
-		flags |= BCH_FORCE_IF_DEGRADED;
-		break;
-	default:
-		mutex_lock(&c->sb_lock);
-		for (unsigned i = 0; i < c->disk_sb.sb->nr_devices; i++) {
-			if (!bch2_member_exists(c->disk_sb.sb, i))
-				continue;
-
-			ca = bch2_dev_locked(c, i);
-
-			if (!bch2_dev_is_online(ca) &&
-			    (ca->mi.state == BCH_MEMBER_STATE_rw ||
-			     ca->mi.state == BCH_MEMBER_STATE_ro)) {
-				mutex_unlock(&c->sb_lock);
-				return false;
-			}
-		}
-		mutex_unlock(&c->sb_lock);
-		break;
-	}
-
-	return bch2_have_enough_devs(c, c->online_devs, flags, true);
-}
-
 static void __bch2_dev_read_only(struct bch_fs *c, struct bch_dev *ca)
 {
 	bch2_dev_io_ref_stop(ca, WRITE);
@@ -2096,10 +2114,8 @@ err:
 	return ret;
 }
 
-int bch2_fs_resize_on_mount(struct bch_fs *c)
+static int bch2_fs_resize_on_mount(struct bch_fs *c)
 {
-	down_write(&c->state_lock);
-
 	for_each_online_member(c, ca, BCH_DEV_READ_REF_fs_resize_on_mount) {
 		u64 old_nbuckets = ca->mi.nbuckets;
 		u64 new_nbuckets = div64_u64(get_capacity(ca->disk_sb.bdev->bd_disk),
@@ -2138,9 +2154,6 @@ int bch2_fs_resize_on_mount(struct bch_fs *c)
 			}
 		}
 	}
-
-	bch2_recalc_capacity(c);
-	up_write(&c->state_lock);
 	return 0;
 }
 
@@ -2330,11 +2343,6 @@ struct bch_fs *bch2_fs_open(char * const *devices, unsigned nr_devices,
 		}
 	}
 	up_write(&c->state_lock);
-
-	if (!bch2_fs_may_start(c)) {
-		ret = -BCH_ERR_insufficient_devices_to_start;
-		goto err_print;
-	}
 
 	if (!c->opts.nostart) {
 		ret = bch2_fs_start(c);

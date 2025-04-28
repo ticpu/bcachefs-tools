@@ -350,18 +350,11 @@ again:
 		prt_char(&buf, ' ');
 		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(cur_k.k));
 
-		if (mustfix_fsck_err_on(bch2_err_matches(ret, EIO),
-				trans, btree_node_read_error,
-				"Topology repair: unreadable btree node at\n%s",
-				buf.buf)) {
+		if (bch2_err_matches(ret, EIO)) {
 			bch2_btree_node_evict(trans, cur_k.k);
 			cur = NULL;
 			ret = bch2_journal_key_delete(c, b->c.btree_id,
 						      b->c.level, cur_k.k->k.p);
-			if (ret)
-				break;
-
-			ret = bch2_btree_lost_data(c, b->c.btree_id);
 			if (ret)
 				break;
 			continue;
@@ -525,9 +518,6 @@ int bch2_check_topology(struct bch_fs *c)
 		bch2_btree_id_to_text(&buf, i);
 
 		if (r->error) {
-			ret = bch2_btree_lost_data(c, i);
-			if (ret)
-				break;
 reconstruct_root:
 			bch_info(c, "btree root %s unreadable, must recover from scan", buf.buf);
 

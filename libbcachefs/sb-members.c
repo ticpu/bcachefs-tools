@@ -20,7 +20,7 @@ int bch2_dev_missing_bkey(struct bch_fs *c, struct bkey_s_c k, unsigned dev)
 
 	bool print = bch2_count_fsck_err(c, ptr_to_invalid_device, &buf);
 
-	int ret = bch2_run_explicit_recovery_pass_printbuf(c, &buf,
+	int ret = bch2_run_explicit_recovery_pass_persistent(c, &buf,
 						 BCH_RECOVERY_PASS_check_allocations);
 
 	if (print)
@@ -35,9 +35,11 @@ void bch2_dev_missing_atomic(struct bch_fs *c, unsigned dev)
 		bch2_fs_inconsistent(c, "pointer to nonexistent device %u", dev);
 }
 
-void bch2_dev_bucket_missing(struct bch_fs *c, struct bpos bucket)
+void bch2_dev_bucket_missing(struct bch_dev *ca, u64 bucket)
 {
-	bch2_fs_inconsistent(c, "pointer to nonexistent bucket %llu:%llu", bucket.inode, bucket.offset);
+	bch2_fs_inconsistent(ca->fs,
+		"pointer to nonexistent bucket %llu on device %s (valid range %u-%llu)",
+		bucket, ca->name, ca->mi.first_bucket, ca->mi.nbuckets);
 }
 
 #define x(t, n, ...) [n] = #t,

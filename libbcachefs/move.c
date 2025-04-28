@@ -675,7 +675,7 @@ root_err:
 		if (ret)
 			break;
 
-		if (bkey_ge(bkey_start_pos(k.k), end))
+		if (bkey_gt(bkey_start_pos(k.k), end))
 			break;
 
 		if (ctxt->stats)
@@ -750,7 +750,8 @@ next:
 		if (ctxt->stats)
 			atomic64_add(k.k->size, &ctxt->stats->sectors_seen);
 next_nondata:
-		bch2_btree_iter_advance(trans, &iter);
+		if (!bch2_btree_iter_advance(trans, &iter))
+			break;
 	}
 out:
 	bch2_trans_iter_exit(trans, &reflink_iter);

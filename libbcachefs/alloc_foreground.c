@@ -1339,6 +1339,8 @@ alloc_done:
 	open_bucket_for_each(c, &req->wp->ptrs, ob, i)
 		req->wp->sectors_free = min(req->wp->sectors_free, ob->sectors_free);
 
+	req->wp->sectors_free = rounddown(req->wp->sectors_free, block_sectors(c));
+
 	BUG_ON(!req->wp->sectors_free || req->wp->sectors_free == UINT_MAX);
 
 	return 0;

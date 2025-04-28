@@ -13,8 +13,8 @@
 
 #include <linux/dcache.h>
 
-static int bch2_casefold(struct btree_trans *trans, const struct bch_hash_info *info,
-				const struct qstr *str, struct qstr *out_cf)
+int bch2_casefold(struct btree_trans *trans, const struct bch_hash_info *info,
+		  const struct qstr *str, struct qstr *out_cf)
 {
 	*out_cf = (struct qstr) QSTR_INIT(NULL, 0);
 
@@ -33,18 +33,6 @@ static int bch2_casefold(struct btree_trans *trans, const struct bch_hash_info *
 #else
 	return -EOPNOTSUPP;
 #endif
-}
-
-static inline int bch2_maybe_casefold(struct btree_trans *trans,
-				      const struct bch_hash_info *info,
-				      const struct qstr *str, struct qstr *out_cf)
-{
-	if (likely(!info->cf_encoding)) {
-		*out_cf = *str;
-		return 0;
-	} else {
-		return bch2_casefold(trans, info, str, out_cf);
-	}
 }
 
 static unsigned bch2_dirent_name_bytes(struct bkey_s_c_dirent d)
@@ -224,12 +212,19 @@ void bch2_dirent_to_text(struct printbuf *out, struct bch_fs *c, struct bkey_s_c
 	struct bkey_s_c_dirent d = bkey_s_c_to_dirent(k);
 	struct qstr d_name = bch2_dirent_get_name(d);
 
-	prt_printf(out, "%.*s -> ", d_name.len, d_name.name);
+	prt_printf(out, "%.*s", d_name.len, d_name.name);
+
+	if (d.v->d_casefold) {
+		struct qstr d_name = bch2_dirent_get_lookup_name(d);
+		prt_printf(out, " (casefold %.*s)", d_name.len, d_name.name);
+	}
+
+	prt_str(out, " ->");
 
 	if (d.v->d_type != DT_SUBVOL)
-		prt_printf(out, "%llu", le64_to_cpu(d.v->d_inum));
+		prt_printf(out, " %llu", le64_to_cpu(d.v->d_inum));
 	else
-		prt_printf(out, "%u -> %u",
+		prt_printf(out, " %u -> %u",
 			   le32_to_cpu(d.v->d_parent_subvol),
 			   le32_to_cpu(d.v->d_child_subvol));
 

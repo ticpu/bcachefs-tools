@@ -295,6 +295,16 @@ do {									\
 		bch2_print(_c, __VA_ARGS__);				\
 } while (0)
 
+#define bch2_print_str_ratelimited(_c, ...)				\
+do {									\
+	static DEFINE_RATELIMIT_STATE(_rs,				\
+				      DEFAULT_RATELIMIT_INTERVAL,	\
+				      DEFAULT_RATELIMIT_BURST);		\
+									\
+	if (__ratelimit(&_rs))						\
+		bch2_print_str(_c, __VA_ARGS__);			\
+} while (0)
+
 #define bch_info(c, fmt, ...) \
 	bch2_print(c, KERN_INFO bch2_fmt(c, fmt), ##__VA_ARGS__)
 #define bch_info_ratelimited(c, fmt, ...) \
@@ -834,6 +844,7 @@ struct bch_fs {
 		unsigned	nsec_per_time_unit;
 		u64		features;
 		u64		compat;
+		u64		recovery_passes_required;
 		unsigned long	errors_silent[BITS_TO_LONGS(BCH_FSCK_ERR_MAX)];
 		u64		btrees_lost_data;
 	}			sb;

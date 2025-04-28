@@ -484,7 +484,7 @@ struct bkey_i_alloc_v4 *bch2_trans_start_alloc_update(struct btree_trans *trans,
 	if (ret)
 		return ERR_PTR(ret);
 
-	ret = bch2_trans_update(trans, &iter, &a->k_i, flags);
+	ret = bch2_trans_update_ip(trans, &iter, &a->k_i, flags, _RET_IP_);
 	bch2_trans_iter_exit(trans, &iter);
 	return unlikely(ret) ? ERR_PTR(ret) : a;
 }
@@ -2393,14 +2393,16 @@ bkey_err:
 
 int bch2_fs_freespace_init(struct bch_fs *c)
 {
-	int ret = 0;
-	bool doing_init = false;
+	if (c->sb.features & BIT_ULL(BCH_FEATURE_small_image))
+		return 0;
+
 
 	/*
 	 * We can crash during the device add path, so we need to check this on
 	 * every mount:
 	 */
 
+	bool doing_init = false;
 	for_each_member_device(c, ca) {
 		if (ca->mi.freespace_initialized)
 			continue;
@@ -2410,7 +2412,7 @@ int bch2_fs_freespace_init(struct bch_fs *c)
 			doing_init = true;
 		}
 
-		ret = bch2_dev_freespace_init(c, ca, 0, ca->mi.nbuckets);
+		int ret = bch2_dev_freespace_init(c, ca, 0, ca->mi.nbuckets);
 		if (ret) {
 			bch2_dev_put(ca);
 			bch_err_fn(c, ret);

@@ -104,7 +104,7 @@ int __bch2_topology_error(struct bch_fs *c, struct printbuf *out)
 		__bch2_inconsistent_error(c, out);
 		return -BCH_ERR_btree_need_topology_repair;
 	} else {
-		return bch2_run_explicit_recovery_pass_printbuf(c, out, BCH_RECOVERY_PASS_check_topology) ?:
+		return bch2_run_explicit_recovery_pass_persistent(c, out, BCH_RECOVERY_PASS_check_topology) ?:
 			-BCH_ERR_btree_node_read_validate_error;
 	}
 }
@@ -391,6 +391,48 @@ bool __bch2_count_fsck_err(struct bch_fs *c,
 		prt_printf(msg, "Ratelimiting new instances of previous error\n");
 
 	return print && !repeat;
+}
+
+int bch2_fsck_err_opt(struct bch_fs *c,
+		      enum bch_fsck_flags flags,
+		      enum bch_sb_error_id err)
+{
+	if (!WARN_ON(err >= ARRAY_SIZE(fsck_flags_extra)))
+		flags |= fsck_flags_extra[err];
+
+	if (test_bit(BCH_FS_fsck_running, &c->flags)) {
+		if (!(flags & (FSCK_CAN_FIX|FSCK_CAN_IGNORE)))
+			return -BCH_ERR_fsck_repair_unimplemented;
+
+		switch (c->opts.fix_errors) {
+		case FSCK_FIX_exit:
+			return -BCH_ERR_fsck_errors_not_fixed;
+		case FSCK_FIX_yes:
+			if (flags & FSCK_CAN_FIX)
+				return -BCH_ERR_fsck_fix;
+			fallthrough;
+		case FSCK_FIX_no:
+			if (flags & FSCK_CAN_IGNORE)
+				return -BCH_ERR_fsck_ignore;
+			return -BCH_ERR_fsck_errors_not_fixed;
+		case FSCK_FIX_ask:
+			if (flags & FSCK_AUTOFIX)
+				return -BCH_ERR_fsck_fix;
+			return -BCH_ERR_fsck_ask;
+		default:
+			BUG();
+		}
+	} else {
+		if ((flags & FSCK_AUTOFIX) &&
+		    (c->opts.errors == BCH_ON_ERROR_continue ||
+		     c->opts.errors == BCH_ON_ERROR_fix_safe))
+			return -BCH_ERR_fsck_fix;
+
+		if (c->opts.errors == BCH_ON_ERROR_continue &&
+		    (flags & FSCK_CAN_IGNORE))
+			return -BCH_ERR_fsck_ignore;
+		return -BCH_ERR_fsck_errors_not_fixed;
+	}
 }
 
 int __bch2_fsck_err(struct bch_fs *c,
