@@ -87,12 +87,13 @@ int cmd_unlock(int argc, char *argv[])
 
 int cmd_set_passphrase(int argc, char *argv[])
 {
-	struct bch_opts opts = bch2_opts_empty();
-	struct bch_fs *c;
-
-	if (argc < 2)
+	args_shift(1);
+	if (!argc)
 		die("Please supply one or more devices");
 
+	darray_const_str devs = get_or_split_cmdline_devs(argc, argv);
+
+	struct bch_opts opts = bch2_opts_empty();
 	opt_set(opts, nostart, true);
 
 	/*
@@ -100,7 +101,7 @@ int cmd_set_passphrase(int argc, char *argv[])
 	 * to make sure we're opening and updating every component device:
 	 */
 
-	c = bch2_fs_open(argv + 1, argc - 1, opts);
+	struct bch_fs *c = bch2_fs_open(&devs, &opts);
 	if (IS_ERR(c))
 		die("Error opening %s: %s", argv[1], bch2_err_str(PTR_ERR(c)));
 
@@ -126,14 +127,16 @@ int cmd_set_passphrase(int argc, char *argv[])
 
 int cmd_remove_passphrase(int argc, char *argv[])
 {
-	struct bch_opts opts = bch2_opts_empty();
-	struct bch_fs *c;
-
-	if (argc < 2)
+	args_shift(1);
+	if (!argc)
 		die("Please supply one or more devices");
 
+	darray_const_str devs = get_or_split_cmdline_devs(argc, argv);
+
+	struct bch_opts opts = bch2_opts_empty();
 	opt_set(opts, nostart, true);
-	c = bch2_fs_open(argv + 1, argc - 1, opts);
+
+	struct bch_fs *c = bch2_fs_open(&devs, &opts);
 	if (IS_ERR(c))
 		die("Error opening %s: %s", argv[1], bch2_err_str(PTR_ERR(c)));
 

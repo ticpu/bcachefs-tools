@@ -123,7 +123,7 @@ static void build_fs(struct bch_fs *c, const char *src_path)
 int cmd_format(int argc, char *argv[])
 {
 	dev_opts_list devices = {};
-	darray_str device_paths = {};
+	darray_const_str device_paths = {};
 	struct format_opts opts	= format_opts_default();
 	struct dev_opts dev_opts = dev_opts_default();
 	bool force = false, no_passphrase = false, quiet = false, initialize = true, verbose = false;
@@ -302,9 +302,8 @@ int cmd_format(int argc, char *argv[])
 		 * Start the filesystem once, to allocate the journal and create
 		 * the root directory:
 		 */
-		struct bch_fs *c = bch2_fs_open(device_paths.data,
-						device_paths.nr,
-						bch2_opts_empty());
+		struct bch_opts open_opts = bch2_opts_empty();
+		struct bch_fs *c = bch2_fs_open(&device_paths, &open_opts);
 		if (IS_ERR(c))
 			die("error opening %s: %s", device_paths.data[0],
 			    bch2_err_str(PTR_ERR(c)));

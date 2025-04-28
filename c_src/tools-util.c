@@ -547,7 +547,7 @@ char *dev_to_path(dev_t dev)
 	return path;
 }
 
-struct mntent *dev_to_mount(char *dev)
+struct mntent *dev_to_mount(const char *dev)
 {
 	struct mntent *mnt, *ret = NULL;
 	FILE *f = setmntent("/proc/mounts", "r");
@@ -586,7 +586,7 @@ found:
 	return ret;
 }
 
-int dev_mounted(char *dev)
+int dev_mounted(const char *dev)
 {
 	struct mntent *mnt = dev_to_mount(dev);
 
@@ -748,9 +748,9 @@ unsigned version_parse(char *buf)
 	return BCH_VERSION(major, minor);
 }
 
-darray_str get_or_split_cmdline_devs(int argc, char *argv[])
+darray_const_str get_or_split_cmdline_devs(int argc, char *argv[])
 {
-	darray_str ret = {};
+	darray_const_str ret = {};
 
 	if (argc == 1) {
 		bch2_split_devs(argv[0], &ret);

@@ -74,7 +74,9 @@ int cmd_kill_btree_node(int argc, char *argv[])
 	if (!argc)
 		die("Please supply device(s)");
 
-	struct bch_fs *c = bch2_fs_open(argv, argc, opts);
+	darray_const_str devs = get_or_split_cmdline_devs(argc, argv);
+
+	struct bch_fs *c = bch2_fs_open(&devs, &opts);
 	if (IS_ERR(c))
 		die("error opening %s: %s", argv[0], bch2_err_str(PTR_ERR(c)));
 

@@ -253,14 +253,15 @@ static int migrate_fs(const char		*fs_path,
 
 	free(sb);
 
-	char *path[1] = { dev->path };
+	darray_const_str dev_paths = {};
+	darray_push(&dev_paths, dev->path);
 
 	struct bch_opts opts = bch2_opts_empty();
 	opt_set(opts, sb,	sb_offset);
 	opt_set(opts, nostart,	true);
 	opt_set(opts, noexcl,	true);
 
-	struct bch_fs *c = bch2_fs_open(path, 1, opts);
+	struct bch_fs *c = bch2_fs_open(&dev_paths, &opts);
 	if (IS_ERR(c))
 		die("Error opening new filesystem: %s", bch2_err_str(PTR_ERR(c)));
 
@@ -295,7 +296,7 @@ static int migrate_fs(const char		*fs_path,
 	opt_set(opts, nochanges, true);
 	opt_set(opts, read_only, true);
 
-	c = bch2_fs_open(path, 1, opts);
+	c = bch2_fs_open(&dev_paths, &opts);
 	if (IS_ERR(c))
 		die("Error opening new filesystem: %s", bch2_err_str(PTR_ERR(c)));
 
@@ -377,14 +378,14 @@ static void migrate_superblock_usage(void)
 
 int cmd_migrate_superblock(int argc, char *argv[])
 {
-	char *dev = NULL;
+	darray_const_str devs = {};
 	u64 sb_offset = 0;
 	int opt, ret;
 
 	while ((opt = getopt(argc, argv, "d:o:h")) != -1)
 		switch (opt) {
 			case 'd':
-				dev = optarg;
+				darray_push(&devs, optarg);
 				break;
 			case 'o':
 				ret = kstrtou64(optarg, 10, &sb_offset);
@@ -396,13 +397,13 @@ int cmd_migrate_superblock(int argc, char *argv[])
 				exit(EXIT_SUCCESS);
 		}
 
-	if (!dev)
+	if (!devs.nr)
 		die("Please specify a device");
 
 	if (!sb_offset)
 		die("Please specify offset of existing superblock");
 
-	int fd = xopen(dev, O_RDWR);
+	int fd = xopen(devs.data[0], O_RDWR);
 	struct bch_sb *sb = __bch2_super_read(fd, sb_offset);
 	unsigned sb_size = 1U << sb->layout.sb_max_size_bits;
 
@@ -435,7 +436,7 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	opt_set(opts, nostart,	true);
 	opt_set(opts, sb,	sb_offset);
 
-	struct bch_fs *c = bch2_fs_open(&dev, 1, opts);
+	struct bch_fs *c = bch2_fs_open(&devs, &opts);
 	ret =   PTR_ERR_OR_ZERO(c) ?:
 		bch2_buckets_nouse_alloc(c);
 	if (ret)
@@ -461,7 +462,7 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	 * inconsequential:
 	 */
 
-	c = bch2_fs_open(&dev, 1, opts);
+	c = bch2_fs_open(&devs, &opts);
 	ret =   PTR_ERR_OR_ZERO(c);
 	if (ret)
 		die("error opening filesystem: %s", bch2_err_str(ret));

@@ -94,10 +94,12 @@ int cmd_set_option(int argc, char *argv[])
 		}
 
 	if (!online) {
+		darray_const_str devs = get_or_split_cmdline_devs(argc, argv);
+
 		struct bch_opts open_opts = bch2_opts_empty();
 		opt_set(open_opts, nostart, true);
 
-		struct bch_fs *c = bch2_fs_open(argv, argc, open_opts);
+		struct bch_fs *c = bch2_fs_open(&devs, &open_opts);
 		if (IS_ERR(c)) {
 			fprintf(stderr, "error opening %s: %s\n", argv[0], bch2_err_str(PTR_ERR(c)));
 			exit(EXIT_FAILURE);

@@ -9,13 +9,25 @@ pub struct Fs {
 }
 
 impl Fs {
-    pub fn open(devs: &[PathBuf], opts: c::bch_opts) -> Result<Fs, bch_errcode> {
-        let devs: Vec<_> = devs
+    pub fn open(devs: &[PathBuf], mut opts: c::bch_opts) -> Result<Fs, bch_errcode> {
+        let devs_cstrs : Vec<_> = devs
             .iter()
-            .map(|i| CString::new(i.as_os_str().as_bytes()).unwrap().into_raw())
+            .map(|i| CString::new(i.as_os_str().as_bytes()).unwrap())
             .collect();
 
-        let ret = unsafe { c::bch2_fs_open(devs[..].as_ptr(), devs.len() as u32, opts) };
+        let mut devs_array: Vec<_> = devs_cstrs
+            .iter()
+            .map(|i| i.as_ptr())
+            .collect();
+
+        let ret = unsafe {
+            let mut devs: c::darray_const_str = std::mem::zeroed();
+
+            devs.data = devs_array[..].as_mut_ptr();
+            devs.nr = devs_array.len();
+
+            c::bch2_fs_open(&mut devs, &mut opts)
+        };
 
         errptr_to_result(ret).map(|fs| Fs { raw: fs })
     }

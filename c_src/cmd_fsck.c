@@ -113,7 +113,7 @@ static void append_opt(struct printbuf *out, const char *opt)
 	prt_str(out, opt);
 }
 
-static bool should_use_kernel_fsck(darray_str devs)
+static bool should_use_kernel_fsck(darray_const_str devs)
 {
 	system("modprobe bcachefs");
 
@@ -131,7 +131,7 @@ static bool should_use_kernel_fsck(darray_str devs)
 	opt_set(opts, nochanges, true);
 	opt_set(opts, read_only, true);
 
-	struct bch_fs *c = bch2_fs_open(devs.data, devs.nr, opts);
+	struct bch_fs *c = bch2_fs_open(&devs, &opts);
 	if (IS_ERR(c))
 		return false;
 
@@ -265,7 +265,7 @@ int cmd_fsck(int argc, char *argv[])
 		exit(8);
 	}
 
-	darray_str devs = get_or_split_cmdline_devs(argc, argv);
+	darray_const_str devs = get_or_split_cmdline_devs(argc, argv);
 
 	darray_for_each(devs, i)
 		if (dev_mounted(*i)) {
@@ -324,7 +324,7 @@ userland_fsck:
 		if (ret)
 			return ret;
 
-		struct bch_fs *c = bch2_fs_open(devs.data, devs.nr, opts);
+		struct bch_fs *c = bch2_fs_open(&devs, &opts);
 		if (IS_ERR(c))
 			exit(8);
 
