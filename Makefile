@@ -1,4 +1,4 @@
-VERSION=1.25.1
+VERSION=1.25.2
 
 PREFIX?=/usr/local
 LIBEXECDIR?=$(PREFIX)/libexec
