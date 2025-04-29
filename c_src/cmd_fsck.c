@@ -86,7 +86,7 @@ static int splice_fd_to_stdinout(int fd)
 			stdin_closed = true;
 	}
 
-	xclose(fd);
+	close(fd);
 	return 0;
 }
 
