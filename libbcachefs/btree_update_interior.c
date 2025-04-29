@@ -1396,7 +1396,7 @@ static void bch2_insert_fixup_btree_ptr(struct btree_update *as,
 	printbuf_exit(&buf);
 }
 
-static void
+static int
 bch2_btree_insert_keys_interior(struct btree_update *as,
 				struct btree_trans *trans,
 				struct btree_path *path,
@@ -1418,7 +1418,8 @@ bch2_btree_insert_keys_interior(struct btree_update *as,
 	     insert = bkey_next(insert))
 		bch2_insert_fixup_btree_ptr(as, trans, path, b, &node_iter, insert);
 
-	if (bch2_btree_node_check_topology(trans, b)) {
+	int ret = bch2_btree_node_check_topology(trans, b);
+	if (ret) {
 		struct printbuf buf = PRINTBUF;
 
 		for (struct bkey_i *k = keys->keys;
@@ -1428,11 +1429,15 @@ bch2_btree_insert_keys_interior(struct btree_update *as,
 			prt_newline(&buf);
 		}
 
-		panic("%s(): check_topology error: inserted keys\n%s", __func__, buf.buf);
+		bch2_fs_fatal_error(as->c, "%ps -> %s(): check_topology error %s: inserted keys\n%s",
+				    (void *) _RET_IP_, __func__, bch2_err_str(ret), buf.buf);
+		dump_stack();
+		return ret;
 	}
 
 	memmove_u64s_down(keys->keys, insert, keys->top_p - insert->_data);
 	keys->top_p -= insert->_data - keys->keys_p;
+	return 0;
 }
 
 static bool key_deleted_in_insert(struct keylist *insert_keys, struct bpos pos)
@@ -1566,11 +1571,11 @@ static void __btree_split_node(struct btree_update *as,
  * nodes that were coalesced, and thus in the middle of a child node post
  * coalescing:
  */
-static void btree_split_insert_keys(struct btree_update *as,
-				    struct btree_trans *trans,
-				    btree_path_idx_t path_idx,
-				    struct btree *b,
-				    struct keylist *keys)
+static int btree_split_insert_keys(struct btree_update *as,
+				   struct btree_trans *trans,
+				   btree_path_idx_t path_idx,
+				   struct btree *b,
+				   struct keylist *keys)
 {
 	struct btree_path *path = trans->paths + path_idx;
 
@@ -1580,8 +1585,12 @@ static void btree_split_insert_keys(struct btree_update *as,
 
 		bch2_btree_node_iter_init(&node_iter, b, &bch2_keylist_front(keys)->k.p);
 
-		bch2_btree_insert_keys_interior(as, trans, path, b, node_iter, keys);
+		int ret = bch2_btree_insert_keys_interior(as, trans, path, b, node_iter, keys);
+		if (ret)
+			return ret;
 	}
+
+	return 0;
 }
 
 static int btree_split(struct btree_update *as, struct btree_trans *trans,
@@ -1614,8 +1623,10 @@ static int btree_split(struct btree_update *as, struct btree_trans *trans,
 		__btree_split_node(as, trans, b, n, keys);
 
 		if (keys) {
-			btree_split_insert_keys(as, trans, path, n1, keys);
-			btree_split_insert_keys(as, trans, path, n2, keys);
+			ret =   btree_split_insert_keys(as, trans, path, n1, keys) ?:
+				btree_split_insert_keys(as, trans, path, n2, keys);
+			if (ret)
+				goto err;
 			BUG_ON(!bch2_keylist_empty(keys));
 		}
 
@@ -1661,7 +1672,9 @@ static int btree_split(struct btree_update *as, struct btree_trans *trans,
 			n3->sib_u64s[0] = U16_MAX;
 			n3->sib_u64s[1] = U16_MAX;
 
-			btree_split_insert_keys(as, trans, path, n3, &as->parent_keys);
+			ret = btree_split_insert_keys(as, trans, path, n3, &as->parent_keys);
+			if (ret)
+				goto err;
 		}
 	} else {
 		trace_and_count(c, btree_node_compact, trans, b);
@@ -1669,7 +1682,9 @@ static int btree_split(struct btree_update *as, struct btree_trans *trans,
 		n1 = bch2_btree_node_alloc_replacement(as, trans, b);
 
 		if (keys) {
-			btree_split_insert_keys(as, trans, path, n1, keys);
+			ret = btree_split_insert_keys(as, trans, path, n1, keys);
+			if (ret)
+				goto err;
 			BUG_ON(!bch2_keylist_empty(keys));
 		}
 
@@ -1816,14 +1831,14 @@ static int bch2_btree_insert_node(struct btree_update *as, struct btree_trans *t
 		goto split;
 	}
 
-	ret = bch2_btree_node_check_topology(trans, b);
+
+	ret =   bch2_btree_node_check_topology(trans, b) ?:
+		bch2_btree_insert_keys_interior(as, trans, path, b,
+					path->l[b->c.level].iter, keys);
 	if (ret) {
 		bch2_btree_node_unlock_write(trans, path, b);
 		return ret;
 	}
-
-	bch2_btree_insert_keys_interior(as, trans, path, b,
-					path->l[b->c.level].iter, keys);
 
 	trans_for_each_path_with_node(trans, b, linked, i)
 		bch2_btree_node_iter_peek(&linked->l[b->c.level].iter, b);
