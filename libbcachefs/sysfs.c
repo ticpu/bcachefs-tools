@@ -147,8 +147,9 @@ write_attribute(trigger_journal_flush);
 write_attribute(trigger_journal_writes);
 write_attribute(trigger_btree_cache_shrink);
 write_attribute(trigger_btree_key_cache_shrink);
-write_attribute(trigger_freelist_wakeup);
 write_attribute(trigger_btree_updates);
+write_attribute(trigger_freelist_wakeup);
+write_attribute(trigger_recalc_capacity);
 read_attribute(gc_gens_pos);
 __sysfs_attribute(read_fua_test, 0400);
 
@@ -199,6 +200,7 @@ read_attribute(copy_gc_wait);
 
 sysfs_pd_controller_attribute(rebalance);
 read_attribute(rebalance_status);
+read_attribute(snapshot_delete_status);
 
 read_attribute(new_stripes);
 
@@ -431,6 +433,9 @@ SHOW(bch2_fs)
 	if (attr == &sysfs_rebalance_status)
 		bch2_rebalance_status_to_text(out, c);
 
+	if (attr == &sysfs_snapshot_delete_status)
+		bch2_snapshot_delete_status_to_text(out, c);
+
 	/* Debugging: */
 
 	if (attr == &sysfs_journal_debug)
@@ -540,6 +545,12 @@ STORE(bch2_fs)
 	if (attr == &sysfs_trigger_freelist_wakeup)
 		closure_wake_up(&c->freelist_wait);
 
+	if (attr == &sysfs_trigger_recalc_capacity) {
+		down_read(&c->state_lock);
+		bch2_recalc_capacity(c);
+		up_read(&c->state_lock);
+	}
+
 #ifdef CONFIG_BCACHEFS_TESTS
 	if (attr == &sysfs_perf_test) {
 		char *tmp = kstrdup(buf, GFP_KERNEL), *p = tmp;
@@ -571,6 +582,7 @@ struct attribute *bch2_fs_files[] = {
 	&sysfs_btree_write_stats,
 
 	&sysfs_rebalance_status,
+	&sysfs_snapshot_delete_status,
 
 	&sysfs_compression_stats,
 
@@ -665,8 +677,9 @@ struct attribute *bch2_fs_internal_files[] = {
 	&sysfs_trigger_journal_writes,
 	&sysfs_trigger_btree_cache_shrink,
 	&sysfs_trigger_btree_key_cache_shrink,
-	&sysfs_trigger_freelist_wakeup,
 	&sysfs_trigger_btree_updates,
+	&sysfs_trigger_freelist_wakeup,
+	&sysfs_trigger_recalc_capacity,
 
 	&sysfs_gc_gens_pos,
 

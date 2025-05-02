@@ -543,7 +543,7 @@ void bch2_trans_copy_iter(struct btree_trans *, struct btree_iter *, struct btre
 
 void bch2_set_btree_iter_dontneed(struct btree_trans *, struct btree_iter *);
 
-#ifdef CONFIG_BCACHEFS_DEBUG
+#ifdef CONFIG_BCACHEFS_TRANS_KMALLOC_TRACE
 void bch2_trans_kmalloc_trace_to_text(struct printbuf *,
 				      darray_trans_kmalloc_trace *);
 #endif
@@ -553,7 +553,7 @@ void *__bch2_trans_kmalloc(struct btree_trans *, size_t, unsigned long);
 static inline void bch2_trans_kmalloc_trace(struct btree_trans *trans, size_t size,
 					    unsigned long ip)
 {
-#ifdef CONFIG_BCACHEFS_DEBUG
+#ifdef CONFIG_BCACHEFS_TRANS_KMALLOC_TRACE
 	darray_push(&trans->trans_kmalloc_trace,
 		    ((struct trans_kmalloc_trace) { .ip = ip, .bytes = size }));
 #endif

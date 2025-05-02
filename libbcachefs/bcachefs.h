@@ -216,6 +216,7 @@
 #include "recovery_passes_types.h"
 #include "sb-errors_types.h"
 #include "seqmutex.h"
+#include "snapshot_types.h"
 #include "time_stats.h"
 #include "util.h"
 
@@ -709,7 +710,7 @@ struct btree_transaction_stats {
 	unsigned		nr_max_paths;
 	unsigned		journal_entries_size;
 	unsigned		max_mem;
-#ifdef CONFIG_BCACHEFS_DEBUG
+#ifdef CONFIG_BCACHEFS_TRANS_KMALLOC_TRACE
 	darray_trans_kmalloc_trace trans_kmalloc_trace;
 #endif
 	char			*max_paths_text;
@@ -869,7 +870,7 @@ struct bch_fs {
 	struct mutex		snapshot_table_lock;
 	struct rw_semaphore	snapshot_create_lock;
 
-	struct work_struct	snapshot_delete_work;
+	struct snapshot_delete	snapshot_delete;
 	struct work_struct	snapshot_wait_for_pagecache_and_delete_work;
 	snapshot_id_list	snapshots_unlinked;
 	struct mutex		snapshots_unlinked_lock;

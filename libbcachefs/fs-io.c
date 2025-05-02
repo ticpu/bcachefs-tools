@@ -147,10 +147,24 @@ int __must_check bch2_write_inode_size(struct bch_fs *c,
 void __bch2_i_sectors_acct(struct bch_fs *c, struct bch_inode_info *inode,
 			   struct quota_res *quota_res, s64 sectors)
 {
-	bch2_fs_inconsistent_on((s64) inode->v.i_blocks + sectors < 0, c,
-				"inode %lu i_blocks underflow: %llu + %lli < 0 (ondisk %lli)",
-				inode->v.i_ino, (u64) inode->v.i_blocks, sectors,
-				inode->ei_inode.bi_sectors);
+	if (unlikely((s64) inode->v.i_blocks + sectors < 0)) {
+		struct printbuf buf = PRINTBUF;
+		bch2_log_msg_start(c, &buf);
+		prt_printf(&buf, "inode %lu i_blocks underflow: %llu + %lli < 0 (ondisk %lli)",
+			   inode->v.i_ino, (u64) inode->v.i_blocks, sectors,
+			   inode->ei_inode.bi_sectors);
+
+		bool print = bch2_count_fsck_err(c, vfs_inode_i_blocks_underflow, &buf);
+		if (print)
+			bch2_print_str(c, KERN_ERR, buf.buf);
+		printbuf_exit(&buf);
+
+		if (sectors < 0)
+			sectors = -inode->v.i_blocks;
+		else
+			sectors = 0;
+	}
+
 	inode->v.i_blocks += sectors;
 
 #ifdef CONFIG_BCACHEFS_QUOTA
@@ -244,7 +258,6 @@ out:
 	if (!ret)
 		ret = err;
 
-	bch_err_fn(c, ret);
 	return ret;
 }
 
@@ -506,11 +519,20 @@ int bchfs_truncate(struct mnt_idmap *idmap,
 		goto err;
 	}
 
-	bch2_fs_inconsistent_on(!inode->v.i_size && inode->v.i_blocks &&
-				!bch2_journal_error(&c->journal), c,
-				"inode %lu truncated to 0 but i_blocks %llu (ondisk %lli)",
-				inode->v.i_ino, (u64) inode->v.i_blocks,
-				inode->ei_inode.bi_sectors);
+	if (unlikely(!inode->v.i_size && inode->v.i_blocks &&
+		     !bch2_journal_error(&c->journal))) {
+		struct printbuf buf = PRINTBUF;
+		bch2_log_msg_start(c, &buf);
+		prt_printf(&buf,
+			   "inode %lu truncated to 0 but i_blocks %llu (ondisk %lli)",
+			   inode->v.i_ino, (u64) inode->v.i_blocks,
+			   inode->ei_inode.bi_sectors);
+
+		bool print = bch2_count_fsck_err(c, vfs_inode_i_blocks_not_zero_at_truncate, &buf);
+		if (print)
+			bch2_print_str(c, KERN_ERR, buf.buf);
+		printbuf_exit(&buf);
+	}
 
 	ret = bch2_setattr_nonsize(idmap, inode, iattr);
 err:

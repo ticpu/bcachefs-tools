@@ -256,10 +256,35 @@ static inline int bch2_extent_update_i_size_sectors(struct btree_trans *trans,
 	}
 
 	if (i_sectors_delta) {
+		s64 bi_sectors = le64_to_cpu(inode->v.bi_sectors);
+		if (unlikely(bi_sectors + i_sectors_delta < 0)) {
+			struct bch_fs *c = trans->c;
+			struct printbuf buf = PRINTBUF;
+			bch2_log_msg_start(c, &buf);
+			prt_printf(&buf, "inode %llu i_sectors underflow: %lli + %lli < 0",
+				   extent_iter->pos.inode, bi_sectors, i_sectors_delta);
+
+			bool print = bch2_count_fsck_err(c, inode_i_sectors_underflow, &buf);
+			if (print)
+				bch2_print_str(c, KERN_ERR, buf.buf);
+			printbuf_exit(&buf);
+
+			if (i_sectors_delta < 0)
+				i_sectors_delta = -bi_sectors;
+			else
+				i_sectors_delta = 0;
+		}
+
 		le64_add_cpu(&inode->v.bi_sectors, i_sectors_delta);
 		inode_update_flags = 0;
 	}
 
+	/*
+	 * extents, dirents and xattrs updates require that an inode update also
+	 * happens - to ensure that if a key exists in one of those btrees with
+	 * a given snapshot ID an inode is also present - so we may have to skip
+	 * the nojournal optimization:
+	 */
 	if (inode->k.p.snapshot != iter.snapshot) {
 		inode->k.p.snapshot = iter.snapshot;
 		inode_update_flags = 0;
