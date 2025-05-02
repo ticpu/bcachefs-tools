@@ -86,8 +86,8 @@ static int splice_fd_to_stdinout(int fd)
 			stdin_closed = true;
 	}
 
-	close(fd);
-	return 0;
+	/* the return code from fsck itself is returned via close() */
+	return close(fd);
 }
 
 static int fsck_online(const char *dev_path, const char *opt_str)
