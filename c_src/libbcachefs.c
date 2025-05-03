@@ -222,7 +222,7 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	sb.sb->nr_devices	= devs.nr;
 	SET_BCH_SB_VERSION_INCOMPAT_ALLOWED(sb.sb, opts.version);
 
-	if (opts.version == bcachefs_metadata_version_current)
+	if (opts.version > bcachefs_metadata_version_disk_accounting_big_endian)
 		sb.sb->features[0] |= cpu_to_le64(BCH_SB_FEATURES_ALL);
 
 	uuid_generate(sb.sb->uuid.b);
