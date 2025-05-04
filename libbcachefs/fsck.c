@@ -790,6 +790,7 @@ static int ref_visible2(struct bch_fs *c,
 
 struct inode_walker_entry {
 	struct bch_inode_unpacked inode;
+	bool			whiteout;
 	u64			count;
 	u64			i_size;
 };
@@ -818,12 +819,20 @@ static struct inode_walker inode_walker_init(void)
 static int add_inode(struct bch_fs *c, struct inode_walker *w,
 		     struct bkey_s_c inode)
 {
-	struct bch_inode_unpacked u;
-
-	return bch2_inode_unpack(inode, &u) ?:
-		darray_push(&w->inodes, ((struct inode_walker_entry) {
-		.inode		= u,
+	int ret = darray_push(&w->inodes, ((struct inode_walker_entry) {
+		.whiteout	= !bkey_is_inode(inode.k),
 	}));
+	if (ret)
+		return ret;
+
+	struct inode_walker_entry *n = &darray_last(w->inodes);
+	if (!n->whiteout) {
+		return bch2_inode_unpack(inode, &n->inode);
+	} else {
+		n->inode.bi_inum	= inode.k->p.inode;
+		n->inode.bi_snapshot	= inode.k->p.snapshot;
+		return 0;
+	}
 }
 
 static int get_inodes_all_snapshots(struct btree_trans *trans,
@@ -843,13 +852,12 @@ static int get_inodes_all_snapshots(struct btree_trans *trans,
 	w->recalculate_sums = false;
 	w->inodes.nr = 0;
 
-	for_each_btree_key_norestart(trans, iter, BTREE_ID_inodes, POS(0, inum),
-				     BTREE_ITER_all_snapshots, k, ret) {
-		if (k.k->p.offset != inum)
+	for_each_btree_key_max_norestart(trans, iter,
+			BTREE_ID_inodes, POS(0, inum), SPOS(0, inum, U32_MAX),
+			BTREE_ITER_all_snapshots, k, ret) {
+		ret = add_inode(c, w, k);
+		if (ret)
 			break;
-
-		if (bkey_is_inode(k.k))
-			add_inode(c, w, k);
 	}
 	bch2_trans_iter_exit(trans, &iter);
 
@@ -859,63 +867,6 @@ static int get_inodes_all_snapshots(struct btree_trans *trans,
 	w->first_this_inode = true;
 	w->have_inodes = true;
 	return 0;
-}
-
-static struct inode_walker_entry *
-lookup_inode_for_snapshot(struct btree_trans *trans, struct inode_walker *w, struct bkey_s_c k)
-{
-	struct bch_fs *c = trans->c;
-
-	struct inode_walker_entry *i;
-	__darray_for_each(w->inodes, i)
-		if (bch2_snapshot_is_ancestor(c, k.k->p.snapshot, i->inode.bi_snapshot))
-			goto found;
-
-	return NULL;
-found:
-	BUG_ON(k.k->p.snapshot > i->inode.bi_snapshot);
-
-	struct printbuf buf = PRINTBUF;
-	int ret = 0;
-
-	if (fsck_err_on(k.k->p.snapshot != i->inode.bi_snapshot,
-			trans, snapshot_key_missing_inode_snapshot,
-			 "have key for inode %llu:%u but have inode in ancestor snapshot %u\n"
-			 "unexpected because we should always update the inode when we update a key in that inode\n"
-			 "%s",
-			 w->last_pos.inode, k.k->p.snapshot, i->inode.bi_snapshot,
-			 (bch2_bkey_val_to_text(&buf, c, k),
-			  buf.buf))) {
-		struct bch_inode_unpacked new = i->inode;
-
-		new.bi_snapshot = k.k->p.snapshot;
-
-		ret = __bch2_fsck_write_inode(trans, &new) ?:
-			bch2_trans_commit(trans, NULL, NULL, 0) ?:
-			-BCH_ERR_transaction_restart_nested;
-		goto fsck_err;
-	}
-
-	printbuf_exit(&buf);
-	return i;
-fsck_err:
-	printbuf_exit(&buf);
-	return ERR_PTR(ret);
-}
-
-static struct inode_walker_entry *walk_inode(struct btree_trans *trans,
-					     struct inode_walker *w,
-					     struct bkey_s_c k)
-{
-	if (w->last_pos.inode != k.k->p.inode) {
-		int ret = get_inodes_all_snapshots(trans, w, k.k->p.inode);
-		if (ret)
-			return ERR_PTR(ret);
-	}
-
-	w->last_pos = k.k->p;
-
-	return lookup_inode_for_snapshot(trans, w, k);
 }
 
 static int get_visible_inodes(struct btree_trans *trans,
@@ -951,6 +902,80 @@ static int get_visible_inodes(struct btree_trans *trans,
 	bch2_trans_iter_exit(trans, &iter);
 
 	return ret;
+}
+
+static struct inode_walker_entry *
+lookup_inode_for_snapshot(struct btree_trans *trans, struct inode_walker *w, struct bkey_s_c k)
+{
+	struct bch_fs *c = trans->c;
+
+	struct inode_walker_entry *i;
+	__darray_for_each(w->inodes, i)
+		if (bch2_snapshot_is_ancestor(c, k.k->p.snapshot, i->inode.bi_snapshot))
+			goto found;
+
+	return NULL;
+found:
+	BUG_ON(k.k->p.snapshot > i->inode.bi_snapshot);
+
+	struct printbuf buf = PRINTBUF;
+	int ret = 0;
+
+	if (fsck_err_on(k.k->p.snapshot != i->inode.bi_snapshot,
+			trans, snapshot_key_missing_inode_snapshot,
+			 "have key for inode %llu:%u but have inode in ancestor snapshot %u\n"
+			 "unexpected because we should always update the inode when we update a key in that inode\n"
+			 "%s",
+			 w->last_pos.inode, k.k->p.snapshot, i->inode.bi_snapshot,
+			 (bch2_bkey_val_to_text(&buf, c, k),
+			  buf.buf))) {
+		struct bch_inode_unpacked new = i->inode;
+
+		new.bi_snapshot = k.k->p.snapshot;
+
+		ret = __bch2_fsck_write_inode(trans, &new) ?:
+			bch2_trans_commit(trans, NULL, NULL, 0);
+		if (ret)
+			goto fsck_err;
+
+		struct inode_walker_entry new_entry = *i;
+
+		new_entry.inode.bi_snapshot	= k.k->p.snapshot;
+		new_entry.count			= 0;
+		new_entry.i_size		= 0;
+
+		while (i > w->inodes.data && i[-1].inode.bi_snapshot > k.k->p.snapshot)
+			--i;
+
+		size_t pos = i - w->inodes.data;
+		ret = darray_insert_item(&w->inodes, pos, new_entry);
+		if (ret)
+			goto fsck_err;
+
+		ret = -BCH_ERR_transaction_restart_nested;
+		goto fsck_err;
+	}
+
+	printbuf_exit(&buf);
+	return i;
+fsck_err:
+	printbuf_exit(&buf);
+	return ERR_PTR(ret);
+}
+
+static struct inode_walker_entry *walk_inode(struct btree_trans *trans,
+					     struct inode_walker *w,
+					     struct bkey_s_c k)
+{
+	if (w->last_pos.inode != k.k->p.inode) {
+		int ret = get_inodes_all_snapshots(trans, w, k.k->p.inode);
+		if (ret)
+			return ERR_PTR(ret);
+	}
+
+	w->last_pos = k.k->p;
+
+	return lookup_inode_for_snapshot(trans, w, k);
 }
 
 /*
