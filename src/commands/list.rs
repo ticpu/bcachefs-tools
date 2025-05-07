@@ -15,11 +15,18 @@ use crate::logging;
 
 fn list_keys(fs: &Fs, opt: &Cli) -> anyhow::Result<()> {
     let trans = BtreeTrans::new(fs);
+
+    let mut flags = BtreeIterFlags::PREFETCH;
+
+    if opt.start.snapshot == 0 {
+        flags |= BtreeIterFlags::ALL_SNAPSHOTS;
+    }
+
     let mut iter = BtreeIter::new(
         &trans,
         opt.btree,
         opt.start,
-        BtreeIterFlags::ALL_SNAPSHOTS | BtreeIterFlags::PREFETCH,
+        flags,
     );
 
     while let Some(k) = iter.peek_and_restart()? {
@@ -121,6 +128,9 @@ enum Mode {
 /// List filesystem metadata in textual form
 #[derive(Parser, Debug)]
 pub struct Cli {
+    #[arg(short, long, default_value = "keys")]
+    mode: Mode,
+
     /// Btree to list from
     #[arg(short, long, default_value_t=bcachefs::btree_id::BTREE_ID_extents)]
     btree: bcachefs::btree_id,
@@ -140,9 +150,6 @@ pub struct Cli {
     /// End position
     #[arg(short, long, default_value = "SPOS_MAX")]
     end: bcachefs::bpos,
-
-    #[arg(short, long, default_value = "keys")]
-    mode: Mode,
 
     /// Check (fsck) the filesystem first
     #[arg(short, long)]
