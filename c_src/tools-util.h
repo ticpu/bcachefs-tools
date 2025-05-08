@@ -92,8 +92,8 @@ void write_file_str(int, const char *, const char *);
 char *read_file_str(int, const char *);
 u64 read_file_u64(int, const char *);
 
-ssize_t read_string_list_or_die(const char *, const char * const[],
-				const char *);
+ssize_t read_string_list_or_die(const char *, const char * const[], const char *);
+u64 read_flag_list_or_die(char *, const char * const[], const char *);
 
 u64 get_size(int);
 unsigned get_blocksize(int);

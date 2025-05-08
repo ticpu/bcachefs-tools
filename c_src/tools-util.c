@@ -156,6 +156,16 @@ ssize_t read_string_list_or_die(const char *opt, const char * const list[],
 	return v;
 }
 
+u64 read_flag_list_or_die(char *opt, const char * const list[],
+			  const char *msg)
+{
+	u64 v = bch2_read_flag_list(opt, list);
+	if (v == (u64) -1)
+		die("Bad %s %s", msg, opt);
+
+	return v;
+}
+
 /* Returns size of file or block device: */
 u64 get_size(int fd)
 {
