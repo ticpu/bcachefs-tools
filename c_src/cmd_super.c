@@ -136,6 +136,20 @@ int cmd_show_super(int argc, char *argv[])
 
 typedef DARRAY(struct bch_sb *) probed_sb_list;
 
+struct recover_super_args {
+	u64		dev_size;
+	u64		offset;
+	u64		scan_len;
+
+	const char	*src_device;
+	int		dev_idx;
+
+	bool		yes;
+	bool		verbose;
+
+	const char	*dev_path;
+};
+
 static void probe_one_super(int dev_fd, unsigned sb_size, u64 offset,
 			    probed_sb_list *sbs, bool verbose)
 {
@@ -225,84 +239,15 @@ static int bch2_sb_time_cmp(struct bch_sb *l, struct bch_sb *r)
 		       bch2_sb_last_mount_time(r));
 }
 
-static void recover_super_usage(void)
+static struct bch_sb *recover_super_from_scan(struct recover_super_args args, int dev_fd)
 {
-	puts("bcachefs recover-super \n"
-	     "Usage: bcachefs recover-super [OPTION].. device\n"
-	     "\n"
-	     "Attempt to recover a filesystem on a device that has had the main superblock\n"
-	     "and superblock layout overwritten.\n"
-	     "All options will be guessed if not provided\n"
-	     "\n"
-	     "Options:\n"
-	     "  -d, --dev_size              size of filessytem on device, in bytes \n"
-	     "  -o, --offset                offset to probe, in bytes\n"
-	     "  -y, --yes                   Recover without prompting\n"
-	     "  -v, --verbose               Increase logging level\n"
-	     "  -h, --help                  display this help and exit\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	exit(EXIT_SUCCESS);
-}
-
-int cmd_recover_super(int argc, char *argv[])
-{
-	static const struct option longopts[] = {
-		{ "dev_size",			1, NULL, 'd' },
-		{ "offset",			1, NULL, 'o' },
-		{ "yes",			0, NULL, 'y' },
-		{ "verbose",			0, NULL, 'v' },
-		{ "help",			0, NULL, 'h' },
-		{ NULL }
-	};
-	u64 dev_size = 0, offset = 0;
-	bool yes = false, verbose = false;
-	int opt;
-
-	while ((opt = getopt_long(argc, argv, "d:o:yvh", longopts, NULL)) != -1)
-		switch (opt) {
-		case 'd':
-			if (bch2_strtoull_h(optarg, &dev_size))
-				die("invalid offset");
-			break;
-		case 'o':
-			if (bch2_strtoull_h(optarg, &offset))
-				die("invalid offset");
-
-			if (offset & 511)
-				die("offset must be a multiple of 512");
-			break;
-		case 'y':
-			yes = true;
-			break;
-		case 'v':
-			verbose = true;
-			break;
-		case 'h':
-			recover_super_usage();
-			break;
-		}
-	args_shift(optind);
-
-	char *dev_path = arg_pop();
-	if (!dev_path)
-		die("please supply a device");
-	if (argc)
-		die("too many arguments");
-
-	int dev_fd = xopen(dev_path, O_RDWR);
-
-	if (!dev_size)
-		dev_size = get_size(dev_fd);
-
 	probed_sb_list sbs = {};
 
-	if (offset) {
-		probe_one_super(dev_fd, SUPERBLOCK_SIZE_DEFAULT, offset, &sbs, verbose);
+	if (args.offset) {
+		probe_one_super(dev_fd, SUPERBLOCK_SIZE_DEFAULT, args.offset, &sbs, args.verbose);
 	} else {
-		unsigned scan_len = 16 << 20; /* 16MB, start and end of device */
-
-		probe_sb_range(dev_fd, 4096, scan_len, &sbs, verbose);
-		probe_sb_range(dev_fd, dev_size - scan_len, dev_size, &sbs, verbose);
+		probe_sb_range(dev_fd, 4096, args.scan_len, &sbs, args.verbose);
+		probe_sb_range(dev_fd, args.dev_size - args.scan_len, args.dev_size, &sbs, args.verbose);
 	}
 
 	if (!sbs.nr) {
@@ -315,19 +260,171 @@ int cmd_recover_super(int argc, char *argv[])
 		if (!best || bch2_sb_time_cmp(best, *sb) < 0)
 			best = *sb;
 
-	struct printbuf buf = PRINTBUF;
-	bch2_sb_to_text(&buf, best, true, BIT_ULL(BCH_SB_FIELD_members_v2));
+	darray_for_each(sbs, sb)
+		if (*sb == best)
+			*sb = NULL;
 
-	printf("Found superblock:\n%s", buf.buf);
-	printf("Recover?");
-
-	if (yes || ask_yn())
-		bch2_super_write(dev_fd, best);
-
-	printbuf_exit(&buf);
 	darray_for_each(sbs, sb)
 		kfree(*sb);
 	darray_exit(&sbs);
+	return best;
+}
 
+static struct bch_sb *recover_super_from_member(struct recover_super_args args)
+{
+	struct bch_opts opts = bch2_opts_empty();
+	opt_set(opts, noexcl,		true);
+	opt_set(opts, nochanges,	true);
+
+	struct bch_sb_handle src_sb;
+	int ret = bch2_read_super(args.src_device, &opts, &src_sb);
+	if (ret)
+		die("Error opening %s: %s", args.src_device, bch2_err_str(ret));
+
+	if (!bch2_member_exists(src_sb.sb, args.dev_idx))
+		die("Member %u does not exist in source superblock", args.dev_idx);
+
+	bch2_sb_field_delete(&src_sb, BCH_SB_FIELD_journal);
+	bch2_sb_field_delete(&src_sb, BCH_SB_FIELD_journal_v2);
+	src_sb.sb->dev_idx = args.dev_idx;
+
+	struct bch_sb *sb = src_sb.sb;
+	src_sb.sb = NULL;
+
+	bch2_free_super(&src_sb);
+
+	struct bch_member m = bch2_sb_member_get(sb, args.dev_idx);
+
+	bch2_sb_layout_init(&sb->layout,
+			    le16_to_cpu(sb->block_size) << 9,
+			    le16_to_cpu(m.bucket_size) << 9,
+			    1U << sb->layout.sb_max_size_bits,
+			    BCH_SB_SECTOR,
+			    args.dev_size >> 9,
+			    false);
+
+	return sb;
+}
+
+static void recover_super_usage(void)
+{
+	puts("bcachefs recover-super \n"
+	     "Usage: bcachefs recover-super [OPTION].. device\n"
+	     "\n"
+	     "Attempt to recover a filesystem on a device that has had the main superblock\n"
+	     "and superblock layout overwritten.\n"
+	     "All options will be guessed if not provided\n"
+	     "\n"
+	     "Options:\n"
+	     "  -d, --dev_size              size of filessytem on device, in bytes \n"
+	     "  -o, --offset                offset to probe, in bytes\n"
+	     "  -l, --scan_len              Length in bytes to scan from start and end of device\n"
+	     "                              Should be >= bucket size to find sb at end of device\n"
+	     "                              Default 16M\n"
+	     "  -s, --src_device            member device to recover from, in a multi device fs\n"
+	     "  -i, --dev_idx               index of this device, if recovering from another device\n"
+	     "  -y, --yes                   Recover without prompting\n"
+	     "  -v, --verbose               Increase logging level\n"
+	     "  -h, --help                  display this help and exit\n"
+	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
+}
+
+int cmd_recover_super(int argc, char *argv[])
+{
+	static const struct option longopts[] = {
+		{ "dev_size",			required_argument, NULL, 'd' },
+		{ "offset",			required_argument, NULL, 'o' },
+		{ "scan_len",			required_argument, NULL, 'l' },
+		{ "src_device",			required_argument, NULL, 's' },
+		{ "dev_idx",			required_argument, NULL, 'i' },
+		{ "yes",			no_argument, NULL, 'y' },
+		{ "verbose",			no_argument, NULL, 'v' },
+		{ "help",			no_argument, NULL, 'h' },
+		{ NULL }
+	};
+	struct recover_super_args args = {
+		.scan_len	= 16 << 20,
+		.dev_idx	= -1,
+	};
+	int opt;
+
+	while ((opt = getopt_long(argc, argv, "d:o:yvh", longopts, NULL)) != -1)
+		switch (opt) {
+		case 'd':
+			if (bch2_strtoull_h(optarg, &args.dev_size))
+				die("invalid dev_size");
+			break;
+		case 'o':
+			if (bch2_strtoull_h(optarg, &args.offset))
+				die("invalid offset");
+
+			if (args.offset & 511)
+				die("offset must be a multiple of 512");
+			break;
+		case 'l':
+			if (bch2_strtoull_h(optarg, &args.scan_len))
+				die("invalid scan_len");
+			break;
+		case 's':
+			args.src_device = strdup(optarg);
+			break;
+		case 'i':
+			if (kstrtoint(optarg, 10, &args.dev_idx) ||
+			    args.dev_idx < 0)
+				die("invalid dev_idx");
+			break;
+		case 'y':
+			args.yes = true;
+			break;
+		case 'v':
+			args.verbose = true;
+			break;
+		case 'h':
+			recover_super_usage();
+			break;
+		}
+	args_shift(optind);
+
+	if (args.src_device && args.dev_idx == -1)
+		die("--src_device requires --dev_idx");
+
+	if (args.dev_idx >= 0 && !args.src_device)
+		die("--dev_idx requires --src_device");
+
+	char *dev_path = arg_pop();
+	if (!dev_path)
+		die("please supply a device");
+	if (argc)
+		die("too many arguments");
+
+	int dev_fd = xopen(dev_path, O_RDWR);
+
+	if (!args.dev_size)
+		args.dev_size = get_size(dev_fd);
+
+	struct bch_sb *sb = !args.src_device
+		? recover_super_from_scan(args, dev_fd)
+		: recover_super_from_member(args);
+
+	struct printbuf buf = PRINTBUF;
+	bch2_sb_to_text(&buf, sb, true, BIT_ULL(BCH_SB_FIELD_members_v2));
+
+	printf("Found superblock:\n%s\n", buf.buf);
+
+	if (args.yes)
+		printf("Recovering\n");
+	else
+		printf("Recover? ");
+
+	if (args.yes || ask_yn())
+		bch2_super_write(dev_fd, sb);
+
+	if (args.src_device)
+		printf("Recovered device will no longer have a journal, please run fsck\n");
+
+	printbuf_exit(&buf);
+	kvfree(sb);
+	xclose(dev_fd);
 	return 0;
 }

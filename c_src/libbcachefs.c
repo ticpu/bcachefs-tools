@@ -36,8 +36,10 @@
 
 void bch2_sb_layout_init(struct bch_sb_layout *l,
 			 unsigned block_size,
+			 unsigned bucket_size,
 			 unsigned sb_size,
-			 u64 sb_start, u64 sb_end)
+			 u64 sb_start, u64 sb_end,
+			 bool no_sb_at_end)
 {
 	u64 sb_pos = sb_start;
 	unsigned i;
@@ -61,6 +63,20 @@ void bch2_sb_layout_init(struct bch_sb_layout *l,
 	if (sb_pos > sb_end)
 		die("insufficient space for superblocks: start %llu end %llu > %llu size %u",
 		    sb_start, sb_pos, sb_end, sb_size);
+
+	/*
+	 * Also create a backup superblock at the end of the disk:
+	 *
+	 * If we're not creating a superblock at the default offset, it
+	 * means we're being run from the migrate tool and we could be
+	 * overwriting existing data if we write to the end of the disk:
+	 */
+	if (sb_start == BCH_SB_SECTOR && !no_sb_at_end) {
+		u64 backup_sb = sb_end - (1 << l->sb_max_size_bits);
+
+		backup_sb = rounddown(backup_sb, bucket_size >> 9);
+		l->sb_offset[l->nr_superblocks++] = cpu_to_le64(backup_sb);
+	}
 }
 
 static u64 dev_max_bucket_size(u64 dev_size)
@@ -304,24 +320,12 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 			i->sb_end	= size_sectors;
 		}
 
-		bch2_sb_layout_init(&sb.sb->layout, fs_opts.block_size,
+		bch2_sb_layout_init(&sb.sb->layout,
+				    fs_opts.block_size,
+				    i->opts.bucket_size,
 				    opts.superblock_size,
-				    i->sb_offset, i->sb_end);
-
-		/*
-		 * Also create a backup superblock at the end of the disk:
-		 *
-		 * If we're not creating a superblock at the default offset, it
-		 * means we're being run from the migrate tool and we could be
-		 * overwriting existing data if we write to the end of the disk:
-		 */
-		if (i->sb_offset == BCH_SB_SECTOR && !opts.no_sb_at_end) {
-			struct bch_sb_layout *l = &sb.sb->layout;
-			u64 backup_sb = size_sectors - (1 << l->sb_max_size_bits);
-
-			backup_sb = rounddown(backup_sb, i->opts.bucket_size >> 9);
-			l->sb_offset[l->nr_superblocks++] = cpu_to_le64(backup_sb);
-		}
+				    i->sb_offset, i->sb_end,
+				    opts.no_sb_at_end);
 
 		if (i->sb_offset == BCH_SB_SECTOR) {
 			/* Zero start of disk */
