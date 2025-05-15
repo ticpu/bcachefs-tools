@@ -355,13 +355,13 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 			bch2_prt_compression_type(out, acc_k.compression.type);
 			prt_tab(out);
 
-			prt_human_readable_u64(out, sectors_compressed << 9);
+			prt_units_u64(out, sectors_compressed << 9);
 			prt_tab_rjust(out);
 
-			prt_human_readable_u64(out, sectors_uncompressed << 9);
+			prt_units_u64(out, sectors_uncompressed << 9);
 			prt_tab_rjust(out);
 
-			prt_human_readable_u64(out, nr_extents
+			prt_units_u64(out, nr_extents
 					       ? div_u64(sectors_uncompressed << 9, nr_extents)
 					       : 0);
 			prt_tab_rjust(out);
