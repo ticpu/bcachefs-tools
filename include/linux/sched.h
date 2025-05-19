@@ -79,6 +79,8 @@ struct task_struct {
 	int			(*thread_fn)(void *);
 	void			*thread_data;
 
+	int			prio;
+
 	atomic_t		usage;
 	int			state;
 
@@ -103,6 +105,8 @@ struct task_struct {
 		u64		exec_start;
 	}			se;
 };
+
+#define MAX_RT_PRIO	0
 
 extern __thread struct task_struct *current;
 

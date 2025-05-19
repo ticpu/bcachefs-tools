@@ -10,11 +10,13 @@
 
 #include <linux/bug.h>
 #include <linux/byteorder.h>
+#include <linux/cleanup.h>
 #include <linux/compiler.h>
 #include <linux/dcache.h>
 #include <linux/kmsan-checks.h>
 #include <linux/math.h>
 #include <linux/minmax.h>
+#include <linux/static_key.h>
 
 #define BIT(nr)			(1UL << (nr))
 #define BIT_ULL(nr)		(1ULL << (nr))

@@ -213,7 +213,6 @@
 #include "fifo.h"
 #include "nocow_locking_types.h"
 #include "opts.h"
-#include "recovery_passes_types.h"
 #include "sb-errors_types.h"
 #include "seqmutex.h"
 #include "snapshot_types.h"
@@ -403,17 +402,20 @@ do {									\
 		"compare them")						\
 	BCH_DEBUG_PARAM(backpointers_no_use_write_buffer,		\
 		"Don't use the write buffer for backpointers, enabling "\
-		"extra runtime checks")
+		"extra runtime checks")					\
+	BCH_DEBUG_PARAM(debug_check_btree_locking,			\
+		"Enable additional asserts for btree locking")		\
+	BCH_DEBUG_PARAM(debug_check_iterators,				\
+		"Enables extra verification for btree iterators")	\
+	BCH_DEBUG_PARAM(debug_check_bset_lookups,			\
+		"Enables extra verification for bset lookups")		\
+	BCH_DEBUG_PARAM(debug_check_btree_accounting,			\
+		"Verify btree accounting for keys within a node")	\
+	BCH_DEBUG_PARAM(debug_check_bkey_unpack,			\
+		"Enables extra verification for bkey unpack")
 
 /* Parameters that should only be compiled in debug mode: */
 #define BCH_DEBUG_PARAMS_DEBUG()					\
-	BCH_DEBUG_PARAM(expensive_debug_checks,				\
-		"Enables various runtime debugging checks that "	\
-		"significantly affect performance")			\
-	BCH_DEBUG_PARAM(debug_check_iterators,				\
-		"Enables extra verification for btree iterators")	\
-	BCH_DEBUG_PARAM(debug_check_btree_accounting,			\
-		"Verify btree accounting for keys within a node")	\
 	BCH_DEBUG_PARAM(journal_seq_verify,				\
 		"Store the journal sequence number in the version "	\
 		"number of every btree key, and verify that btree "	\
@@ -440,15 +442,9 @@ do {									\
 #define BCH_DEBUG_PARAMS() BCH_DEBUG_PARAMS_ALWAYS()
 #endif
 
-#define BCH_DEBUG_PARAM(name, description) extern bool bch2_##name;
-BCH_DEBUG_PARAMS()
+#define BCH_DEBUG_PARAM(name, description) extern struct static_key_false bch2_##name;
+BCH_DEBUG_PARAMS_ALL()
 #undef BCH_DEBUG_PARAM
-
-#ifndef CONFIG_BCACHEFS_DEBUG
-#define BCH_DEBUG_PARAM(name, description) static const __maybe_unused bool bch2_##name;
-BCH_DEBUG_PARAMS_DEBUG()
-#undef BCH_DEBUG_PARAM
-#endif
 
 #define BCH_TIME_STATS()			\
 	x(btree_node_mem_alloc)			\
@@ -456,6 +452,7 @@ BCH_DEBUG_PARAMS_DEBUG()
 	x(btree_node_compact)			\
 	x(btree_node_merge)			\
 	x(btree_node_sort)			\
+	x(btree_node_get)			\
 	x(btree_node_read)			\
 	x(btree_node_read_done)			\
 	x(btree_node_write)			\
@@ -463,6 +460,10 @@ BCH_DEBUG_PARAMS_DEBUG()
 	x(btree_interior_update_total)		\
 	x(btree_gc)				\
 	x(data_write)				\
+	x(data_write_to_submit)			\
+	x(data_write_to_queue)			\
+	x(data_write_to_btree_update)		\
+	x(data_write_btree_update)		\
 	x(data_read)				\
 	x(data_promote)				\
 	x(journal_flush_write)			\
@@ -501,6 +502,7 @@ enum bch_time_stats {
 #include "keylist_types.h"
 #include "quota_types.h"
 #include "rebalance_types.h"
+#include "recovery_passes_types.h"
 #include "replicas_types.h"
 #include "sb-members_types.h"
 #include "subvolume_types.h"
@@ -574,6 +576,12 @@ enum bch_dev_write_ref {
 	BCH_DEV_WRITE_REF_NR,
 };
 
+struct bucket_bitmap {
+	unsigned long		*buckets;
+	u64			nr;
+	struct mutex		lock;
+};
+
 struct bch_dev {
 	struct kobject		kobj;
 #ifdef CONFIG_BCACHEFS_DEBUG
@@ -618,8 +626,8 @@ struct bch_dev {
 	u8			*oldest_gen;
 	unsigned long		*buckets_nouse;
 
-	unsigned long		*bucket_backpointer_mismatches;
-	unsigned long		*bucket_backpointer_empty;
+	struct bucket_bitmap	bucket_backpointer_mismatch;
+	struct bucket_bitmap	bucket_backpointer_empty;
 
 	struct bch_dev_usage_full __percpu
 				*usage;
@@ -630,10 +638,6 @@ struct bch_dev {
 	unsigned		nr_open_buckets;
 	unsigned		nr_partial_buckets;
 	unsigned		nr_btree_reserve;
-
-	size_t			inc_gen_needs_gc;
-	size_t			inc_gen_really_needs_gc;
-	size_t			buckets_waiting_on_journal;
 
 	struct work_struct	invalidate_work;
 	struct work_struct	discard_work;
@@ -680,8 +684,8 @@ struct bch_dev {
 	x(going_ro)			\
 	x(write_disable_complete)	\
 	x(clean_shutdown)		\
-	x(recovery_running)		\
-	x(fsck_running)			\
+	x(in_recovery)			\
+	x(in_fsck)			\
 	x(initial_gc_unfixed)		\
 	x(need_delete_dead_snapshots)	\
 	x(error)			\
@@ -708,7 +712,6 @@ struct btree_transaction_stats {
 	struct bch2_time_stats	lock_hold_times;
 	struct mutex		lock;
 	unsigned		nr_max_paths;
-	unsigned		journal_entries_size;
 	unsigned		max_mem;
 #ifdef CONFIG_BCACHEFS_TRANS_KMALLOC_TRACE
 	darray_trans_kmalloc_trace trans_kmalloc_trace;
@@ -733,9 +736,6 @@ struct btree_trans_buf {
 	struct btree_trans	*trans;
 };
 
-#define BCACHEFS_ROOT_SUBVOL_INUM					\
-	((subvol_inum) { BCACHEFS_ROOT_SUBVOL,	BCACHEFS_ROOT_INO })
-
 #define BCH_WRITE_REFS()						\
 	x(journal)							\
 	x(trans)							\
@@ -757,7 +757,8 @@ struct btree_trans_buf {
 	x(snapshot_delete_pagecache)					\
 	x(sysfs)							\
 	x(btree_write_buffer)						\
-	x(btree_node_scrub)
+	x(btree_node_scrub)						\
+	x(async_recovery_passes)
 
 enum bch_write_ref {
 #define x(n) BCH_WRITE_REF_##n,
@@ -1114,21 +1115,7 @@ struct bch_fs {
 	/* RECOVERY */
 	u64			journal_replay_seq_start;
 	u64			journal_replay_seq_end;
-	/*
-	 * Two different uses:
-	 * "Has this fsck pass?" - i.e. should this type of error be an
-	 * emergency read-only
-	 * And, in certain situations fsck will rewind to an earlier pass: used
-	 * for signaling to the toplevel code which pass we want to run now.
-	 */
-	enum bch_recovery_pass	curr_recovery_pass;
-	enum bch_recovery_pass	next_recovery_pass;
-	/* bitmask of recovery passes that we actually ran */
-	u64			recovery_passes_complete;
-	/* never rewinds version of curr_recovery_pass */
-	enum bch_recovery_pass	recovery_pass_done;
-	spinlock_t		recovery_pass_lock;
-	struct semaphore	online_fsck_mutex;
+	struct bch_fs_recovery	recovery;
 
 	/* DEBUG JUNK */
 	struct dentry		*fs_debug_dir;
@@ -1274,5 +1261,18 @@ static inline unsigned data_replicas_required(struct bch_fs *c)
 
 #define BKEY_PADDED_ONSTACK(key, pad)				\
 	struct { struct bkey_i key; __u64 key ## _pad[pad]; }
+
+/*
+ * This is needed because discard is both a filesystem option and a device
+ * option, and mount options are supposed to apply to that mount and not be
+ * persisted, i.e. if it's set as a mount option we can't propagate it to the
+ * device.
+ */
+static inline bool bch2_discard_opt_enabled(struct bch_fs *c, struct bch_dev *ca)
+{
+	return test_bit(BCH_FS_discard_mount_opt_set, &c->flags)
+		? c->opts.discard
+		: ca->mi.discard;
+}
 
 #endif /* _BCACHEFS_H */

@@ -497,7 +497,8 @@ struct bch_sb_field {
 	x(members_v2,			11)	\
 	x(errors,			12)	\
 	x(ext,				13)	\
-	x(downgrade,			14)
+	x(downgrade,			14)	\
+	x(recovery_passes,		15)
 
 #include "alloc_background_format.h"
 #include "dirent_format.h"
@@ -510,6 +511,7 @@ struct bch_sb_field {
 #include "logged_ops_format.h"
 #include "lru_format.h"
 #include "quota_format.h"
+#include "recovery_passes_format.h"
 #include "reflink_format.h"
 #include "replicas_format.h"
 #include "snapshot_format.h"
@@ -697,7 +699,8 @@ struct bch_sb_field_ext {
 	x(casefolding,			BCH_VERSION(1, 24))		\
 	x(extent_flags,			BCH_VERSION(1, 25))		\
 	x(snapshot_deletion_v2,		BCH_VERSION(1, 26))		\
-	x(fast_device_removal,		BCH_VERSION(1, 27))
+	x(fast_device_removal,		BCH_VERSION(1, 27))		\
+	x(inode_has_case_insensitive,	BCH_VERSION(1, 28))
 
 enum bcachefs_metadata_version {
 	bcachefs_metadata_version_min = 9,

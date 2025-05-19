@@ -556,7 +556,7 @@ static int __btree_err(int ret,
 		       struct printbuf *err_msg,
 		       const char *fmt, ...)
 {
-	if (c->curr_recovery_pass == BCH_RECOVERY_PASS_scan_for_btree_nodes)
+	if (c->recovery.curr_pass == BCH_RECOVERY_PASS_scan_for_btree_nodes)
 		return -BCH_ERR_fsck_fix;
 
 	bool have_retry = false;
@@ -580,7 +580,7 @@ static int __btree_err(int ret,
 
 	bool print_deferred = err_msg &&
 		rw == READ &&
-		!(test_bit(BCH_FS_fsck_running, &c->flags) &&
+		!(test_bit(BCH_FS_in_fsck, &c->flags) &&
 		  c->opts.fix_errors == FSCK_FIX_ask);
 
 	struct printbuf out = PRINTBUF;
@@ -1296,7 +1296,7 @@ int bch2_btree_node_read_done(struct bch_fs *c, struct bch_dev *ca,
 
 		ret = btree_node_bkey_val_validate(c, b, u.s_c, READ);
 		if (ret == -BCH_ERR_fsck_delete_bkey ||
-		    (bch2_inject_invalid_keys &&
+		    (static_branch_unlikely(&bch2_inject_invalid_keys) &&
 		     !bversion_cmp(u.k->bversion, MAX_VERSION))) {
 			btree_keys_account_key_drop(&b->nr, 0, k);
 
@@ -1428,7 +1428,7 @@ start:
 	if ((failed.nr ||
 	     btree_node_need_rewrite(b)) &&
 	    !btree_node_read_error(b) &&
-	    c->curr_recovery_pass != BCH_RECOVERY_PASS_scan_for_btree_nodes) {
+	    c->recovery.curr_pass != BCH_RECOVERY_PASS_scan_for_btree_nodes) {
 		prt_printf(&buf, " (rewriting node)");
 		bch2_btree_node_rewrite_async(c, b);
 	}
@@ -1758,7 +1758,7 @@ void bch2_btree_node_read(struct btree_trans *trans, struct btree *b,
 
 	trace_and_count(c, btree_node_read, trans, b);
 
-	if (bch2_verify_all_btree_replicas &&
+	if (static_branch_unlikely(&bch2_verify_all_btree_replicas) &&
 	    !btree_node_read_all_replicas(c, b, sync))
 		return;
 
@@ -1766,23 +1766,30 @@ void bch2_btree_node_read(struct btree_trans *trans, struct btree *b,
 					 NULL, &pick, -1);
 
 	if (ret <= 0) {
+		bool ratelimit = true;
 		struct printbuf buf = PRINTBUF;
+		bch2_log_msg_start(c, &buf);
 
 		prt_str(&buf, "btree node read error: no device to read from\n at ");
 		bch2_btree_pos_to_text(&buf, c, b);
 		prt_newline(&buf);
 		bch2_btree_lost_data(c, &buf, b->c.btree_id);
-		bch_err_ratelimited(c, "%s", buf.buf);
 
-		if (c->opts.recovery_passes & BIT_ULL(BCH_RECOVERY_PASS_check_topology) &&
-		    c->curr_recovery_pass > BCH_RECOVERY_PASS_check_topology)
-			bch2_fatal_error(c);
+		if (c->recovery.passes_complete & BIT_ULL(BCH_RECOVERY_PASS_check_topology) &&
+		    bch2_fs_emergency_read_only2(c, &buf))
+			ratelimit = false;
+
+		static DEFINE_RATELIMIT_STATE(rs,
+					      DEFAULT_RATELIMIT_INTERVAL,
+					      DEFAULT_RATELIMIT_BURST);
+		if (!ratelimit || __ratelimit(&rs))
+			bch2_print_str(c, KERN_ERR, buf.buf);
+		printbuf_exit(&buf);
 
 		set_btree_node_read_error(b);
 		clear_btree_node_read_in_flight(b);
 		smp_mb__after_atomic();
 		wake_up_bit(&b->flags, BTREE_NODE_read_in_flight);
-		printbuf_exit(&buf);
 		return;
 	}
 

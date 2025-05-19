@@ -309,7 +309,8 @@ int bch2_alloc_v4_validate(struct bch_fs *c, struct bkey_s_c k,
 				 "data type inconsistency");
 
 		bkey_fsck_err_on(!a.io_time[READ] &&
-				 c->curr_recovery_pass > BCH_RECOVERY_PASS_check_alloc_to_lru_refs,
+				 !(c->recovery.passes_to_run &
+				   BIT_ULL(BCH_RECOVERY_PASS_check_alloc_to_lru_refs)),
 				 c, alloc_key_cached_but_read_time_zero,
 				 "cached bucket with read_time == 0");
 		break;
@@ -479,10 +480,25 @@ struct bkey_i_alloc_v4 *bch2_trans_start_alloc_update(struct btree_trans *trans,
 						      enum btree_iter_update_trigger_flags flags)
 {
 	struct btree_iter iter;
-	struct bkey_i_alloc_v4 *a = bch2_trans_start_alloc_update_noupdate(trans, &iter, pos);
-	int ret = PTR_ERR_OR_ZERO(a);
-	if (ret)
+	struct bkey_s_c k = bch2_bkey_get_iter(trans, &iter, BTREE_ID_alloc, pos,
+					       BTREE_ITER_with_updates|
+					       BTREE_ITER_cached|
+					       BTREE_ITER_intent);
+	int ret = bkey_err(k);
+	if (unlikely(ret))
 		return ERR_PTR(ret);
+
+	if ((void *) k.v >= trans->mem &&
+	    (void *) k.v <  trans->mem + trans->mem_top) {
+		bch2_trans_iter_exit(trans, &iter);
+		return container_of(bkey_s_c_to_alloc_v4(k).v, struct bkey_i_alloc_v4, v);
+	}
+
+	struct bkey_i_alloc_v4 *a = bch2_alloc_to_v4_mut_inlined(trans, k);
+	if (IS_ERR(a)) {
+		bch2_trans_iter_exit(trans, &iter);
+		return a;
+	}
 
 	ret = bch2_trans_update_ip(trans, &iter, &a->k_i, flags, _RET_IP_);
 	bch2_trans_iter_exit(trans, &iter);
@@ -910,15 +926,6 @@ int bch2_trigger_alloc(struct btree_trans *trans,
 
 		if (old_a->gen != new_a->gen) {
 			ret = bch2_bucket_gen_update(trans, new.k->p, new_a->gen);
-			if (ret)
-				goto err;
-		}
-
-		if ((flags & BTREE_TRIGGER_bucket_invalidate) &&
-		    old_a->cached_sectors) {
-			ret = bch2_mod_dev_cached_sectors(trans, ca->dev_idx,
-					 -((s64) old_a->cached_sectors),
-					 flags & BTREE_TRIGGER_gc);
 			if (ret)
 				goto err;
 		}
@@ -1807,19 +1814,6 @@ struct discard_buckets_state {
 	u64		discarded;
 };
 
-/*
- * This is needed because discard is both a filesystem option and a device
- * option, and mount options are supposed to apply to that mount and not be
- * persisted, i.e. if it's set as a mount option we can't propagate it to the
- * device.
- */
-static inline bool discard_opt_enabled(struct bch_fs *c, struct bch_dev *ca)
-{
-	return test_bit(BCH_FS_discard_mount_opt_set, &c->flags)
-		? c->opts.discard
-		: ca->mi.discard;
-}
-
 static int bch2_discard_one_bucket(struct btree_trans *trans,
 				   struct bch_dev *ca,
 				   struct btree_iter *need_discard_iter,
@@ -1883,7 +1877,7 @@ static int bch2_discard_one_bucket(struct btree_trans *trans,
 		s->discarded++;
 		*discard_pos_done = iter.pos;
 
-		if (discard_opt_enabled(c, ca) && !c->opts.nochanges) {
+		if (bch2_discard_opt_enabled(c, ca) && !c->opts.nochanges) {
 			/*
 			 * This works without any other locks because this is the only
 			 * thread that removes items from the need_discard tree
@@ -2181,8 +2175,11 @@ static int invalidate_one_bucket(struct btree_trans *trans,
 	BUG_ON(a->data_type != BCH_DATA_cached);
 	BUG_ON(a->dirty_sectors);
 
-	if (!a->cached_sectors)
-		bch_err(c, "invalidating empty bucket, confused");
+	if (!a->cached_sectors) {
+		bch2_check_bucket_backpointer_mismatch(trans, ca, bucket.offset,
+						       true, last_flushed);
+		goto out;
+	}
 
 	unsigned cached_sectors = a->cached_sectors;
 	u8 gen = a->gen;
@@ -2585,19 +2582,18 @@ u64 bch2_min_rw_member_capacity(struct bch_fs *c)
 static bool bch2_dev_has_open_write_point(struct bch_fs *c, struct bch_dev *ca)
 {
 	struct open_bucket *ob;
-	bool ret = false;
 
 	for (ob = c->open_buckets;
 	     ob < c->open_buckets + ARRAY_SIZE(c->open_buckets);
 	     ob++) {
-		spin_lock(&ob->lock);
-		if (ob->valid && !ob->on_partial_list &&
-		    ob->dev == ca->dev_idx)
-			ret = true;
-		spin_unlock(&ob->lock);
+		scoped_guard(spinlock, &ob->lock) {
+			if (ob->valid && !ob->on_partial_list &&
+			    ob->dev == ca->dev_idx)
+				return true;
+		}
 	}
 
-	return ret;
+	return false;
 }
 
 void bch2_dev_allocator_set_rw(struct bch_fs *c, struct bch_dev *ca, bool rw)

@@ -191,11 +191,6 @@ int bch2_fs_quota_transfer(struct bch_fs *c,
 	return ret;
 }
 
-static bool subvol_inum_eq(subvol_inum a, subvol_inum b)
-{
-	return a.subvol == b.subvol && a.inum == b.inum;
-}
-
 static u32 bch2_vfs_inode_hash_fn(const void *data, u32 len, u32 seed)
 {
 	const subvol_inum *inum = data;
@@ -1428,7 +1423,9 @@ static int bch2_next_fiemap_extent(struct btree_trans *trans,
 	if (ret)
 		goto err;
 
-	ret = bch2_next_fiemap_pagecache_extent(trans, inode, start, end, cur);
+	u64 pagecache_end = k.k ? max(start, bkey_start_offset(k.k)) : end;
+
+	ret = bch2_next_fiemap_pagecache_extent(trans, inode, start, pagecache_end, cur);
 	if (ret)
 		goto err;
 
@@ -1683,6 +1680,10 @@ static int fssetxattr_inode_update_fn(struct btree_trans *trans,
 
 		bi->bi_casefold = s->casefold + 1;
 		bi->bi_fields_set |= BIT(Inode_opt_casefold);
+
+		ret = bch2_maybe_propagate_has_case_insensitive(trans, inode_inum(inode), bi);
+		if (ret)
+			return ret;
 
 #else
 		printk(KERN_ERR "Cannot use casefolding on a kernel without CONFIG_UNICODE\n");

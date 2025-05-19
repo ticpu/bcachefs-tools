@@ -11,6 +11,7 @@
 #include "alloc_background.h"
 #include "alloc_foreground.h"
 #include "async_objs.h"
+#include "backpointers.h"
 #include "bkey_sort.h"
 #include "btree_cache.h"
 #include "btree_gc.h"
@@ -50,6 +51,7 @@
 #include "quota.h"
 #include "rebalance.h"
 #include "recovery.h"
+#include "recovery_passes.h"
 #include "replicas.h"
 #include "sb-clean.h"
 #include "sb-counters.h"
@@ -390,7 +392,7 @@ void bch2_fs_read_only(struct bch_fs *c)
 	    !test_bit(BCH_FS_emergency_ro, &c->flags) &&
 	    test_bit(BCH_FS_started, &c->flags) &&
 	    test_bit(BCH_FS_clean_shutdown, &c->flags) &&
-	    c->recovery_pass_done >= BCH_RECOVERY_PASS_journal_replay) {
+	    c->recovery.pass_done >= BCH_RECOVERY_PASS_journal_replay) {
 		BUG_ON(c->journal.last_empty_seq != journal_cur_seq(&c->journal));
 		BUG_ON(atomic_long_read(&c->btree_cache.nr_dirty));
 		BUG_ON(atomic_long_read(&c->btree_key_cache.nr_dirty));
@@ -434,6 +436,30 @@ bool bch2_fs_emergency_read_only(struct bch_fs *c)
 
 	wake_up(&bch2_read_only_wait);
 	return ret;
+}
+
+static bool __bch2_fs_emergency_read_only2(struct bch_fs *c, struct printbuf *out,
+					   bool locked)
+{
+	bool ret = !test_and_set_bit(BCH_FS_emergency_ro, &c->flags);
+
+	if (!locked)
+		bch2_journal_halt(&c->journal);
+	else
+		bch2_journal_halt_locked(&c->journal);
+	bch2_fs_read_only_async(c);
+	wake_up(&bch2_read_only_wait);
+
+	if (ret)
+		prt_printf(out, "emergency read only at seq %llu\n",
+			   journal_cur_seq(&c->journal));
+
+	return ret;
+}
+
+bool bch2_fs_emergency_read_only2(struct bch_fs *c, struct printbuf *out)
+{
+	return __bch2_fs_emergency_read_only2(c, out, false);
 }
 
 bool bch2_fs_emergency_read_only_locked(struct bch_fs *c)
@@ -847,8 +873,6 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 
 	refcount_set(&c->ro_ref, 1);
 	init_waitqueue_head(&c->ro_ref_wait);
-	spin_lock_init(&c->recovery_pass_lock);
-	sema_init(&c->online_fsck_mutex, 1);
 
 	for (i = 0; i < BCH_TIME_STAT_NR; i++)
 		bch2_time_stats_init(&c->times[i]);
@@ -868,6 +892,7 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 	bch2_fs_move_init(c);
 	bch2_fs_nocow_locking_init_early(c);
 	bch2_fs_quota_init(c);
+	bch2_fs_recovery_passes_init(c);
 	bch2_fs_sb_errors_init_early(c);
 	bch2_fs_snapshots_init_early(c);
 	bch2_fs_subvolumes_init_early(c);
@@ -1212,7 +1237,7 @@ static int bch2_dev_may_add(struct bch_sb *sb, struct bch_fs *c)
 	if (le16_to_cpu(sb->block_size) != block_sectors(c))
 		return -BCH_ERR_mismatched_block_size;
 
-	if (BCH_MEMBER_BUCKET_SIZE(&m) <
+	if (le16_to_cpu(m.bucket_size) <
 	    BCH_SB_BTREE_NODE_SIZE(c->disk_sb.sb))
 		return -BCH_ERR_bucket_size_too_small;
 
@@ -1340,6 +1365,9 @@ static void bch2_dev_free(struct bch_dev *ca)
 
 	if (ca->kobj.state_in_sysfs)
 		kobject_del(&ca->kobj);
+
+	bch2_bucket_bitmap_free(&ca->bucket_backpointer_mismatch);
+	bch2_bucket_bitmap_free(&ca->bucket_backpointer_empty);
 
 	bch2_free_super(&ca->disk_sb);
 	bch2_dev_allocator_background_exit(ca);
@@ -1470,6 +1498,9 @@ static struct bch_dev *__bch2_dev_alloc(struct bch_fs *c,
 #else
 	atomic_long_set(&ca->ref, 1);
 #endif
+
+	mutex_init(&ca->bucket_backpointer_mismatch.lock);
+	mutex_init(&ca->bucket_backpointer_empty.lock);
 
 	bch2_dev_allocator_background_init(ca);
 
@@ -2245,19 +2276,31 @@ static void bch2_fs_bdev_mark_dead(struct block_device *bdev, bool surprise)
 	if (!ca)
 		goto unlock;
 
-	if (bch2_dev_state_allowed(c, ca, BCH_MEMBER_STATE_failed, BCH_FORCE_IF_DEGRADED)) {
+	bool dev = bch2_dev_state_allowed(c, ca,
+					  BCH_MEMBER_STATE_failed,
+					  BCH_FORCE_IF_DEGRADED);
+
+	if (!dev && sb) {
+		if (!surprise)
+			sync_filesystem(sb);
+		shrink_dcache_sb(sb);
+		evict_inodes(sb);
+	}
+
+	struct printbuf buf = PRINTBUF;
+	__bch2_log_msg_start(ca->name, &buf);
+
+	prt_printf(&buf, "offline from block layer");
+
+	if (dev) {
 		__bch2_dev_offline(c, ca);
 	} else {
-		if (sb) {
-			if (!surprise)
-				sync_filesystem(sb);
-			shrink_dcache_sb(sb);
-			evict_inodes(sb);
-		}
-
 		bch2_journal_flush(&c->journal);
-		bch2_fs_emergency_read_only(c);
+		bch2_fs_emergency_read_only2(c, &buf);
 	}
+
+	bch2_print_str(c, KERN_ERR, buf.buf);
+	printbuf_exit(&buf);
 
 	bch2_dev_put(ca);
 unlock:
@@ -2423,9 +2466,45 @@ err:
 	return -ENOMEM;
 }
 
-#define BCH_DEBUG_PARAM(name, description)			\
-	bool bch2_##name;					\
-	module_param_named(name, bch2_##name, bool, 0644);	\
+#define BCH_DEBUG_PARAM(name, description) DEFINE_STATIC_KEY_FALSE(bch2_##name);
+BCH_DEBUG_PARAMS_ALL()
+#undef BCH_DEBUG_PARAM
+
+static int bch2_param_set_static_key_t(const char *val, const struct kernel_param *kp)
+{
+	/* Match bool exactly, by re-using it. */
+	struct static_key *key = kp->arg;
+	struct kernel_param boolkp = *kp;
+	bool v;
+	int ret;
+
+	boolkp.arg = &v;
+
+	ret = param_set_bool(val, &boolkp);
+	if (ret)
+		return ret;
+	if (v)
+		static_key_enable(key);
+	else
+		static_key_disable(key);
+	return 0;
+}
+
+static int bch2_param_get_static_key_t(char *buffer, const struct kernel_param *kp)
+{
+	struct static_key *key = kp->arg;
+	return sprintf(buffer, "%c\n", static_key_enabled(key) ? 'N' : 'Y');
+}
+
+static const struct kernel_param_ops bch2_param_ops_static_key_t = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = bch2_param_set_static_key_t,
+	.get = bch2_param_get_static_key_t,
+};
+
+#define BCH_DEBUG_PARAM(name, description)				\
+	module_param_cb(name, &bch2_param_ops_static_key_t, &bch2_##name.key, 0644);\
+	__MODULE_PARM_TYPE(name, "static_key_t");			\
 	MODULE_PARM_DESC(name, description);
 BCH_DEBUG_PARAMS()
 #undef BCH_DEBUG_PARAM

@@ -154,7 +154,7 @@ static struct open_bucket *bch2_open_bucket_alloc(struct bch_fs *c)
 
 static inline bool is_superblock_bucket(struct bch_fs *c, struct bch_dev *ca, u64 b)
 {
-	if (c->curr_recovery_pass > BCH_RECOVERY_PASS_trans_mark_dev_sbs)
+	if (c->recovery.passes_complete & BIT_ULL(BCH_RECOVERY_PASS_trans_mark_dev_sbs))
 		return false;
 
 	return bch2_is_superblock_bucket(ca, b);
@@ -465,7 +465,7 @@ static noinline void trace_bucket_alloc2(struct bch_fs *c,
 	prt_printf(&buf, "blocking\t%u\n",	cl != NULL);
 	prt_printf(&buf, "free\t%llu\n",	req->usage.buckets[BCH_DATA_free]);
 	prt_printf(&buf, "avail\t%llu\n",	dev_buckets_free(req->ca, req->usage, req->watermark));
-	prt_printf(&buf, "copygc_wait\t%lu/%lli\n",
+	prt_printf(&buf, "copygc_wait\t%llu/%lli\n",
 		   bch2_copygc_wait_amount(c),
 		   c->copygc_wait - atomic64_read(&c->io_clock[WRITE].now));
 	prt_printf(&buf, "seen\t%llu\n",	req->counters.buckets_seen);
@@ -524,7 +524,7 @@ again:
 
 	if (!avail) {
 		if (req->watermark > BCH_WATERMARK_normal &&
-		    c->curr_recovery_pass <= BCH_RECOVERY_PASS_check_allocations)
+		    c->recovery.pass_done < BCH_RECOVERY_PASS_check_allocations)
 			goto alloc;
 
 		if (cl && !waiting) {
@@ -554,7 +554,7 @@ alloc:
 		goto alloc;
 	}
 
-	if (!ob && freespace && c->curr_recovery_pass <= BCH_RECOVERY_PASS_check_alloc_info) {
+	if (!ob && freespace && c->recovery.pass_done < BCH_RECOVERY_PASS_check_alloc_info) {
 		freespace = false;
 		goto alloc;
 	}
@@ -1517,6 +1517,8 @@ static void bch2_write_point_to_text(struct printbuf *out, struct bch_fs *c,
 	struct open_bucket *ob;
 	unsigned i;
 
+	mutex_lock(&wp->lock);
+
 	prt_printf(out, "%lu: ", wp->write_point);
 	prt_human_readable_u64(out, wp->sectors_allocated << 9);
 
@@ -1534,6 +1536,8 @@ static void bch2_write_point_to_text(struct printbuf *out, struct bch_fs *c,
 	open_bucket_for_each(c, &wp->ptrs, ob, i)
 		bch2_open_bucket_to_text(out, c, ob);
 	printbuf_indent_sub(out, 2);
+
+	mutex_unlock(&wp->lock);
 }
 
 void bch2_write_points_to_text(struct printbuf *out, struct bch_fs *c)

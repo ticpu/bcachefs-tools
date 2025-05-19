@@ -258,9 +258,6 @@ struct btree_node_iter {
  *
  * BTREE_TRIGGER_insert - @new is entering the btree
  * BTREE_TRIGGER_overwrite - @old is leaving the btree
- *
- * BTREE_TRIGGER_bucket_invalidate - signal from bucket invalidate path to alloc
- * trigger
  */
 #define BTREE_TRIGGER_FLAGS()			\
 	x(norun)				\
@@ -270,8 +267,7 @@ struct btree_node_iter {
 	x(gc)					\
 	x(insert)				\
 	x(overwrite)				\
-	x(is_root)				\
-	x(bucket_invalidate)
+	x(is_root)
 
 enum {
 #define x(n) BTREE_ITER_FLAG_BIT_##n,
@@ -484,6 +480,12 @@ struct trans_kmalloc_trace {
 };
 typedef DARRAY(struct trans_kmalloc_trace) darray_trans_kmalloc_trace;
 
+struct btree_trans_subbuf {
+	u16			base;
+	u16			u64s;
+	u16			size;;
+};
+
 struct btree_trans {
 	struct bch_fs		*c;
 
@@ -538,9 +540,8 @@ struct btree_trans {
 	int			srcu_idx;
 
 	/* update path: */
-	u16			journal_entries_u64s;
-	u16			journal_entries_size;
-	struct jset_entry	*journal_entries;
+	struct btree_trans_subbuf journal_entries;
+	struct btree_trans_subbuf accounting;
 
 	struct btree_trans_commit_hook *hooks;
 	struct journal_entry_pin *journal_pin;

@@ -190,4 +190,8 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 
 #define TYPEOF_UNQUAL(exp) __typeof__(exp)
 
+#define typeof_member(T, m)	typeof(((T*)0)->m)
+
+#define __cleanup(func) __maybe_unused __attribute__((__cleanup__(func)))
+
 #endif /* _TOOLS_LINUX_COMPILER_H */

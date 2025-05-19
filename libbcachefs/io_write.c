@@ -6,6 +6,7 @@
 
 #include "bcachefs.h"
 #include "alloc_foreground.h"
+#include "async_objs.h"
 #include "bkey_buf.h"
 #include "bset.h"
 #include "btree_update.h"
@@ -402,8 +403,7 @@ static int bch2_write_index_default(struct bch_write_op *op)
 				     bkey_start_pos(&sk.k->k),
 				     BTREE_ITER_slots|BTREE_ITER_intent);
 
-		ret =   bch2_bkey_set_needs_rebalance(c, &op->opts, sk.k) ?:
-			bch2_extent_update(trans, inum, &iter, sk.k,
+		ret =   bch2_extent_update(trans, inum, &iter, sk.k,
 					&op->res,
 					op->new_i_size, &op->i_sectors_delta,
 					op->flags & BCH_WRITE_check_enospc);
@@ -474,6 +474,10 @@ void bch2_submit_wbio_replicas(struct bch_write_bio *wbio, struct bch_fs *c,
 
 	BUG_ON(c->opts.nochanges);
 
+	const struct bch_extent_ptr *last;
+	bkey_for_each_ptr(ptrs, ptr)
+		last = ptr;
+
 	bkey_for_each_ptr(ptrs, ptr) {
 		/*
 		 * XXX: btree writes should be using io_ref[WRITE], but we
@@ -484,7 +488,7 @@ void bch2_submit_wbio_replicas(struct bch_write_bio *wbio, struct bch_fs *c,
 			? bch2_dev_have_ref(c, ptr->dev)
 			: bch2_dev_get_ioref(c, ptr->dev, ref_rw, ref_idx);
 
-		if (to_entry(ptr + 1) < ptrs.end) {
+		if (ptr != last) {
 			n = to_wbio(bio_alloc_clone(NULL, &wbio->bio, GFP_NOFS, &c->replica_set));
 
 			n->bio.bi_end_io	= wbio->bio.bi_end_io;
@@ -547,6 +551,7 @@ static void bch2_write_done(struct closure *cl)
 
 	EBUG_ON(cl->parent);
 	closure_debug_destroy(cl);
+	async_object_list_del(c, write_op, op->list_idx);
 	if (op->end_io)
 		op->end_io(op);
 }
@@ -793,6 +798,9 @@ static void init_append_extent(struct bch_write_op *op,
 
 	bch2_alloc_sectors_append_ptrs_inlined(op->c, wp, &e->k_i, crc.compressed_size,
 				       op->flags & BCH_WRITE_cached);
+
+	if (!(op->flags & BCH_WRITE_move))
+		bch2_bkey_set_needs_rebalance(op->c, &op->opts, &e->k_i);
 
 	bch2_keylist_push(&op->insert_keys);
 }
@@ -1673,6 +1681,8 @@ CLOSURE_CALLBACK(bch2_write)
 	BUG_ON(!op->write_point.v);
 	BUG_ON(bkey_eq(op->pos, POS_MAX));
 
+	async_object_list_add(c, write_op, op, &op->list_idx);
+
 	if (op->flags & BCH_WRITE_only_specified_devs)
 		op->flags |= BCH_WRITE_alloc_nowait;
 
@@ -1717,6 +1727,7 @@ err:
 	bch2_disk_reservation_put(c, &op->res);
 
 	closure_debug_destroy(&op->cl);
+	async_object_list_del(c, write_op, op->list_idx);
 	if (op->end_io)
 		op->end_io(op);
 }
@@ -1750,6 +1761,7 @@ void bch2_write_op_to_text(struct printbuf *out, struct bch_write_op *op)
 	prt_printf(out, "nr_replicas_required:\t%u\n", op->nr_replicas_required);
 
 	prt_printf(out, "ref:\t%u\n", closure_nr_remaining(&op->cl));
+	prt_printf(out, "ret\t%s\n", bch2_err_str(op->error));
 
 	printbuf_indent_sub(out, 2);
 }

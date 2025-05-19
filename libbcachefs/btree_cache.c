@@ -378,7 +378,7 @@ static int __btree_node_reclaim_checks(struct bch_fs *c, struct btree *b,
 			 * - unless btree verify mode is enabled, since it runs out of
 			 * the post write cleanup:
 			 */
-			if (bch2_verify_btree_ondisk)
+			if (static_branch_unlikely(&bch2_verify_btree_ondisk))
 				bch2_btree_node_write(c, b, SIX_LOCK_intent,
 						      BTREE_WRITE_cache_reclaim);
 			else
@@ -474,7 +474,7 @@ static unsigned long bch2_btree_cache_scan(struct shrinker *shrink,
 	unsigned long ret = SHRINK_STOP;
 	bool trigger_writes = atomic_long_read(&bc->nr_dirty) + nr >= list->nr * 3 / 4;
 
-	if (bch2_btree_shrinker_disabled)
+	if (static_branch_unlikely(&bch2_btree_shrinker_disabled))
 		return SHRINK_STOP;
 
 	mutex_lock(&bc->lock);
@@ -570,7 +570,7 @@ static unsigned long bch2_btree_cache_count(struct shrinker *shrink,
 {
 	struct btree_cache_list *list = shrink->private_data;
 
-	if (bch2_btree_shrinker_disabled)
+	if (static_branch_unlikely(&bch2_btree_shrinker_disabled))
 		return 0;
 
 	return btree_cache_can_free(list);
@@ -868,7 +868,6 @@ out:
 	b->sib_u64s[1]		= 0;
 	b->whiteout_u64s	= 0;
 	bch2_btree_keys_init(b);
-	set_btree_node_accessed(b);
 
 	bch2_time_stats_update(&c->times[BCH_TIME_btree_node_mem_alloc],
 			       start_time);
@@ -1020,7 +1019,7 @@ static noinline void btree_bad_header(struct bch_fs *c, struct btree *b)
 {
 	struct printbuf buf = PRINTBUF;
 
-	if (c->curr_recovery_pass <= BCH_RECOVERY_PASS_check_allocations)
+	if (c->recovery.pass_done < BCH_RECOVERY_PASS_check_allocations)
 		return;
 
 	prt_printf(&buf,
@@ -1302,6 +1301,10 @@ lock_node:
 			six_unlock_read(&b->c.lock);
 			goto retry;
 		}
+
+		/* avoid atomic set bit if it's not needed: */
+		if (!btree_node_accessed(b))
+			set_btree_node_accessed(b);
 	}
 
 	/* XXX: waiting on IO with btree locks held: */
@@ -1316,10 +1319,6 @@ lock_node:
 		prefetch(p + L1_CACHE_BYTES * 1);
 		prefetch(p + L1_CACHE_BYTES * 2);
 	}
-
-	/* avoid atomic set bit if it's not needed: */
-	if (!btree_node_accessed(b))
-		set_btree_node_accessed(b);
 
 	if (unlikely(btree_node_read_error(b))) {
 		six_unlock_read(&b->c.lock);

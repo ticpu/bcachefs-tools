@@ -20,8 +20,8 @@ int bch2_dev_missing_bkey(struct bch_fs *c, struct bkey_s_c k, unsigned dev)
 
 	bool print = bch2_count_fsck_err(c, ptr_to_invalid_device, &buf);
 
-	int ret = bch2_run_explicit_recovery_pass_persistent(c, &buf,
-						 BCH_RECOVERY_PASS_check_allocations);
+	int ret = bch2_run_explicit_recovery_pass(c, &buf,
+					BCH_RECOVERY_PASS_check_allocations, 0);
 
 	if (print)
 		bch2_print_str(c, KERN_ERR, buf.buf);
@@ -176,17 +176,17 @@ static int validate_member(struct printbuf *err,
 		return -BCH_ERR_invalid_sb_members;
 	}
 
-	if (BCH_MEMBER_BUCKET_SIZE(&m) <
+	if (le16_to_cpu(m.bucket_size) <
 	    le16_to_cpu(sb->block_size)) {
-		prt_printf(err, "device %u: bucket size %llu smaller than block size %u",
-			   i, BCH_MEMBER_BUCKET_SIZE(&m), le16_to_cpu(sb->block_size));
+		prt_printf(err, "device %u: bucket size %u smaller than block size %u",
+			   i, le16_to_cpu(m.bucket_size), le16_to_cpu(sb->block_size));
 		return -BCH_ERR_invalid_sb_members;
 	}
 
-	if (BCH_MEMBER_BUCKET_SIZE(&m) <
+	if (le16_to_cpu(m.bucket_size) <
 	    BCH_SB_BTREE_NODE_SIZE(sb)) {
-		prt_printf(err, "device %u: bucket size %llu smaller than btree node size %llu",
-			   i, BCH_MEMBER_BUCKET_SIZE(&m), BCH_SB_BTREE_NODE_SIZE(sb));
+		prt_printf(err, "device %u: bucket size %u smaller than btree node size %llu",
+			   i, le16_to_cpu(m.bucket_size), BCH_SB_BTREE_NODE_SIZE(sb));
 		return -BCH_ERR_invalid_sb_members;
 	}
 
@@ -211,7 +211,7 @@ static void member_to_text(struct printbuf *out,
 			   int i)
 {
 	unsigned data_have = bch2_sb_dev_has_data(sb, i);
-	u64 bucket_size = BCH_MEMBER_BUCKET_SIZE(&m);
+	u64 bucket_size = le16_to_cpu(m.bucket_size);
 	u64 device_size = le64_to_cpu(m.nbuckets) * bucket_size;
 
 	if (!bch2_member_alive(&m))
@@ -222,17 +222,11 @@ static void member_to_text(struct printbuf *out,
 	printbuf_indent_add(out, 2);
 
 	prt_printf(out, "Label:\t");
-	if (BCH_MEMBER_GROUP(&m)) {
-		unsigned idx = BCH_MEMBER_GROUP(&m) - 1;
-
-		if (idx < disk_groups_nr(gi))
-			prt_printf(out, "%s (%u)",
-				   gi->entries[idx].label, idx);
-		else
-			prt_printf(out, "(bad disk labels section)");
-	} else {
+	if (BCH_MEMBER_GROUP(&m))
+		bch2_disk_path_to_text_sb(out, sb,
+				BCH_MEMBER_GROUP(&m) - 1);
+	else
 		prt_printf(out, "(none)");
-	}
 	prt_newline(out);
 
 	prt_printf(out, "UUID:\t");

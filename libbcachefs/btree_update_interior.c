@@ -1813,10 +1813,10 @@ static int bch2_btree_insert_node(struct btree_update *as, struct btree_trans *t
 			   __func__, b->c.level);
 		bch2_btree_update_to_text(&buf, as);
 		bch2_btree_path_to_text(&buf, trans, path_idx);
+		bch2_fs_emergency_read_only2(c, &buf);
 
 		bch2_print_str(c, KERN_ERR, buf.buf);
 		printbuf_exit(&buf);
-		bch2_fs_emergency_read_only(c);
 		return -EIO;
 	}
 
@@ -2363,7 +2363,7 @@ void bch2_btree_node_rewrite_async(struct bch_fs *c, struct btree *b)
 	bool now = false, pending = false;
 
 	spin_lock(&c->btree_node_rewrites_lock);
-	if (c->curr_recovery_pass > BCH_RECOVERY_PASS_journal_replay &&
+	if (c->recovery.passes_complete & BIT_ULL(BCH_RECOVERY_PASS_journal_replay) &&
 	    enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_node_rewrite)) {
 		list_add(&a->list, &c->btree_node_rewrites);
 		now = true;

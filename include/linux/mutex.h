@@ -15,4 +15,6 @@ struct mutex {
 #define mutex_trylock(l)	(!pthread_mutex_trylock(&(l)->lock))
 #define mutex_unlock(l)		pthread_mutex_unlock(&(l)->lock)
 
+DEFINE_GUARD(mutex, struct mutex *, mutex_lock(_T), mutex_unlock(_T))
+
 #endif /* __TOOLS_LINUX_MUTEX_H */
