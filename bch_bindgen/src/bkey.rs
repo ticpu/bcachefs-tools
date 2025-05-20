@@ -125,6 +125,16 @@ impl<'a> From<&'a c::bkey_i> for BkeySC<'a> {
     }
 }
 
+impl<'a> From<&'a c::bkey_s_c> for BkeySC<'a> {
+    fn from(k: &'a c::bkey_s_c) -> Self {
+        BkeySC {
+            k:    unsafe { &*k.k },
+            v:    unsafe { &*k.v },
+            iter: PhantomData,
+        }
+    }
+}
+
 pub struct BkeySCToText<'a, 'b> {
     k:  &'a BkeySC<'a>,
     fs: &'b Fs,
