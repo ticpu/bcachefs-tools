@@ -23,10 +23,11 @@ static void dump_usage(void)
 	     "Usage: bcachefs dump [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -o output     Output qcow2 image(s)\n"
-	     "  -f, --force   Force; overwrite when needed\n"
-	     "  --nojournal   Don't dump entire journal, just dirty entries\n"
-	     "  -h, --help    Display this help and exit\n"
+	     "  -o output       Output qcow2 image(s)\n"
+	     "  -f, --force     Force; overwrite when needed\n"
+	     "      --nojournal Don't dump entire journal, just dirty entries\n"
+	     "      --noexcl    Open devices with O_NOEXCL (not recommended)\n"
+	     "  -h, --help      Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
@@ -101,6 +102,7 @@ int cmd_dump(int argc, char *argv[])
 	static const struct option longopts[] = {
 		{ "force",		no_argument,		NULL, 'f' },
 		{ "nojournal",		no_argument,		NULL, 'j' },
+		{ "noexcl",		no_argument,		NULL, 'e' },
 		{ "verbose",		no_argument,		NULL, 'v' },
 		{ "help",		no_argument,		NULL, 'h' },
 		{ NULL }
@@ -112,7 +114,6 @@ int cmd_dump(int argc, char *argv[])
 	int fd, opt;
 
 	opt_set(opts, direct_io,	false);
-	opt_set(opts, noexcl,		true);
 	opt_set(opts, read_only,	true);
 	opt_set(opts, nochanges,	true);
 	opt_set(opts, norecovery,	true);
@@ -131,6 +132,9 @@ int cmd_dump(int argc, char *argv[])
 			break;
 		case 'j':
 			entire_journal = false;
+			break;
+		case 'e':
+			opt_set(opts, noexcl,		true);
 			break;
 		case 'v':
 			opt_set(opts, verbose, true);
