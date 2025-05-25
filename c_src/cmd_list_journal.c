@@ -222,7 +222,8 @@ static void journal_entries_print(struct bch_fs *c, unsigned nr_entries,
 
 		struct jset_entry *entry = p->j.start;
 		struct jset_entry *end = vstruct_last(&p->j);
-		while (entry != end) {
+		while (entry < end &&
+		       vstruct_next(entry) <= end) {
 
 			/*
 			 * log entries denote the start of a new transaction
