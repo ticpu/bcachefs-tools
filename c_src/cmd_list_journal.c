@@ -90,9 +90,13 @@ static bool entry_matches_transaction_filter(struct jset_entry *entry,
 	if (!entry->level &&
 	    (entry->type == BCH_JSET_ENTRY_btree_keys ||
 	     entry->type == BCH_JSET_ENTRY_overwrite))
-		jset_entry_for_each_key(entry, k)
+		jset_entry_for_each_key(entry, k) {
+			if (!k->k.u64s)
+				break;
+
 			if (bkey_matches_filter(filter, entry, k))
 				return true;
+		}
 	return false;
 }
 
@@ -105,10 +109,13 @@ static bool should_print_transaction(struct jset_entry *entry, struct jset_entry
 	bool have_log_messages = false;
 	bool have_non_log_messages = false;
 
-	darray_for_each(msg_filter, i)
-		if (!strncmp(*i, l->d, b))
-			return false;
-
+	if (msg_filter.nr) {
+		darray_for_each(msg_filter, i)
+			if (!strncmp(*i, l->d, b))
+				goto found;
+		return false;
+	}
+found:
 	if (!key_filter.nr)
 		return true;
 
@@ -140,10 +147,14 @@ static bool should_print_entry(struct jset_entry *entry, d_btree_id filter)
 	    entry->type != BCH_JSET_ENTRY_overwrite)
 		return true;
 
-	jset_entry_for_each_key(entry, k)
+	jset_entry_for_each_key(entry, k) {
+		if (!k->k.u64s)
+			break;
+
 		darray_for_each(filter, id)
 			if (entry->btree_id == *id)
 				return true;
+	}
 
 	return false;
 }
