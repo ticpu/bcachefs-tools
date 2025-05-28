@@ -30,9 +30,9 @@ static void fs_top(const char *path, bool human_readable)
 {
 	struct bchfs_handle fs = bcache_fs_open(path);
 
-	struct bch_ioctl_query_counters *curr, *prev = NULL;
-
-	curr = read_counters(fs);
+	struct bch_ioctl_query_counters *start = read_counters(fs);
+	struct bch_ioctl_query_counters *curr = read_counters(fs);
+	struct bch_ioctl_query_counters *prev = NULL;
 
 	while (true) {
 		sleep(1);
@@ -42,15 +42,25 @@ static void fs_top(const char *path, bool human_readable)
 
 		printf("\033[2J");
 		printf("\033[H");
+		printf("%-40s %8s %12s\n", "", "2s", "total");
 
 		for (unsigned i = 0; i < BCH_COUNTER_NR; i++) {
 			unsigned stable = counters_to_stable_map[i];
-			u64 v = stable < curr->nr
-				?  curr->d[stable] - prev->d[stable]
+
+			u64 v1 = stable < curr->nr
+				? curr->d[stable] - prev->d[stable]
 				: 0;
-			printf("%-48s %llu\n",
+
+			u64 v2 = stable < curr->nr
+				? curr->d[stable] - start->d[stable]
+				: 0;
+
+			if (!v2)
+				continue;
+
+			printf("%-40s %8llu %12llu\n",
 			       bch2_counter_names[i],
-			       v);
+			       v1, v2);
 		}
 	}
 
