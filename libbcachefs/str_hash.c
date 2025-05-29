@@ -231,6 +231,7 @@ int __bch2_str_hash_check_key(struct btree_trans *trans,
 	struct btree_iter iter = {};
 	struct printbuf buf = PRINTBUF;
 	struct bkey_s_c k;
+	bool free_snapshots_seen = false;
 	int ret = 0;
 
 	u64 hash = desc->hash_bkey(hash_info, hash_k);
@@ -239,7 +240,8 @@ int __bch2_str_hash_check_key(struct btree_trans *trans,
 
 	for_each_btree_key_norestart(trans, iter, desc->btree_id,
 				     SPOS(hash_k.k->p.inode, hash, hash_k.k->p.snapshot),
-				     BTREE_ITER_slots, k, ret) {
+				     BTREE_ITER_slots|
+				     BTREE_ITER_with_updates, k, ret) {
 		if (bkey_eq(k.k->p, hash_k.k->p))
 			break;
 
@@ -255,6 +257,8 @@ int __bch2_str_hash_check_key(struct btree_trans *trans,
 out:
 	bch2_trans_iter_exit(trans, &iter);
 	printbuf_exit(&buf);
+	if (free_snapshots_seen)
+		darray_exit(&s->ids);
 	return ret;
 bad_hash:
 	/*
@@ -263,6 +267,22 @@ bad_hash:
 	ret = check_inode_hash_info_matches_root(trans, hash_k.k->p.inode, hash_info);
 	if (ret)
 		goto out;
+
+	if (!s) {
+		s = bch2_trans_kmalloc(trans, sizeof(*s));
+		ret = PTR_ERR_OR_ZERO(s);
+		if (ret)
+			goto out;
+
+		s->pos = k_iter->pos;
+		darray_init(&s->ids);
+
+		ret = bch2_get_snapshot_overwrites(trans, desc->btree_id, k_iter->pos, &s->ids);
+		if (ret)
+			goto out;
+
+		free_snapshots_seen = true;
+	}
 
 	if (fsck_err(trans, hash_table_key_wrong_offset,
 		     "hash table key at wrong offset: btree %s inode %llu offset %llu, hashed to %llu\n%s",
@@ -285,11 +305,14 @@ bad_hash:
 		if (k.k)
 			goto duplicate_entries;
 
-		ret =   bch2_hash_delete_at(trans, *desc, hash_info, k_iter,
+		ret =   bch2_insert_snapshot_whiteouts(trans, desc->btree_id,
+						       k_iter->pos, new->k.p) ?:
+			bch2_hash_delete_at(trans, *desc, hash_info, k_iter,
+					    BTREE_ITER_with_updates|
 					    BTREE_UPDATE_internal_snapshot_node) ?:
 			bch2_fsck_update_backpointers(trans, s, *desc, hash_info, new) ?:
 			bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc) ?:
-			-BCH_ERR_transaction_restart_nested;
+			-BCH_ERR_transaction_restart_commit;
 		goto out;
 	}
 fsck_err:
@@ -323,6 +346,6 @@ duplicate_entries:
 	}
 
 	ret = bch2_trans_commit(trans, NULL, NULL, 0) ?:
-		-BCH_ERR_transaction_restart_nested;
+		-BCH_ERR_transaction_restart_commit;
 	goto out;
 }

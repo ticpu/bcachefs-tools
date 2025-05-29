@@ -190,10 +190,7 @@ static inline bool bch2_snapshot_has_children(struct bch_fs *c, u32 id)
 
 static inline bool snapshot_list_has_id(snapshot_id_list *s, u32 id)
 {
-	darray_for_each(*s, i)
-		if (*i == id)
-			return true;
-	return false;
+	return darray_find(*s, id) != NULL;
 }
 
 static inline bool snapshot_list_has_ancestor(struct bch_fs *c, snapshot_id_list *s, u32 id)
@@ -256,6 +253,25 @@ static inline int bch2_check_key_has_snapshot(struct btree_trans *trans,
 	return likely(bch2_snapshot_exists(trans->c, k.k->p.snapshot))
 		? 0
 		: __bch2_check_key_has_snapshot(trans, iter, k);
+}
+
+int __bch2_get_snapshot_overwrites(struct btree_trans *,
+				   enum btree_id, struct bpos,
+				   snapshot_id_list *);
+
+/*
+ * Get a list of snapshot IDs that have overwritten a given key:
+ */
+static inline int bch2_get_snapshot_overwrites(struct btree_trans *trans,
+					       enum btree_id btree, struct bpos pos,
+					       snapshot_id_list *s)
+{
+	darray_init(s);
+
+	return bch2_snapshot_has_children(trans->c, pos.snapshot)
+		? __bch2_get_snapshot_overwrites(trans, btree, pos, s)
+		: 0;
+
 }
 
 int bch2_snapshot_node_set_deleted(struct btree_trans *, u32);

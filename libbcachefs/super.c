@@ -950,6 +950,13 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 
 	bch2_opts_apply(&c->opts, *opts);
 
+	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) &&
+	    c->opts.block_size > PAGE_SIZE) {
+		bch_err(c, "cannot mount bs > ps filesystem without CONFIG_TRANSPARENT_HUGEPAGE");
+		ret = -EINVAL;
+		goto err;
+	}
+
 	c->btree_key_cache_btrees |= 1U << BTREE_ID_alloc;
 	if (c->opts.inodes_use_key_cache)
 		c->btree_key_cache_btrees |= 1U << BTREE_ID_inodes;
@@ -1031,10 +1038,6 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 		ret = -EINVAL;
 		goto err;
 	}
-	bch_info(c, "Using encoding defined by superblock: utf8-%u.%u.%u",
-		 unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
-		 unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
-		 unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
 #else
 	if (c->sb.features & BIT_ULL(BCH_FEATURE_casefolding)) {
 		printk(KERN_ERR "Cannot mount a filesystem with casefolding on a kernel without CONFIG_UNICODE\n");
@@ -1151,6 +1154,12 @@ int bch2_fs_start(struct bch_fs *c)
 	int ret = 0;
 
 	print_mount_opts(c);
+
+	if (IS_ENABLED(CONFIG_UNICODE))
+		bch_info(c, "Using encoding defined by superblock: utf8-%u.%u.%u",
+			 unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
+			 unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
+			 unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
 
 	if (!bch2_fs_may_start(c))
 		return -BCH_ERR_insufficient_devices_to_start;

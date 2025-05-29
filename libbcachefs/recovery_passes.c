@@ -315,7 +315,9 @@ int __bch2_run_explicit_recovery_pass(struct bch_fs *c,
 		goto out;
 
 	bool in_recovery = test_bit(BCH_FS_in_recovery, &c->flags);
-	bool rewind = in_recovery && r->curr_pass > pass;
+	bool rewind = in_recovery &&
+		r->curr_pass > pass &&
+		!(r->passes_complete & BIT_ULL(pass));
 	bool ratelimit = flags & RUN_RECOVERY_PASS_ratelimit;
 
 	if (!(in_recovery && (flags & RUN_RECOVERY_PASS_nopersistent))) {
@@ -524,6 +526,9 @@ int bch2_run_recovery_passes(struct bch_fs *c, enum bch_recovery_pass from)
 		(c->opts.fsck ? bch2_recovery_passes_match(PASS_FSCK) : 0) |
 		c->opts.recovery_passes |
 		c->sb.recovery_passes_required;
+
+	if (c->opts.recovery_pass_last)
+		passes &= BIT_ULL(c->opts.recovery_pass_last + 1) - 1;
 
 	/*
 	 * We can't allow set_may_go_rw to be excluded; that would cause us to

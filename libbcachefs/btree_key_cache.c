@@ -13,7 +13,6 @@
 #include "trace.h"
 
 #include <linux/sched/mm.h>
-#include <linux/seq_buf.h>
 
 static inline bool btree_uses_pcpu_readers(enum btree_id id)
 {
@@ -647,10 +646,17 @@ void bch2_btree_key_cache_drop(struct btree_trans *trans,
 	unsigned i;
 	trans_for_each_path(trans, path2, i)
 		if (path2->l[0].b == (void *) ck) {
+			/*
+			 * It's safe to clear should_be_locked here because
+			 * we're evicting from the key cache, and we still have
+			 * the underlying btree locked: filling into the key
+			 * cache would require taking a write lock on the btree
+			 * node
+			 */
+			path2->should_be_locked = false;
 			__bch2_btree_path_unlock(trans, path2);
 			path2->l[0].b = ERR_PTR(-BCH_ERR_no_btree_node_drop);
-			path2->should_be_locked = false;
-			btree_path_set_dirty(path2, BTREE_ITER_NEED_TRAVERSE);
+			btree_path_set_dirty(trans, path2, BTREE_ITER_NEED_TRAVERSE);
 		}
 
 	bch2_trans_verify_locks(trans);
@@ -813,18 +819,6 @@ void bch2_fs_btree_key_cache_init_early(struct btree_key_cache *c)
 {
 }
 
-static void bch2_btree_key_cache_shrinker_to_text(struct seq_buf *s, struct shrinker *shrink)
-{
-	struct bch_fs *c = shrink->private_data;
-	struct btree_key_cache *bc = &c->btree_key_cache;
-	char *cbuf;
-	size_t buflen = seq_buf_get_buf(s, &cbuf);
-	struct printbuf out = PRINTBUF_EXTERN(cbuf, buflen);
-
-	bch2_btree_key_cache_to_text(&out, bc);
-	seq_buf_commit(s, out.pos);
-}
-
 int bch2_fs_btree_key_cache_init(struct btree_key_cache *bc)
 {
 	struct bch_fs *c = container_of(bc, struct bch_fs, btree_key_cache);
@@ -849,7 +843,6 @@ int bch2_fs_btree_key_cache_init(struct btree_key_cache *bc)
 	bc->shrink = shrink;
 	shrink->count_objects	= bch2_btree_key_cache_count;
 	shrink->scan_objects	= bch2_btree_key_cache_scan;
-	shrink->to_text		= bch2_btree_key_cache_shrinker_to_text;
 	shrink->batch		= 1 << 14;
 	shrink->seeks		= 0;
 	shrink->private_data	= c;

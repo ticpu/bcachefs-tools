@@ -296,6 +296,8 @@ struct bch_opts bch2_inode_opts_to_opts(struct bch_inode_unpacked *);
 void bch2_inode_opts_get(struct bch_io_opts *, struct bch_fs *,
 			 struct bch_inode_unpacked *);
 int bch2_inum_opts_get(struct btree_trans *, subvol_inum, struct bch_io_opts *);
+int bch2_inode_set_casefold(struct btree_trans *, subvol_inum,
+			    struct bch_inode_unpacked *, unsigned);
 
 #include "rebalance.h"
 

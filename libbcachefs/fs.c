@@ -124,8 +124,9 @@ retry:
 		goto err;
 
 	struct bch_extent_rebalance new_r = bch2_inode_rebalance_opts_get(c, &inode_u);
+	bool rebalance_changed = memcmp(&old_r, &new_r, sizeof(new_r));
 
-	if (memcmp(&old_r, &new_r, sizeof(new_r))) {
+	if (rebalance_changed) {
 		ret = bch2_set_rebalance_needs_scan_trans(trans, inode_u.bi_inum);
 		if (ret)
 			goto err;
@@ -145,6 +146,9 @@ err:
 
 	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 		goto retry;
+
+	if (rebalance_changed)
+		bch2_rebalance_wakeup(c);
 
 	bch2_fs_fatal_err_on(bch2_err_matches(ret, ENOENT), c,
 			     "%s: inode %llu:%llu not found when updating",
@@ -1569,11 +1573,12 @@ static int bch2_vfs_readdir(struct file *file, struct dir_context *ctx)
 {
 	struct bch_inode_info *inode = file_bch_inode(file);
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
+	struct bch_hash_info hash = bch2_hash_info_init(c, &inode->ei_inode);
 
 	if (!dir_emit_dots(file, ctx))
 		return 0;
 
-	int ret = bch2_readdir(c, inode_inum(inode), ctx);
+	int ret = bch2_readdir(c, inode_inum(inode), &hash, ctx);
 
 	bch_err_fn(c, ret);
 	return bch2_err_class(ret);
@@ -1658,37 +1663,9 @@ static int fssetxattr_inode_update_fn(struct btree_trans *trans,
 		return -EINVAL;
 
 	if (s->casefold != bch2_inode_casefold(c, bi)) {
-#ifdef CONFIG_UNICODE
-		int ret = 0;
-		/* Not supported on individual files. */
-		if (!S_ISDIR(bi->bi_mode))
-			return -EOPNOTSUPP;
-
-		/*
-		 * Make sure the dir is empty, as otherwise we'd need to
-		 * rehash everything and update the dirent keys.
-		 */
-		ret = bch2_empty_dir_trans(trans, inode_inum(inode));
-		if (ret < 0)
-			return ret;
-
-		ret = bch2_request_incompat_feature(c, bcachefs_metadata_version_casefolding);
+		int ret = bch2_inode_set_casefold(trans, inode_inum(inode), bi, s->casefold);
 		if (ret)
 			return ret;
-
-		bch2_check_set_feature(c, BCH_FEATURE_casefolding);
-
-		bi->bi_casefold = s->casefold + 1;
-		bi->bi_fields_set |= BIT(Inode_opt_casefold);
-
-		ret = bch2_maybe_propagate_has_case_insensitive(trans, inode_inum(inode), bi);
-		if (ret)
-			return ret;
-
-#else
-		printk(KERN_ERR "Cannot use casefolding on a kernel without CONFIG_UNICODE\n");
-		return -EOPNOTSUPP;
-#endif
 	}
 
 	if (s->set_project) {

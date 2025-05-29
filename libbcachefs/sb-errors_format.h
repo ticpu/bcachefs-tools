@@ -209,7 +209,7 @@ enum bch_fsck_flags {
 	x(subvol_to_missing_root,				188,	0)		\
 	x(subvol_root_wrong_bi_subvol,				189,	FSCK_AUTOFIX)	\
 	x(bkey_in_missing_snapshot,				190,	0)		\
-	x(bkey_in_deleted_snapshot,				315,	0)		\
+	x(bkey_in_deleted_snapshot,				315,	FSCK_AUTOFIX)	\
 	x(inode_pos_inode_nonzero,				191,	0)		\
 	x(inode_pos_blockdev_range,				192,	0)		\
 	x(inode_alloc_cursor_inode_bad,				301,	0)		\
@@ -266,6 +266,7 @@ enum bch_fsck_flags {
 	x(dirent_to_overwritten_inode,				302,	0)		\
 	x(dirent_to_missing_subvol,				230,	0)		\
 	x(dirent_to_itself,					231,	0)		\
+	x(dirent_casefold_mismatch,				318,	FSCK_AUTOFIX)	\
 	x(quota_type_invalid,					232,	0)		\
 	x(xattr_val_size_too_small,				233,	0)		\
 	x(xattr_val_size_too_big,				234,	0)		\
@@ -327,7 +328,7 @@ enum bch_fsck_flags {
 	x(dirent_stray_data_after_cf_name,			305,	0)		\
 	x(rebalance_work_incorrectly_set,			309,	FSCK_AUTOFIX)	\
 	x(rebalance_work_incorrectly_unset,			310,	FSCK_AUTOFIX)	\
-	x(MAX,							318,	0)
+	x(MAX,							319,	0)
 
 enum bch_sb_error_id {
 #define x(t, n, ...) BCH_FSCK_ERR_##t = n,

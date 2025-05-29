@@ -285,6 +285,7 @@ create_lostfound:
 				&lostfound_str,
 				lostfound->bi_inum,
 				&lostfound->bi_dir_offset,
+				BTREE_UPDATE_internal_snapshot_node|
 				STR_HASH_must_create) ?:
 		bch2_inode_write_flags(trans, &lostfound_iter, lostfound,
 				       BTREE_UPDATE_internal_snapshot_node);
@@ -410,6 +411,7 @@ static int reattach_inode(struct btree_trans *trans, struct bch_inode_unpacked *
 				&name,
 				inode->bi_subvol ?: inode->bi_inum,
 				&inode->bi_dir_offset,
+				BTREE_UPDATE_internal_snapshot_node|
 				STR_HASH_must_create);
 	if (ret) {
 		bch_err_msg(c, ret, "error creating dirent");
@@ -640,11 +642,6 @@ static int reconstruct_inode(struct btree_trans *trans, enum btree_id btree, u32
 
 	return __bch2_fsck_write_inode(trans, &new_inode);
 }
-
-struct snapshots_seen {
-	struct bpos			pos;
-	snapshot_id_list		ids;
-};
 
 static inline void snapshots_seen_exit(struct snapshots_seen *s)
 {
@@ -888,14 +885,11 @@ lookup_inode_for_snapshot(struct btree_trans *trans, struct inode_walker *w, str
 {
 	struct bch_fs *c = trans->c;
 
-	struct inode_walker_entry *i;
-	__darray_for_each(w->inodes, i)
-		if (bch2_snapshot_is_ancestor(c, k.k->p.snapshot, i->inode.bi_snapshot))
-			goto found;
+	struct inode_walker_entry *i = darray_find_p(w->inodes, i,
+		    bch2_snapshot_is_ancestor(c, k.k->p.snapshot, i->inode.bi_snapshot));
 
-	return NULL;
-found:
-	BUG_ON(k.k->p.snapshot > i->inode.bi_snapshot);
+	if (!i)
+		return NULL;
 
 	struct printbuf buf = PRINTBUF;
 	int ret = 0;
@@ -2193,6 +2187,41 @@ static int check_dirent(struct btree_trans *trans, struct btree_iter *iter,
 
 	struct bkey_s_c_dirent d = bkey_s_c_to_dirent(k);
 
+	/* check casefold */
+	if (fsck_err_on(d.v->d_casefold != !!hash_info->cf_encoding,
+			trans, dirent_casefold_mismatch,
+			"dirent casefold does not match dir casefold\n%s",
+			(printbuf_reset(&buf),
+			 bch2_bkey_val_to_text(&buf, c, k),
+			 buf.buf))) {
+		struct qstr name = bch2_dirent_get_name(d);
+		u32 subvol = d.v->d_type == DT_SUBVOL
+			? le32_to_cpu(d.v->d_parent_subvol)
+			: 0;
+		u64 target = d.v->d_type == DT_SUBVOL
+			? le32_to_cpu(d.v->d_child_subvol)
+			: le64_to_cpu(d.v->d_inum);
+		u64 dir_offset;
+
+		ret =   bch2_hash_delete_at(trans,
+					    bch2_dirent_hash_desc, hash_info, iter,
+					    BTREE_UPDATE_internal_snapshot_node) ?:
+			bch2_dirent_create_snapshot(trans, subvol,
+						    d.k->p.inode, d.k->p.snapshot,
+						    hash_info,
+						    d.v->d_type,
+						    &name,
+						    target,
+						    &dir_offset,
+						    BTREE_ITER_with_updates|
+						    BTREE_UPDATE_internal_snapshot_node|
+						    STR_HASH_must_create) ?:
+			bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc);
+
+		/* might need another check_dirents pass */
+		goto out;
+	}
+
 	if (d.v->d_type == DT_SUBVOL) {
 		ret = check_dirent_to_subvol(trans, iter, d);
 		if (ret)
@@ -2275,9 +2304,10 @@ int bch2_check_dirents(struct bch_fs *c)
 	snapshots_seen_init(&s);
 
 	int ret = bch2_trans_run(c,
-		for_each_btree_key(trans, iter, BTREE_ID_dirents,
+		for_each_btree_key_commit(trans, iter, BTREE_ID_dirents,
 				POS(BCACHEFS_ROOT_INO, 0),
 				BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k,
+				NULL, NULL, BCH_TRANS_COMMIT_no_enospc,
 			check_dirent(trans, &iter, k, &hash_info, &dir, &target, &s)) ?:
 		check_subdir_count_notnested(trans, &dir));
 

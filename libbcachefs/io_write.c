@@ -474,7 +474,7 @@ void bch2_submit_wbio_replicas(struct bch_write_bio *wbio, struct bch_fs *c,
 
 	BUG_ON(c->opts.nochanges);
 
-	const struct bch_extent_ptr *last;
+	const struct bch_extent_ptr *last = NULL;
 	bkey_for_each_ptr(ptrs, ptr)
 		last = ptr;
 
