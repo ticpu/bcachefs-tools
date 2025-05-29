@@ -174,7 +174,8 @@ fn cmd_list_inner(opt: &Cli) -> anyhow::Result<()> {
     opt_set!(fs_opts, noexcl, 1);
     opt_set!(fs_opts, nochanges, 1);
     opt_set!(fs_opts, read_only, 1);
-    opt_set!(fs_opts, norecovery, 1);
+    //opt_set!(fs_opts, norecovery, 1);
+    opt_set!(fs_opts, recovery_pass_last, 1);
     opt_set!(fs_opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
     opt_set!(
         fs_opts,
