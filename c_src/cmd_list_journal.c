@@ -56,6 +56,19 @@ static inline bool entry_is_print_key(struct jset_entry *entry)
 	}
 }
 
+static inline bool entry_is_non_transaction(struct jset_entry *entry)
+{
+	switch (entry->type) {
+	case BCH_JSET_ENTRY_btree_root:
+	case BCH_JSET_ENTRY_datetime:
+	case BCH_JSET_ENTRY_usage:
+	case BCH_JSET_ENTRY_clock:
+		return true;
+	default:
+		return false;
+	}
+}
+
 typedef struct {
 	int				sign;
 	darray_str			f;
@@ -67,6 +80,7 @@ typedef struct {
 } transaction_key_filter;
 
 typedef struct {
+	bool				filtering;
 	u64				btree_filter;
 	transaction_msg_filter		transaction;
 	transaction_key_filter		key;
@@ -90,7 +104,10 @@ static int parse_sign(char **str)
 
 static bool entry_matches_btree_filter(journal_filter f, struct jset_entry *entry)
 {
-	return BIT_ULL(entry->btree_id) & f.btree_filter;
+	return f.btree_filter == ~0ULL ||
+		(entry->level == 0 &&
+		 entry->type != BCH_JSET_ENTRY_btree_root &&
+		 BIT_ULL(entry->btree_id) & f.btree_filter);
 }
 
 static bool transaction_matches_btree_filter(journal_filter f,
@@ -196,7 +213,9 @@ static struct jset_entry *transaction_end(struct jset_entry *entry, struct jset_
 {
 	do
 		entry = vstruct_next(entry);
-	while (entry != end && !entry_is_transaction_start(entry));
+	while (entry != end &&
+	       !entry_is_transaction_start(entry) &&
+	       !entry_is_non_transaction(entry));
 
 	return entry;
 }
@@ -287,10 +306,6 @@ static void print_one_entry(struct printbuf		*out,
 	if (entry_is_print_key(entry) && !entry_matches_btree_filter(f, entry))
 		return;
 
-	if ((f.key.f.nr || f.transaction.f.nr) &&
-	    entry->type == BCH_JSET_ENTRY_btree_root)
-		return;
-
 	journal_entry_header_to_text(out, c, p, blacklisted, printed_header);
 
 	bool highlight = entry_matches_transaction_filter(f.key, entry);
@@ -322,7 +337,8 @@ static void journal_replay_print(struct bch_fs *c,
 		bch2_journal_seq_is_blacklisted(c, le64_to_cpu(p->j.seq), false);
 	bool printed_header = false;
 
-	if (!f.transaction.f.nr &&
+	if (f.btree_filter == ~0ULL &&
+	    !f.transaction.f.nr &&
 	    !f.key.f.nr)
 		journal_entry_header_to_text(&buf, c, p, blacklisted, &printed_header);
 
@@ -332,7 +348,8 @@ static void journal_replay_print(struct bch_fs *c,
 	while (entry < end &&
 	       vstruct_next(entry) <= end &&
 	       !entry_is_transaction_start(entry)) {
-		print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
+		if (!f.filtering)
+			print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
 		entry = vstruct_next(entry);
 	}
 
@@ -349,6 +366,10 @@ static void journal_replay_print(struct bch_fs *c,
 		}
 
 		entry = t_end;
+
+		if (f.filtering &&
+		    entry_is_non_transaction(entry))
+			break;
 	}
 
 	if (buf.buf) {
@@ -365,14 +386,14 @@ static void list_journal_usage(void)
 	     "Usage: bcachefs list_journal [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -a                                    Read entire journal, not just dirty entries\n"
-	     "  -n, --nr-entries=nr                   Number of journal entries to print, starting from the most recent\n"
-	     "  -k, --btree-filter=(+|-)btree1,btree2 Filter keys matching or not updating btree(s)\n"
-	     "  -t, --transaction=(+|-)fn1,fn2        Filter transactions matching or not matching fn(s)"
-	     "  -k, --key-filter=(+-1)bbpos1,bbpos2x  Filter transactions updating bbpos\n"
-	     "                                        Or entries not matching the range bbpos-bbpos\n"
-	     "  -v, --verbose                         Verbose mode\n"
-	     "  -h, --help                            Display this help and exit\n"
+	     "  -a                               Read entire journal, not just dirty entries\n"
+	     "  -n, --nr-entries=nr              Number of journal entries to print, starting from the most recent\n"
+	     "  -b, --btree=(+|-)btree1,btree2   Filter keys matching or not updating btree(s)\n"
+	     "  -t, --transaction=(+|-)fn1,fn2   Filter transactions matching or not matching fn(s)"
+	     "  -k, --key=(+-1)bbpos1,bbpos2x    Filter transactions updating bbpos\n"
+	     "                                   Or entries not matching the range bbpos-bbpos\n"
+	     "  -v, --verbose                    Verbose mode\n"
+	     "  -h, --help                       Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
@@ -390,7 +411,7 @@ int cmd_list_journal(int argc, char *argv[])
 	};
 	struct bch_opts opts = bch2_opts_empty();
 	u32 nr_entries = U32_MAX;
-	journal_filter f = { .btree_filter = ~0ULL };
+	journal_filter f = { .btree_filter = ~0ULL, .bkey_val = true };
 	char *t;
 	int opt, ret;
 
@@ -421,16 +442,19 @@ int cmd_list_journal(int argc, char *argv[])
 				read_flag_list_or_die(optarg, __bch2_btree_ids, "btree id");
 			if (ret < 0)
 				f.btree_filter = ~f.btree_filter;
+			f.filtering = true;
 			break;
 		case 't':
 			f.transaction.sign = parse_sign(&optarg);
 			while ((t = strsep(&optarg, ",")))
 				darray_push(&f.transaction.f, strdup(t));
+			f.filtering = true;
 			break;
 		case 'k':
 			f.key.sign = parse_sign(&optarg);
 			while ((t = strsep(&optarg, ",")))
 				darray_push(&f.key.f, bbpos_range_parse(t));
+			f.filtering = true;
 			break;
 		case 'V':
 			ret = lookup_constant(bool_names, optarg, -EINVAL);
