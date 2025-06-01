@@ -3,6 +3,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "cmds.h"
 #include "libbcachefs.h"
@@ -16,24 +17,10 @@
 #include "libbcachefs/journal_seq_blacklist.h"
 #include "libbcachefs/super.h"
 
+#include <linux/fs_parser.h>
+
 static const char *NORMAL	= "\x1B[0m";
 static const char *RED		= "\x1B[31m";
-
-static void list_journal_usage(void)
-{
-	puts("bcachefs list_journal - print contents of journal\n"
-	     "Usage: bcachefs list_journal [OPTION]... <devices>\n"
-	     "\n"
-	     "Options:\n"
-	     "  -a                                Read entire journal, not just dirty entries\n"
-	     "  -n, --nr-entries=nr               Number of journal entries to print, starting from the most recent\n"
-	     "  -t, --transaction-filter=bbpos    Filter transactions not updating <bbpos>\n"
-	     "                                    Or entries not matching the range <bbpos-bbpos>\n"
-	     "  -k, --key-filter=btree            Filter keys not updating btree\n"
-	     "  -v, --verbose                     Verbose mode\n"
-	     "  -h, --help                        Display this help and exit\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-}
 
 static void star_start_of_lines(char *buf)
 {
@@ -56,12 +43,78 @@ static inline bool entry_is_log_msg(struct jset_entry *entry)
 	return entry->type == BCH_JSET_ENTRY_log && entry->level;
 }
 
-typedef DARRAY(struct bbpos_range) d_bbpos_range;
-typedef DARRAY(enum btree_id) d_btree_id;
-
-static bool bkey_matches_filter(d_bbpos_range filter, struct jset_entry *entry, struct bkey_i *k)
+static inline bool entry_is_print_key(struct jset_entry *entry)
 {
-	darray_for_each(filter, i) {
+	switch (entry->type) {
+	case BCH_JSET_ENTRY_btree_root:
+	case BCH_JSET_ENTRY_btree_keys:
+	case BCH_JSET_ENTRY_write_buffer_keys:
+	case BCH_JSET_ENTRY_overwrite:
+		return true;
+	default:
+		return false;
+	}
+}
+
+typedef struct {
+	int				sign;
+	darray_str			f;
+} transaction_msg_filter;
+
+typedef struct {
+	int				sign;
+	DARRAY(struct bbpos_range)	f;
+} transaction_key_filter;
+
+typedef struct {
+	u64				btree_filter;
+	transaction_msg_filter		transaction;
+	transaction_key_filter		key;
+	bool				bkey_val;
+} journal_filter;
+
+static int parse_sign(char **str)
+{
+	if (**str == '+') {
+		(*str)++;
+		return 1;
+	}
+
+	if (**str == '-') {
+		(*str)++;
+		return -1;
+	}
+
+	return 0;
+}
+
+static bool entry_matches_btree_filter(journal_filter f, struct jset_entry *entry)
+{
+	return BIT_ULL(entry->btree_id) & f.btree_filter;
+}
+
+static bool transaction_matches_btree_filter(journal_filter f,
+					struct jset_entry *entry, struct jset_entry *end)
+{
+	bool have_keys = false;
+
+	for (entry = vstruct_next(entry);
+	     entry != end;
+	     entry = vstruct_next(entry))
+		if (entry_is_print_key(entry)) {
+			if (entry_matches_btree_filter (f, entry))
+				return true;
+			have_keys = true;
+		}
+
+	return !have_keys;
+}
+
+static bool bkey_matches_filter(transaction_key_filter f,
+				struct jset_entry *entry,
+				struct bkey_i *k)
+{
+	darray_for_each(f.f, i) {
 		struct bbpos k_start	= BBPOS(entry->btree_id, bkey_start_pos(&k->k));
 		struct bbpos k_end	= BBPOS(entry->btree_id, k->k.p);
 
@@ -84,8 +137,8 @@ static bool bkey_matches_filter(d_bbpos_range filter, struct jset_entry *entry, 
 	return false;
 }
 
-static bool entry_matches_transaction_filter(struct jset_entry *entry,
-					     d_bbpos_range filter)
+static bool entry_matches_transaction_filter(transaction_key_filter f,
+					     struct jset_entry *entry)
 {
 	if (!entry->level &&
 	    (entry->type == BCH_JSET_ENTRY_btree_keys ||
@@ -94,200 +147,252 @@ static bool entry_matches_transaction_filter(struct jset_entry *entry,
 			if (!k->k.u64s)
 				break;
 
-			if (bkey_matches_filter(filter, entry, k))
+			if (bkey_matches_filter(f, entry, k))
 				return true;
 		}
 	return false;
 }
 
-static bool should_print_transaction(struct jset_entry *entry, struct jset_entry *end,
-				     darray_str msg_filter,
-				     d_bbpos_range key_filter)
+static bool transaction_matches_transaction_filter(transaction_key_filter f,
+					     struct jset_entry *entry, struct jset_entry *end)
+{
+	for (entry = vstruct_next(entry);
+	     entry != end;
+	     entry = vstruct_next(entry))
+		if (entry_matches_transaction_filter(f, entry))
+			return true;
+
+	return false;
+}
+
+static bool entry_matches_msg_filter(transaction_msg_filter f,
+				     struct jset_entry *entry)
 {
 	struct jset_entry_log *l = container_of(entry, struct jset_entry_log, entry);
 	unsigned b = jset_entry_log_msg_bytes(l);
-	bool have_log_messages = false;
-	bool have_non_log_messages = false;
 
-	if (msg_filter.nr) {
-		darray_for_each(msg_filter, i)
-			if (!strncmp(*i, l->d, b))
-				goto found;
-		return false;
-	}
-found:
-	if (!key_filter.nr)
-		return true;
+	darray_for_each(f.f, i)
+		if (!strncmp(*i, l->d, b))
+			return true;
+	return false;
+}
+
+static bool entry_is_log_only(struct jset_entry *entry, struct jset_entry *end)
+{
+	bool have_log = false;
 
 	for (entry = vstruct_next(entry);
-	     entry != end && !entry_is_transaction_start(entry);
+	     entry != end;
 	     entry = vstruct_next(entry)) {
-		if (entry_matches_transaction_filter(entry, key_filter))
-			return true;
-
-		if (entry_is_log_msg(entry))
-			have_log_messages = true;
-		else
-			have_non_log_messages = true;
+		if (entry->u64s && !entry_is_log_msg(entry))
+			return false;
+		have_log = true;
 	}
 
-	if (have_log_messages && !have_non_log_messages)
-		return true;
-
-	return false;
+	return have_log;
 }
 
-static bool should_print_entry(struct jset_entry *entry, d_btree_id filter)
+static struct jset_entry *transaction_end(struct jset_entry *entry, struct jset_entry *end)
 {
-	if (!filter.nr)
-		return true;
+	do
+		entry = vstruct_next(entry);
+	while (entry != end && !entry_is_transaction_start(entry));
 
-	if (entry->type != BCH_JSET_ENTRY_btree_root &&
-	    entry->type != BCH_JSET_ENTRY_btree_keys &&
-	    entry->type != BCH_JSET_ENTRY_overwrite)
-		return true;
-
-	jset_entry_for_each_key(entry, k) {
-		if (!k->k.u64s)
-			break;
-
-		darray_for_each(filter, id)
-			if (entry->btree_id == *id)
-				return true;
-	}
-
-	return false;
+	return entry;
 }
 
-static void journal_entry_header_to_text(struct printbuf *out,
-					 struct bch_fs *c,
-					 struct journal_replay *p, bool blacklisted)
+static bool should_print_transaction(journal_filter f,
+				     struct jset_entry *entry, struct jset_entry *end)
 {
-	if (blacklisted)
-		prt_str(out, "blacklisted ");
+	BUG_ON(entry->type != BCH_JSET_ENTRY_log);
+
+	if (entry_is_log_only(entry, end))
+		return true;
+
+	if (!transaction_matches_btree_filter(f, entry, end))
+		return false;
+
+	if (f.transaction.f.nr &&
+	    entry_matches_msg_filter(f.transaction, entry) != (f.transaction.sign >= 0))
+		return false;
+
+	if (f.key.f.nr &&
+	    transaction_matches_transaction_filter(f.key, entry, end) != (f.key.sign >= 0))
+		return false;
+
+	return true;
+}
+
+static void journal_entry_header_to_text(struct printbuf *out, struct bch_fs *c,
+					 struct journal_replay *p,
+					 bool blacklisted, bool *printed_header)
+{
+	if (*printed_header)
+		return;
+	*printed_header = true;
 
 	prt_printf(out,
-		   "\n"
+		   "\n%s"
 		   "journal entry     %llu\n"
 		   "  version         %u\n"
 		   "  last seq        %llu\n"
 		   "  flush           %u\n"
 		   "  written at      ",
+		   blacklisted ? "blacklisted " : "",
 		   le64_to_cpu(p->j.seq),
 		   le32_to_cpu(p->j.version),
 		   le64_to_cpu(p->j.last_seq),
 		   !JSET_NO_FLUSH(&p->j));
 	bch2_journal_ptrs_to_text(out, c, p);
-
-	if (blacklisted)
-		star_start_of_lines(out->buf);
+	prt_newline(out);
 }
 
-static void journal_entry_header_print(struct bch_fs *c, struct journal_replay *p, bool blacklisted)
+static void bch2_journal_entry_keys_noval_to_text(struct printbuf *out, struct jset_entry *entry)
 {
-	struct printbuf buf = PRINTBUF;
-	journal_entry_header_to_text(&buf, c, p, blacklisted);
-	printf("%s\n", buf.buf);
-	printbuf_exit(&buf);
+	jset_entry_for_each_key(entry, k) {
+		/* We may be called on entries that haven't been validated: */
+		if (!k->k.u64s)
+			break;
+
+		bch2_prt_jset_entry_type(out, entry->type);
+		prt_str(out, ": ");
+		bch2_btree_id_level_to_text(out, entry->btree_id, entry->level);
+		prt_char(out, ' ');
+		bch2_bkey_to_text(out, &k->k);
+		prt_newline(out);
+	}
 }
 
-static void journal_entries_print(struct bch_fs *c, unsigned nr_entries,
-				  darray_str transaction_msg_filter,
-				  d_bbpos_range transaction_key_filter,
-				  d_btree_id key_filter)
+static unsigned journal_entry_indent(struct jset_entry *entry)
 {
-	struct journal_replay *p, **_p;
-	struct genradix_iter iter;
-	struct printbuf buf = PRINTBUF;
+	if (entry_is_transaction_start(entry) ||
+	    entry->type == BCH_JSET_ENTRY_btree_root ||
+	    entry->type == BCH_JSET_ENTRY_datetime ||
+	    entry->type == BCH_JSET_ENTRY_usage)
+		return 2;
+	return 4;
+}
 
-	genradix_for_each(&c->journal_entries, iter, _p) {
-		bool printed_header = false;
+static void print_one_entry(struct printbuf		*out,
+			    struct bch_fs		*c,
+			    journal_filter		f,
+			    struct journal_replay	*p,
+			    bool			blacklisted,
+			    bool			*printed_header,
+			    struct jset_entry		*entry)
+{
+	if (entry_is_print_key(entry) && !entry->u64s)
+		return;
 
-		p = *_p;
-		if (!p)
-			continue;
+	if (entry_is_print_key(entry) && !entry_matches_btree_filter(f, entry))
+		return;
 
-		if (le64_to_cpu(p->j.seq) + nr_entries < atomic64_read(&c->journal.seq))
-			continue;
+	if ((f.key.f.nr || f.transaction.f.nr) &&
+	    entry->type == BCH_JSET_ENTRY_btree_root)
+		return;
 
-		bool blacklisted = p->ignore_blacklisted ||
-			bch2_journal_seq_is_blacklisted(c,
-					le64_to_cpu(p->j.seq), false);
+	journal_entry_header_to_text(out, c, p, blacklisted, printed_header);
 
-		if (!transaction_msg_filter.nr &&
-		    !transaction_key_filter.nr) {
-			journal_entry_header_print(c, p, blacklisted);
-			printed_header = true;
-		}
+	bool highlight = entry_matches_transaction_filter(f.key, entry);
+	if (highlight)
+		fputs(RED, stdout);
 
-		struct jset_entry *entry = p->j.start;
-		struct jset_entry *end = vstruct_last(&p->j);
-		while (entry < end &&
-		       vstruct_next(entry) <= end) {
+	unsigned indent = journal_entry_indent(entry);
+	printbuf_indent_add(out, indent);
 
-			/*
-			 * log entries denote the start of a new transaction
-			 * commit:
-			 */
-			if (entry_is_transaction_start(entry)) {
-				if (!should_print_transaction(entry, end,
-							      transaction_msg_filter,
-							      transaction_key_filter)) {
-					do {
-						entry = vstruct_next(entry);
-					} while (entry != end && !entry_is_transaction_start(entry));
-
-					continue;
-				}
-
-				prt_newline(&buf);
-			}
-
-			if (!should_print_entry(entry, key_filter))
-				goto next;
-
-			if (!printed_header)
-				journal_entry_header_print(c, p, blacklisted);
-			printed_header = true;
-
-			bool highlight = entry_matches_transaction_filter(entry, transaction_key_filter);
-			if (highlight)
-				fputs(RED, stdout);
-
-			printbuf_indent_add(&buf, 4);
-			bch2_journal_entry_to_text(&buf, c, entry);
-
-			if (blacklisted)
-				star_start_of_lines(buf.buf);
-			printf("%s\n", buf.buf);
-			printbuf_reset(&buf);
-
-			if (highlight)
-				fputs(NORMAL, stdout);
-next:
-			entry = vstruct_next(entry);
-		}
+	if (!f.bkey_val && entry_is_print_key(entry))
+		bch2_journal_entry_keys_noval_to_text(out, entry);
+	else {
+		bch2_journal_entry_to_text(out, c, entry);
+		prt_newline(out);
 	}
 
+	printbuf_indent_sub(out, indent);
+
+	if (highlight)
+		prt_str(out, NORMAL);
+}
+
+static void journal_replay_print(struct bch_fs *c,
+				 journal_filter f,
+				 struct journal_replay *p)
+{
+	struct printbuf buf = PRINTBUF;
+	bool blacklisted = p->ignore_blacklisted ||
+		bch2_journal_seq_is_blacklisted(c, le64_to_cpu(p->j.seq), false);
+	bool printed_header = false;
+
+	if (!f.transaction.f.nr &&
+	    !f.key.f.nr)
+		journal_entry_header_to_text(&buf, c, p, blacklisted, &printed_header);
+
+	struct jset_entry *entry = p->j.start;
+	struct jset_entry *end = vstruct_last(&p->j);
+
+	while (entry < end &&
+	       vstruct_next(entry) <= end &&
+	       !entry_is_transaction_start(entry)) {
+		print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
+		entry = vstruct_next(entry);
+	}
+
+	while (entry < end &&
+	       vstruct_next(entry) <= end) {
+		struct jset_entry *t_end = transaction_end(entry, end);
+
+		if (should_print_transaction(f, entry, t_end)) {
+			while (entry < t_end &&
+			       vstruct_next(entry) <= t_end) {
+				print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
+				entry = vstruct_next(entry);
+			}
+		}
+
+		entry = t_end;
+	}
+
+	if (buf.buf) {
+		if (blacklisted)
+			star_start_of_lines(buf.buf);
+		write(STDOUT_FILENO, buf.buf, buf.pos);
+	}
 	printbuf_exit(&buf);
+}
+
+static void list_journal_usage(void)
+{
+	puts("bcachefs list_journal - print contents of journal\n"
+	     "Usage: bcachefs list_journal [OPTION]... <devices>\n"
+	     "\n"
+	     "Options:\n"
+	     "  -a                                    Read entire journal, not just dirty entries\n"
+	     "  -n, --nr-entries=nr                   Number of journal entries to print, starting from the most recent\n"
+	     "  -k, --btree-filter=(+|-)btree1,btree2 Filter keys matching or not updating btree(s)\n"
+	     "  -t, --transaction=(+|-)fn1,fn2        Filter transactions matching or not matching fn(s)"
+	     "  -k, --key-filter=(+-1)bbpos1,bbpos2x  Filter transactions updating bbpos\n"
+	     "                                        Or entries not matching the range bbpos-bbpos\n"
+	     "  -v, --verbose                         Verbose mode\n"
+	     "  -h, --help                            Display this help and exit\n"
+	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
 int cmd_list_journal(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "nr-entries",		required_argument,	NULL, 'n' },
-		{ "transaction-filter",	required_argument,	NULL, 't' },
-		{ "key-filter",		required_argument,	NULL, 'k' },
+		{ "btree",		required_argument,	NULL, 'b' },
+		{ "transaction",	required_argument,	NULL, 't' },
+		{ "key",		required_argument,	NULL, 'k' },
+		{ "bkey-val",		required_argument,	NULL, 'V' },
 		{ "verbose",		no_argument,		NULL, 'v' },
 		{ "help",		no_argument,		NULL, 'h' },
 		{ NULL }
 	};
 	struct bch_opts opts = bch2_opts_empty();
 	u32 nr_entries = U32_MAX;
-	darray_str	transaction_msg_filter = {};
-	d_bbpos_range	transaction_key_filter = {};
-	d_btree_id	key_filter = {};
-	int opt;
+	journal_filter f = { .btree_filter = ~0ULL };
+	char *t;
+	int opt, ret;
 
 	opt_set(opts, noexcl,		true);
 	opt_set(opts, nochanges,	true);
@@ -310,14 +415,28 @@ int cmd_list_journal(int argc, char *argv[])
 				die("error parsing nr_entries");
 			opt_set(opts, read_entire_journal, true);
 			break;
-		case 'm':
-			darray_push(&transaction_msg_filter, strdup(optarg));
+		case 'b':
+			ret = parse_sign(&optarg);
+			f.btree_filter =
+				read_flag_list_or_die(optarg, __bch2_btree_ids, "btree id");
+			if (ret < 0)
+				f.btree_filter = ~f.btree_filter;
 			break;
 		case 't':
-			darray_push(&transaction_key_filter, bbpos_range_parse(optarg));
+			f.transaction.sign = parse_sign(&optarg);
+			while ((t = strsep(&optarg, ",")))
+				darray_push(&f.transaction.f, strdup(t));
 			break;
 		case 'k':
-			darray_push(&key_filter, read_string_list_or_die(optarg, __bch2_btree_ids, "btree id"));
+			f.key.sign = parse_sign(&optarg);
+			while ((t = strsep(&optarg, ",")))
+				darray_push(&f.key.f, bbpos_range_parse(t));
+			break;
+		case 'V':
+			ret = lookup_constant(bool_names, optarg, -EINVAL);
+			if (ret < 0)
+				die("error parsing %s", optarg);
+			f.bkey_val = ret;
 			break;
 		case 'v':
 			opt_set(opts, verbose, true);
@@ -337,10 +456,14 @@ int cmd_list_journal(int argc, char *argv[])
 	if (IS_ERR(c))
 		die("error opening %s: %s", argv[0], bch2_err_str(PTR_ERR(c)));
 
-	journal_entries_print(c, nr_entries,
-			      transaction_msg_filter,
-			      transaction_key_filter,
-			      key_filter);
+	struct journal_replay *p, **_p;
+	struct genradix_iter iter;
+	genradix_for_each(&c->journal_entries, iter, _p) {
+		p = *_p;
+		if (p && le64_to_cpu(p->j.seq) + nr_entries >= atomic64_read(&c->journal.seq))
+			journal_replay_print(c, f, p);
+	}
+
 	bch2_fs_stop(c);
 	return 0;
 }
