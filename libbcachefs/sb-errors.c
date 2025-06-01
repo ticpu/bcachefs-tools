@@ -80,7 +80,11 @@ const struct bch_sb_field_ops bch_sb_field_ops_errors = {
 
 void bch2_fs_errors_to_text(struct printbuf *out, struct bch_fs *c)
 {
-	if (out->nr_tabstops <= 1)
+	if (out->nr_tabstops < 1)
+		printbuf_tabstop_push(out, 48);
+	if (out->nr_tabstops < 2)
+		printbuf_tabstop_push(out, 8);
+	if (out->nr_tabstops < 3)
 		printbuf_tabstop_push(out, 16);
 
 	guard(mutex)(&c->fsck_error_counts_lock);

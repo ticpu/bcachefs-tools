@@ -573,10 +573,16 @@ int __bch2_fsck_err(struct bch_fs *c,
 		} else {
 			prt_str(out, ", not ");
 			prt_actioning(out, action);
+			ret = -BCH_ERR_fsck_ignore;
 		}
-	} else if (!(flags & FSCK_CAN_IGNORE)) {
-		prt_str(out, " (repair unimplemented)");
-		ret = -BCH_ERR_fsck_repair_unimplemented;
+	} else {
+		if (flags & FSCK_CAN_IGNORE) {
+			prt_str(out, ", continuing");
+			ret = -BCH_ERR_fsck_ignore;
+		} else {
+			prt_str(out, " (repair unimplemented)");
+			ret = -BCH_ERR_fsck_repair_unimplemented;
+		}
 	}
 
 	if (bch2_err_matches(ret, BCH_ERR_fsck_ignore) &&

@@ -55,6 +55,7 @@ static void bch2_journal_ptr_to_text(struct printbuf *out, struct bch_fs *c, str
 	prt_printf(out, "%s %u:%u:%u (sector %llu)",
 		   ca ? ca->name : "(invalid dev)",
 		   p->dev, p->bucket, p->bucket_offset, p->sector);
+	bch2_dev_put(ca);
 }
 
 void bch2_journal_ptrs_to_text(struct printbuf *out, struct bch_fs *c, struct journal_replay *j)
@@ -1520,7 +1521,7 @@ static void journal_advance_devs_to_next_bucket(struct journal *j,
 {
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
 
-	rcu_read_lock();
+	guard(rcu)();
 	darray_for_each(*devs, i) {
 		struct bch_dev *ca = rcu_dereference(c->devs[*i]);
 		if (!ca)
@@ -1542,7 +1543,6 @@ static void journal_advance_devs_to_next_bucket(struct journal *j,
 			ja->bucket_seq[ja->cur_idx] = le64_to_cpu(seq);
 		}
 	}
-	rcu_read_unlock();
 }
 
 static void __journal_write_alloc(struct journal *j,

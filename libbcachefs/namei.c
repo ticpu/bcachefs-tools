@@ -425,8 +425,8 @@ int bch2_rename_trans(struct btree_trans *trans,
 	}
 
 	ret = bch2_dirent_rename(trans,
-				 src_dir, &src_hash, &src_dir_u->bi_size,
-				 dst_dir, &dst_hash, &dst_dir_u->bi_size,
+				 src_dir, &src_hash,
+				 dst_dir, &dst_hash,
 				 src_name, &src_inum, &src_offset,
 				 dst_name, &dst_inum, &dst_offset,
 				 mode);
@@ -732,15 +732,6 @@ static int bch2_check_dirent_inode_dirent(struct btree_trans *trans,
 		target->bi_dir_offset	= d.k->p.offset;
 		return __bch2_fsck_write_inode(trans, target);
 	}
-
-	if (bch2_inode_should_have_single_bp(target) &&
-	    !fsck_err(trans, inode_wrong_backpointer,
-		      "dirent points to inode that does not point back:\n%s",
-		      (bch2_bkey_val_to_text(&buf, c, d.s_c),
-		       prt_newline(&buf),
-		       bch2_inode_unpacked_to_text(&buf, target),
-		       buf.buf)))
-		goto err;
 
 	struct bkey_s_c_dirent bp_dirent =
 		bch2_bkey_get_iter_typed(trans, &bp_iter, BTREE_ID_dirents,
