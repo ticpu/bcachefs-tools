@@ -54,7 +54,7 @@ int bch2_snapshot_tree_lookup(struct btree_trans *trans, u32 id,
 					  BTREE_ITER_with_updates, snapshot_tree, s);
 
 	if (bch2_err_matches(ret, ENOENT))
-		ret = -BCH_ERR_ENOENT_snapshot_tree;
+		ret = bch_err_throw(trans->c, ENOENT_snapshot_tree);
 	return ret;
 }
 
@@ -67,7 +67,7 @@ __bch2_snapshot_tree_create(struct btree_trans *trans)
 	struct bkey_i_snapshot_tree *s_t;
 
 	if (ret == -BCH_ERR_ENOSPC_btree_slot)
-		ret = -BCH_ERR_ENOSPC_snapshot_tree;
+		ret = bch_err_throw(trans->c, ENOSPC_snapshot_tree);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -285,7 +285,7 @@ static int bch2_snapshot_table_make_room(struct bch_fs *c, u32 id)
 	mutex_lock(&c->snapshot_table_lock);
 	int ret = snapshot_t_mut(c, id)
 		? 0
-		: -BCH_ERR_ENOMEM_mark_snapshot;
+		: bch_err_throw(c, ENOMEM_mark_snapshot);
 	mutex_unlock(&c->snapshot_table_lock);
 	return ret;
 }
@@ -304,7 +304,7 @@ static int __bch2_mark_snapshot(struct btree_trans *trans,
 
 	t = snapshot_t_mut(c, id);
 	if (!t) {
-		ret = -BCH_ERR_ENOMEM_mark_snapshot;
+		ret = bch_err_throw(c, ENOMEM_mark_snapshot);
 		goto err;
 	}
 
@@ -1006,7 +1006,7 @@ int bch2_reconstruct_snapshots(struct bch_fs *c)
 					"snapshot node %u from tree %s missing, recreate?", *id, buf.buf)) {
 				if (t->nr > 1) {
 					bch_err(c, "cannot reconstruct snapshot trees with multiple nodes");
-					ret = -BCH_ERR_fsck_repair_unimplemented;
+					ret = bch_err_throw(c, fsck_repair_unimplemented);
 					goto err;
 				}
 
@@ -1045,19 +1045,39 @@ int __bch2_check_key_has_snapshot(struct btree_trans *trans,
 		ret = bch2_btree_delete_at(trans, iter,
 					   BTREE_UPDATE_internal_snapshot_node) ?: 1;
 
-	/*
-	 * Snapshot missing: we should have caught this with btree_lost_data and
-	 * kicked off reconstruct_snapshots, so if we end up here we have no
-	 * idea what happened:
-	 */
-	if (fsck_err_on(state == SNAPSHOT_ID_empty,
-			trans, bkey_in_missing_snapshot,
-			"key in missing snapshot %s, delete?",
-			(bch2_btree_id_to_text(&buf, iter->btree_id),
-			 prt_char(&buf, ' '),
-			 bch2_bkey_val_to_text(&buf, c, k), buf.buf)))
-		ret = bch2_btree_delete_at(trans, iter,
-					   BTREE_UPDATE_internal_snapshot_node) ?: 1;
+	if (state == SNAPSHOT_ID_empty) {
+		/*
+		 * Snapshot missing: we should have caught this with btree_lost_data and
+		 * kicked off reconstruct_snapshots, so if we end up here we have no
+		 * idea what happened.
+		 *
+		 * Do not delete unless we know that subvolumes and snapshots
+		 * are consistent:
+		 *
+		 * XXX:
+		 *
+		 * We could be smarter here, and instead of using the generic
+		 * recovery pass ratelimiting, track if there have been any
+		 * changes to the snapshots or inodes btrees since those passes
+		 * last ran.
+		 */
+		ret = bch2_require_recovery_pass(c, &buf, BCH_RECOVERY_PASS_check_snapshots) ?: ret;
+		ret = bch2_require_recovery_pass(c, &buf, BCH_RECOVERY_PASS_check_subvols) ?: ret;
+
+		if (c->sb.btrees_lost_data & BIT_ULL(BTREE_ID_snapshots))
+			ret = bch2_require_recovery_pass(c, &buf, BCH_RECOVERY_PASS_reconstruct_snapshots) ?: ret;
+
+		unsigned repair_flags = FSCK_CAN_IGNORE | (!ret ? FSCK_CAN_FIX : 0);
+
+		if (__fsck_err(trans, repair_flags, bkey_in_missing_snapshot,
+			     "key in missing snapshot %s, delete?",
+			     (bch2_btree_id_to_text(&buf, iter->btree_id),
+			      prt_char(&buf, ' '),
+			      bch2_bkey_val_to_text(&buf, c, k), buf.buf))) {
+			ret = bch2_btree_delete_at(trans, iter,
+						   BTREE_UPDATE_internal_snapshot_node) ?: 1;
+		}
+	}
 fsck_err:
 	printbuf_exit(&buf);
 	return ret;
@@ -1276,7 +1296,7 @@ static int create_snapids(struct btree_trans *trans, u32 parent, u32 tree,
 			goto err;
 
 		if (!k.k || !k.k->p.offset) {
-			ret = -BCH_ERR_ENOSPC_snapshot_create;
+			ret = bch_err_throw(c, ENOSPC_snapshot_create);
 			goto err;
 		}
 
@@ -1878,6 +1898,8 @@ err:
 	d->running = false;
 	mutex_unlock(&d->progress_lock);
 	bch2_trans_put(trans);
+
+	bch2_recovery_pass_set_no_ratelimit(c, BCH_RECOVERY_PASS_check_snapshots);
 out_unlock:
 	mutex_unlock(&d->lock);
 	if (!bch2_err_matches(ret, EROFS))
@@ -1913,7 +1935,7 @@ void bch2_delete_dead_snapshots_async(struct bch_fs *c)
 
 	BUG_ON(!test_bit(BCH_FS_may_go_rw, &c->flags));
 
-	if (!queue_work(c->write_ref_wq, &c->snapshot_delete.work))
+	if (!queue_work(system_long_wq, &c->snapshot_delete.work))
 		enumerated_ref_put(&c->writes, BCH_WRITE_REF_delete_dead_snapshots);
 }
 
