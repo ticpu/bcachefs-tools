@@ -115,8 +115,6 @@ static void append_opt(struct printbuf *out, const char *opt)
 
 static bool should_use_kernel_fsck(darray_const_str devs)
 {
-	system("modprobe bcachefs");
-
 	unsigned kernel_version = bcachefs_kernel_version();
 
 	if (!kernel_version)
@@ -272,6 +270,9 @@ int cmd_fsck(int argc, char *argv[])
 			printf("Running fsck online\n");
 			return fsck_online(*i, opts_str.buf);
 		}
+
+	if (kernel)
+		system("modprobe bcachefs");
 
 	int kernel_probed = kernel;
 	if (kernel_probed < 0)
