@@ -367,9 +367,16 @@ static void journal_replay_print(struct bch_fs *c,
 
 		entry = t_end;
 
-		if (f.filtering &&
-		    entry_is_non_transaction(entry))
+		if (entry_is_non_transaction(entry))
 			break;
+	}
+
+	while (entry < end &&
+	       vstruct_next(entry) <= end &&
+	       !entry_is_transaction_start(entry)) {
+		if (!f.filtering)
+			print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
+		entry = vstruct_next(entry);
 	}
 
 	if (buf.buf) {
@@ -389,7 +396,7 @@ static void list_journal_usage(void)
 	     "  -a                               Read entire journal, not just dirty entries\n"
 	     "  -n, --nr-entries=nr              Number of journal entries to print, starting from the most recent\n"
 	     "  -b, --btree=(+|-)btree1,btree2   Filter keys matching or not updating btree(s)\n"
-	     "  -t, --transaction=(+|-)fn1,fn2   Filter transactions matching or not matching fn(s)"
+	     "  -t, --transaction=(+|-)fn1,fn2   Filter transactions matching or not matching fn(s)\n"
 	     "  -k, --key=(+-1)bbpos1,bbpos2x    Filter transactions updating bbpos\n"
 	     "                                   Or entries not matching the range bbpos-bbpos\n"
 	     "  -v, --verbose                    Verbose mode\n"
