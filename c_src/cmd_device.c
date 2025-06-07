@@ -12,6 +12,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <blkid.h>
+
 #include "libbcachefs/bcachefs.h"
 #include "libbcachefs/bcachefs_ioctl.h"
 #include "libbcachefs/errcode.h"
@@ -88,7 +90,7 @@ static int cmd_device_add(int argc, char *argv[])
 			exit(EXIT_FAILURE);
 			break;
 		}
-}
+	}
 	args_shift(optind);
 
 	char *fs_path = arg_pop();
@@ -125,6 +127,18 @@ static int cmd_device_add(int argc, char *argv[])
 	darray_exit(&devs);
 	free(sb);
 	bchu_disk_add(fs, dev_opts.path);
+
+	/* A whole bunch of nonsense to get blkid to update its cache, so
+	 * mount can find the new device by UUID:
+	 */
+	blkid_cache cache = NULL;
+	if (!blkid_get_cache(&cache, NULL)) {
+		blkid_dev dev = blkid_get_dev(cache, dev_opts.path, BLKID_DEV_VERIFY);
+		if (dev)
+			blkid_verify(cache, dev);
+		blkid_put_cache(cache);
+	}
+
 	return 0;
 }
 
