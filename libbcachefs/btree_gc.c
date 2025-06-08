@@ -397,7 +397,11 @@ again:
 			continue;
 		}
 
-		ret = btree_check_node_boundaries(trans, b, prev, cur, pulled_from_scan);
+		ret = lockrestart_do(trans,
+			btree_check_node_boundaries(trans, b, prev, cur, pulled_from_scan));
+		if (ret < 0)
+			goto err;
+
 		if (ret == DID_FILL_FROM_SCAN) {
 			new_pass = true;
 			ret = 0;
@@ -476,8 +480,7 @@ again:
 		if (ret)
 			goto err;
 
-		ret = lockrestart_do(trans,
-				bch2_btree_repair_topology_recurse(trans, cur, pulled_from_scan));
+		ret = bch2_btree_repair_topology_recurse(trans, cur, pulled_from_scan);
 		six_unlock_read(&cur->c.lock);
 		cur = NULL;
 
@@ -520,6 +523,7 @@ fsck_err:
 	bch2_bkey_buf_exit(&prev_k, c);
 	bch2_bkey_buf_exit(&cur_k, c);
 	printbuf_exit(&buf);
+	bch_err_fn(c, ret);
 	return ret;
 }
 
@@ -558,6 +562,7 @@ static int bch2_check_root(struct btree_trans *trans, enum btree_id i,
 err:
 fsck_err:
 	printbuf_exit(&buf);
+	bch_err_fn(c, ret);
 	return ret;
 }
 

@@ -2184,7 +2184,9 @@ static int check_dirent(struct btree_trans *trans, struct btree_iter *iter,
 		*hash_info = bch2_hash_info_init(c, &i->inode);
 	dir->first_this_inode = false;
 
+#ifdef CONFIG_UNICODE
 	hash_info->cf_encoding = bch2_inode_casefold(c, &i->inode) ? c->cf_encoding : NULL;
+#endif
 
 	ret = bch2_str_hash_check_key(trans, s, &bch2_dirent_hash_desc, hash_info,
 				      iter, k, need_second_pass);
@@ -2317,10 +2319,11 @@ int bch2_check_dirents(struct bch_fs *c)
 	struct snapshots_seen s;
 	struct bch_hash_info hash_info;
 	bool need_second_pass = false, did_second_pass = false;
+	int ret;
 
 	snapshots_seen_init(&s);
 again:
-	int ret = bch2_trans_run(c,
+	ret = bch2_trans_run(c,
 		for_each_btree_key_commit(trans, iter, BTREE_ID_dirents,
 				POS(BCACHEFS_ROOT_INO, 0),
 				BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k,
@@ -2471,14 +2474,6 @@ int bch2_check_root(struct bch_fs *c)
 	return ret;
 }
 
-static bool darray_u32_has(darray_u32 *d, u32 v)
-{
-	darray_for_each(*d, i)
-		if (*i == v)
-			return true;
-	return false;
-}
-
 static int check_subvol_path(struct btree_trans *trans, struct btree_iter *iter, struct bkey_s_c k)
 {
 	struct bch_fs *c = trans->c;
@@ -2506,7 +2501,7 @@ static int check_subvol_path(struct btree_trans *trans, struct btree_iter *iter,
 
 		u32 parent = le32_to_cpu(s.v->fs_path_parent);
 
-		if (darray_u32_has(&subvol_path, parent)) {
+		if (darray_find(subvol_path, parent)) {
 			printbuf_reset(&buf);
 			prt_printf(&buf, "subvolume loop:\n");
 

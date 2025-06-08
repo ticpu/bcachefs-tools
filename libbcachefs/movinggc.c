@@ -154,6 +154,12 @@ static int bch2_copygc_get_buckets(struct moving_context *ctxt,
 	if (bch2_fs_fatal_err_on(ret, c, "%s: from bch2_btree_write_buffer_tryflush()", bch2_err_str(ret)))
 		return ret;
 
+	/*
+	 * we might be in a transaction restart from write buffer flush, start a
+	 * new transaction before iter_init -> path_get
+	 */
+	bch2_trans_begin(trans);
+
 	ret = for_each_btree_key_max(trans, iter, BTREE_ID_lru,
 				  lru_pos(BCH_LRU_BUCKET_FRAGMENTATION, 0, 0),
 				  lru_pos(BCH_LRU_BUCKET_FRAGMENTATION, U64_MAX, LRU_TIME_MAX),

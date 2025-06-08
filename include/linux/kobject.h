@@ -127,4 +127,17 @@ static inline void kset_unregister(struct kset *kset)
 #define kset_create_and_add(_name, _u, _parent)				\
 	((struct kset *) kzalloc(sizeof(struct kset), GFP_KERNEL))
 
+enum kobject_action {
+	KOBJ_ADD,
+	KOBJ_REMOVE,
+	KOBJ_CHANGE,
+	KOBJ_MOVE,
+	KOBJ_ONLINE,
+	KOBJ_OFFLINE,
+	KOBJ_BIND,
+	KOBJ_UNBIND,
+};
+
+static inline void kobject_uevent_env(struct kobject *kobj, int flags, char **envp) {}
+
 #endif /* _KOBJECT_H_ */

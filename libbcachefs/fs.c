@@ -2180,7 +2180,13 @@ static void bch2_evict_inode(struct inode *vinode)
 				KEY_TYPE_QUOTA_WARN);
 		bch2_quota_acct(c, inode->ei_qid, Q_INO, -1,
 				KEY_TYPE_QUOTA_WARN);
-		bch2_inode_rm(c, inode_inum(inode));
+		int ret = bch2_inode_rm(c, inode_inum(inode));
+		if (ret && !bch2_err_matches(ret, EROFS)) {
+			bch_err_msg(c, ret, "VFS incorrectly tried to delete inode %llu:%llu",
+				    inode->ei_inum.subvol,
+				    inode->ei_inum.inum);
+			bch2_sb_error_count(c, BCH_FSCK_ERR_vfs_bad_inode_rm);
+		}
 
 		/*
 		 * If we are deleting, we need it present in the vfs hash table
@@ -2483,6 +2489,14 @@ static int bch2_fs_get_tree(struct fs_context *fc)
 	ret = bch2_fs_start(c);
 	if (ret)
 		goto err_stop_fs;
+
+	/*
+	 * We might be doing a RO mount because other options required it, or we
+	 * have no alloc info and it's a small image with no room to regenerate
+	 * it
+	 */
+	if (c->opts.read_only)
+		fc->sb_flags |= SB_RDONLY;
 
 	sb = sget(fc->fs_type, NULL, bch2_set_super, fc->sb_flags|SB_NOSEC, c);
 	ret = PTR_ERR_OR_ZERO(sb);

@@ -176,5 +176,7 @@ int blk_status_to_errno(blk_status_t status);
 blk_status_t errno_to_blk_status(int errno);
 const char *blk_status_to_str(blk_status_t status);
 
+static inline void invalidate_bdev(struct block_device *bdev) {}
+
 #endif /* __TOOLS_LINUX_BLKDEV_H */
 

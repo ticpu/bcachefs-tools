@@ -251,6 +251,7 @@ int bch2_dirent_init_name(struct bkey_i_dirent *dirent,
 		       offsetof(struct bch_dirent, d_name) -
 		       name->len);
 	} else {
+#ifdef CONFIG_UNICODE
 		memcpy(&dirent->v.d_cf_name_block.d_names[0], name->name, name->len);
 
 		char *cf_out = &dirent->v.d_cf_name_block.d_names[name->len];
@@ -276,6 +277,9 @@ int bch2_dirent_init_name(struct bkey_i_dirent *dirent,
 		dirent->v.d_cf_name_block.d_cf_name_len = cpu_to_le16(cf_len);
 
 		EBUG_ON(bch2_dirent_get_casefold_name(dirent_i_to_s_c(dirent)).len != cf_len);
+#else
+	return -EOPNOTSUPP;
+#endif
 	}
 
 	unsigned u64s = dirent_val_u64s(name->len, cf_len);

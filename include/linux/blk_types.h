@@ -57,6 +57,11 @@ struct hd_struct {
 
 struct block_device {
 	struct kobject		kobj;
+
+	struct			{
+		struct kobject	kobj;
+	}			bd_device;
+
 	dev_t			bd_dev;
 	char			name[BDEVNAME_SIZE];
 	struct inode		*bd_inode;
