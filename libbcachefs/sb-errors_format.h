@@ -165,7 +165,7 @@ enum bch_fsck_flags {
 	x(ptr_to_missing_replicas_entry,			149,	FSCK_AUTOFIX)	\
 	x(ptr_to_missing_stripe,				150,	0)		\
 	x(ptr_to_incorrect_stripe,				151,	0)		\
-	x(ptr_gen_newer_than_bucket_gen,			152,	0)		\
+	x(ptr_gen_newer_than_bucket_gen,			152,	FSCK_AUTOFIX)		\
 	x(ptr_too_stale,					153,	0)		\
 	x(stale_dirty_ptr,					154,	FSCK_AUTOFIX)	\
 	x(ptr_bucket_data_type_mismatch,			155,	0)		\
