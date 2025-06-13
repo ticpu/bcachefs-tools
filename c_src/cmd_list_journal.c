@@ -80,6 +80,9 @@ typedef struct {
 } transaction_key_filter;
 
 typedef struct {
+	bool				blacklisted;
+	bool				log;
+	bool				print_offset;
 	bool				filtering;
 	u64				btree_filter;
 	transaction_msg_filter		transaction;
@@ -113,18 +116,14 @@ static bool entry_matches_btree_filter(journal_filter f, struct jset_entry *entr
 static bool transaction_matches_btree_filter(journal_filter f,
 					struct jset_entry *entry, struct jset_entry *end)
 {
-	bool have_keys = false;
-
 	for (entry = vstruct_next(entry);
 	     entry != end;
 	     entry = vstruct_next(entry))
-		if (entry_is_print_key(entry)) {
-			if (entry_matches_btree_filter (f, entry))
-				return true;
-			have_keys = true;
-		}
+		if (entry_is_print_key(entry) &&
+		    entry_matches_btree_filter (f, entry))
+			return true;
 
-	return !have_keys;
+	return false;
 }
 
 static bool bkey_matches_filter(transaction_key_filter f,
@@ -225,10 +224,14 @@ static bool should_print_transaction(journal_filter f,
 {
 	BUG_ON(entry->type != BCH_JSET_ENTRY_log);
 
-	if (entry_is_log_only(entry, end))
+	if (!f.filtering)
 		return true;
 
-	if (!transaction_matches_btree_filter(f, entry, end))
+	if (f.log && entry_is_log_only(entry, end))
+		return true;
+
+	if (f.btree_filter != ~0ULL &&
+	    !transaction_matches_btree_filter(f, entry, end))
 		return false;
 
 	if (f.transaction.f.nr &&
@@ -310,10 +313,13 @@ static void print_one_entry(struct printbuf		*out,
 
 	bool highlight = entry_matches_transaction_filter(f.key, entry);
 	if (highlight)
-		fputs(RED, stdout);
+		prt_str(out, RED);
 
 	unsigned indent = journal_entry_indent(entry);
 	printbuf_indent_add(out, indent);
+
+	if (f.print_offset)
+		prt_printf(out, "%4lu ", entry->_data - p->j._data);
 
 	if (!f.bkey_val && entry_is_print_key(entry))
 		bch2_journal_entry_keys_noval_to_text(out, entry);
@@ -354,7 +360,8 @@ static void journal_replay_print(struct bch_fs *c,
 	}
 
 	while (entry < end &&
-	       vstruct_next(entry) <= end) {
+	       vstruct_next(entry) <= end &&
+	       entry_is_transaction_start(entry)) {
 		struct jset_entry *t_end = transaction_end(entry, end);
 
 		if (should_print_transaction(f, entry, t_end)) {
@@ -366,9 +373,6 @@ static void journal_replay_print(struct bch_fs *c,
 		}
 
 		entry = t_end;
-
-		if (entry_is_non_transaction(entry))
-			break;
 	}
 
 	while (entry < end &&
@@ -394,6 +398,9 @@ static void list_journal_usage(void)
 	     "\n"
 	     "Options:\n"
 	     "  -a                               Read entire journal, not just dirty entries\n"
+	     "  -B, --blacklisted                Include blacklisted entries\n"
+	     "  -l, --log                        When filtering, include log-only entries\n"
+	     "  -o, --offset                     Print offset of each subentry\n"
 	     "  -n, --nr-entries=nr              Number of journal entries to print, starting from the most recent\n"
 	     "  -b, --btree=(+|-)btree1,btree2   Filter keys matching or not updating btree(s)\n"
 	     "  -t, --transaction=(+|-)fn1,fn2   Filter transactions matching or not matching fn(s)\n"
@@ -408,6 +415,9 @@ int cmd_list_journal(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "nr-entries",		required_argument,	NULL, 'n' },
+		{ "blacklisted",	no_argument,		NULL, 'B' },
+		{ "log",		no_argument,		NULL, 'l' },
+		{ "offset",		no_argument,		NULL, 'o' },
 		{ "btree",		required_argument,	NULL, 'b' },
 		{ "transaction",	required_argument,	NULL, 't' },
 		{ "key",		required_argument,	NULL, 'k' },
@@ -432,7 +442,7 @@ int cmd_list_journal(int argc, char *argv[])
 	opt_set(opts, retain_recovery_info ,true);
 	opt_set(opts, read_journal_only,true);
 
-	while ((opt = getopt_long(argc, argv, "an:m:t:k:vh",
+	while ((opt = getopt_long(argc, argv, "an:Blob:t:k:V:vh",
 				  longopts, NULL)) != -1)
 		switch (opt) {
 		case 'a':
@@ -442,6 +452,15 @@ int cmd_list_journal(int argc, char *argv[])
 			if (kstrtouint(optarg, 10, &nr_entries))
 				die("error parsing nr_entries");
 			opt_set(opts, read_entire_journal, true);
+			break;
+		case 'B':
+			f.blacklisted = true;
+			break;
+		case 'l':
+			f.log = true;
+			break;
+		case 'o':
+			f.print_offset = true;
 			break;
 		case 'b':
 			ret = parse_sign(&optarg);
@@ -491,8 +510,16 @@ int cmd_list_journal(int argc, char *argv[])
 	struct genradix_iter iter;
 	genradix_for_each(&c->journal_entries, iter, _p) {
 		p = *_p;
-		if (p && le64_to_cpu(p->j.seq) + nr_entries >= atomic64_read(&c->journal.seq))
-			journal_replay_print(c, f, p);
+		if (!p)
+			continue;
+		if (le64_to_cpu(p->j.seq) + nr_entries < atomic64_read(&c->journal.seq))
+			continue;
+		if (!f.blacklisted &&
+		    (p->ignore_blacklisted ||
+		     bch2_journal_seq_is_blacklisted(c, le64_to_cpu(p->j.seq), false)))
+			continue;
+
+		journal_replay_print(c, f, p);
 	}
 
 	bch2_fs_stop(c);
