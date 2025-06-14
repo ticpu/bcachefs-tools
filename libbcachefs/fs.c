@@ -722,7 +722,7 @@ static struct dentry *bch2_lookup(struct inode *vdir, struct dentry *dentry,
 	if (IS_ERR(inode))
 		inode = NULL;
 
-#if IS_ENABLED(CONFIG_UNICODE)
+#ifdef CONFIG_UNICODE
 	if (!inode && IS_CASEFOLDED(vdir)) {
 		/*
 		 * Do not cache a negative dentry in casefolded directories
@@ -2564,7 +2564,7 @@ got_sb:
 
 	sb->s_shrink->seeks = 0;
 
-#if IS_ENABLED(CONFIG_UNICODE)
+#ifdef CONFIG_UNICODE
 	sb->s_encoding = c->cf_encoding;
 #endif
 	generic_set_sb_d_ops(sb);

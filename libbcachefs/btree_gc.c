@@ -442,7 +442,8 @@ again:
 
 	if (!ret && !IS_ERR_OR_NULL(prev)) {
 		BUG_ON(cur);
-		ret = btree_repair_node_end(trans, b, prev, pulled_from_scan);
+		ret = lockrestart_do(trans,
+			btree_repair_node_end(trans, b, prev, pulled_from_scan));
 		if (ret == DID_FILL_FROM_SCAN) {
 			new_pass = true;
 			ret = 0;
