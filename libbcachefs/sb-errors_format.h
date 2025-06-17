@@ -251,7 +251,7 @@ enum bch_fsck_flags {
 	x(deleted_inode_not_unlinked,				214,	FSCK_AUTOFIX)	\
 	x(deleted_inode_has_child_snapshots,			288,	FSCK_AUTOFIX)	\
 	x(extent_overlapping,					215,	0)		\
-	x(key_in_missing_inode,					216,	0)		\
+	x(key_in_missing_inode,					216,	FSCK_AUTOFIX)	\
 	x(key_in_wrong_inode_type,				217,	0)		\
 	x(extent_past_end_of_inode,				218,	FSCK_AUTOFIX)	\
 	x(dirent_empty_name,					219,	0)		\
@@ -260,11 +260,11 @@ enum bch_fsck_flags {
 	x(dirent_name_embedded_nul,				222,	0)		\
 	x(dirent_name_dot_or_dotdot,				223,	0)		\
 	x(dirent_name_has_slash,				224,	0)		\
-	x(dirent_d_type_wrong,					225,	0)		\
+	x(dirent_d_type_wrong,					225,	FSCK_AUTOFIX)	\
 	x(inode_bi_parent_wrong,				226,	0)		\
 	x(dirent_in_missing_dir_inode,				227,	0)		\
 	x(dirent_in_non_dir_inode,				228,	0)		\
-	x(dirent_to_missing_inode,				229,	0)		\
+	x(dirent_to_missing_inode,				229,	FSCK_AUTOFIX)	\
 	x(dirent_to_overwritten_inode,				302,	0)		\
 	x(dirent_to_missing_subvol,				230,	0)		\
 	x(dirent_to_itself,					231,	0)		\

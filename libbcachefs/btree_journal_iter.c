@@ -713,19 +713,14 @@ int bch2_journal_keys_sort(struct bch_fs *c)
 	struct journal_replay *i, **_i;
 	struct journal_keys *keys = &c->journal_keys;
 	size_t nr_read = 0;
-	u64 nr_entries = 0, nr_non_ignored = 0;
 
 	u64 rewind_seq = c->opts.journal_rewind ?: U64_MAX;
 
 	genradix_for_each(&c->journal_entries, iter, _i) {
 		i = *_i;
 
-		nr_entries += i != NULL;
-
 		if (journal_replay_ignore(i))
 			continue;
-
-		nr_non_ignored++;
 
 		cond_resched();
 
