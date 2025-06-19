@@ -508,6 +508,7 @@ again:
 	 * to handle a transaction restart - this code needs to be rewritten
 	 * when we start doing online topology repair
 	 */
+	bch2_trans_unlock_long(trans);
 	if (mustfix_fsck_err_on(!have_child,
 			c, btree_node_topology_interior_node_empty,
 			"empty interior btree node at %s", buf.buf))

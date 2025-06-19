@@ -3194,6 +3194,10 @@ void *__bch2_trans_kmalloc(struct btree_trans *trans, size_t size, unsigned long
 	if (WARN_ON_ONCE(new_bytes > BTREE_TRANS_MEM_MAX)) {
 #ifdef CONFIG_BCACHEFS_TRANS_KMALLOC_TRACE
 		struct printbuf buf = PRINTBUF;
+		bch2_log_msg_start(c, &buf);
+		prt_printf(&buf, "bump allocator exceeded BTREE_TRANS_MEM_MAX (%u)\n",
+			   BTREE_TRANS_MEM_MAX);
+
 		bch2_trans_kmalloc_trace_to_text(&buf, &trans->trans_kmalloc_trace);
 		bch2_print_str(c, KERN_ERR, buf.buf);
 		printbuf_exit(&buf);
@@ -3319,7 +3323,7 @@ u32 bch2_trans_begin(struct btree_trans *trans)
 	trans->restart_count++;
 	trans->mem_top			= 0;
 
-	if (trans->restarted == BCH_ERR_transaction_restart_mem_realloced) {
+	if (unlikely(trans->restarted == BCH_ERR_transaction_restart_mem_realloced)) {
 		EBUG_ON(!trans->mem || !trans->mem_bytes);
 		unsigned new_bytes = trans->realloc_bytes_required;
 		void *new_mem = krealloc(trans->mem, new_bytes, GFP_NOWAIT|__GFP_NOWARN);

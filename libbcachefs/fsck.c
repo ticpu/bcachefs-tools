@@ -728,13 +728,7 @@ static int snapshots_seen_update(struct bch_fs *c, struct snapshots_seen *s,
 static bool key_visible_in_snapshot(struct bch_fs *c, struct snapshots_seen *seen,
 				    u32 id, u32 ancestor)
 {
-	ssize_t i;
-
 	EBUG_ON(id > ancestor);
-
-	/* @ancestor should be the snapshot most recently added to @seen */
-	EBUG_ON(ancestor != seen->pos.snapshot);
-	EBUG_ON(ancestor != darray_last(seen->ids));
 
 	if (id == ancestor)
 		return true;
@@ -751,11 +745,8 @@ static bool key_visible_in_snapshot(struct bch_fs *c, struct snapshots_seen *see
 	 * numerically, since snapshot ID lists are kept sorted, so if we find
 	 * an id that's an ancestor of @id we're done:
 	 */
-
-	for (i = seen->ids.nr - 2;
-	     i >= 0 && seen->ids.data[i] >= id;
-	     --i)
-		if (bch2_snapshot_is_ancestor(c, id, seen->ids.data[i]))
+	darray_for_each_reverse(seen->ids, i)
+		if (*i != ancestor && bch2_snapshot_is_ancestor(c, id, *i))
 			return false;
 
 	return true;
@@ -2311,7 +2302,7 @@ static int check_dirent(struct btree_trans *trans, struct btree_iter *iter,
 		*hash_info = bch2_hash_info_init(c, &i->inode);
 	dir->first_this_inode = false;
 
-#ifdef CONFIG_UNICODE
+#if IS_ENABLED(CONFIG_UNICODE)
 	hash_info->cf_encoding = bch2_inode_casefold(c, &i->inode) ? c->cf_encoding : NULL;
 #endif
 
@@ -2601,14 +2592,6 @@ int bch2_check_root(struct bch_fs *c)
 	return ret;
 }
 
-static bool darray_u32_has(darray_u32 *d, u32 v)
-{
-	darray_for_each(*d, i)
-		if (*i == v)
-			return true;
-	return false;
-}
-
 static int check_subvol_path(struct btree_trans *trans, struct btree_iter *iter, struct bkey_s_c k)
 {
 	struct bch_fs *c = trans->c;
@@ -2641,7 +2624,7 @@ static int check_subvol_path(struct btree_trans *trans, struct btree_iter *iter,
 
 		u32 parent = le32_to_cpu(s.v->fs_path_parent);
 
-		if (darray_u32_has(&subvol_path, parent)) {
+		if (darray_find(subvol_path, parent)) {
 			printbuf_reset(&buf);
 			prt_printf(&buf, "subvolume loop: ");
 
