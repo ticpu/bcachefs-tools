@@ -90,11 +90,8 @@ static int splice_fd_to_stdinout(int fd)
 	return close(fd);
 }
 
-static int fsck_online(const char *dev_path, const char *opt_str)
+static int fsck_online(struct bchfs_handle fs, const char *opt_str)
 {
-	int dev_idx;
-	struct bchfs_handle fs = bchu_fs_open_by_dev(dev_path, &dev_idx);
-
 	struct bch_ioctl_fsck_online fsck = {
 		.opts = (unsigned long) opt_str
 	};
@@ -265,10 +262,21 @@ int cmd_fsck(int argc, char *argv[])
 
 	darray_const_str devs = get_or_split_cmdline_devs(argc, argv);
 
+	if (devs.nr == 1 &&
+	    S_ISDIR(xstat(devs.data[0]).st_mode)) {
+		printf("Running fsck online\n");
+
+		struct bchfs_handle fs = bcache_fs_open(devs.data[0]);
+		return fsck_online(fs, opts_str.buf);
+	}
+
 	darray_for_each(devs, i)
 		if (dev_mounted(*i)) {
 			printf("Running fsck online\n");
-			return fsck_online(*i, opts_str.buf);
+
+			int dev_idx;
+			struct bchfs_handle fs = bchu_fs_open_by_dev(*i, &dev_idx);
+			return fsck_online(fs, opts_str.buf);
 		}
 
 	if (kernel)
