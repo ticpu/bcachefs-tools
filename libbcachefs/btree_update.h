@@ -184,8 +184,7 @@ bch2_trans_jset_entry_alloc(struct btree_trans *trans, unsigned u64s)
 
 int bch2_btree_insert_clone_trans(struct btree_trans *, enum btree_id, struct bkey_i *);
 
-int bch2_btree_write_buffer_insert_err(struct btree_trans *,
-				       enum btree_id, struct bkey_i *);
+int bch2_btree_write_buffer_insert_err(struct bch_fs *, enum btree_id, struct bkey_i *);
 
 static inline int __must_check bch2_trans_update_buffered(struct btree_trans *trans,
 					    enum btree_id btree,
@@ -196,7 +195,7 @@ static inline int __must_check bch2_trans_update_buffered(struct btree_trans *tr
 	EBUG_ON(k->k.u64s > BTREE_WRITE_BUFERED_U64s_MAX);
 
 	if (unlikely(!btree_type_uses_write_buffer(btree))) {
-		int ret = bch2_btree_write_buffer_insert_err(trans, btree, k);
+		int ret = bch2_btree_write_buffer_insert_err(trans->c, btree, k);
 		dump_stack();
 		return ret;
 	}
@@ -271,6 +270,13 @@ static inline int bch2_trans_commit(struct btree_trans *trans,
 	for (struct btree_insert_entry *_i = (_trans)->updates;		\
 	     (_i) < (_trans)->updates + (_trans)->nr_updates;		\
 	     (_i)++)
+
+static inline bool bch2_trans_has_updates(struct btree_trans *trans)
+{
+	return trans->nr_updates ||
+		trans->journal_entries.u64s ||
+		trans->accounting.u64s;
+}
 
 static inline void bch2_trans_reset_updates(struct btree_trans *trans)
 {

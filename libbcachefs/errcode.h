@@ -218,6 +218,7 @@
 	x(EINVAL,			option_negative)			\
 	x(EOPNOTSUPP,			may_not_use_incompat_feature)		\
 	x(EOPNOTSUPP,			no_casefolding_without_utf8)		\
+	x(EOPNOTSUPP,			casefolding_disabled)		\
 	x(EOPNOTSUPP,			casefold_opt_is_dir_only)		\
 	x(EOPNOTSUPP,			unsupported_fsx_flag)			\
 	x(EOPNOTSUPP,			unsupported_fa_flag)			\

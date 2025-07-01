@@ -239,6 +239,12 @@ struct bio *bio_alloc_bioset(struct block_device *, unsigned,
 extern void bio_put(struct bio *);
 
 int bio_add_page(struct bio *, struct page *, unsigned, unsigned);
+void bio_add_virt_nofail(struct bio *, void *, unsigned);
+
+static inline void bio_add_vmalloc(struct bio *bio, void *vaddr, unsigned len)
+{
+	bio_add_virt_nofail(bio, vaddr, len);
+}
 
 struct bio *bio_alloc_clone(struct block_device *, struct bio *,
 			    gfp_t, struct bio_set *);

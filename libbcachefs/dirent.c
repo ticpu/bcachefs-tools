@@ -18,9 +18,12 @@ int bch2_casefold(struct btree_trans *trans, const struct bch_hash_info *info,
 {
 	*out_cf = (struct qstr) QSTR_INIT(NULL, 0);
 
-#if IS_ENABLED(CONFIG_UNICODE)
+	int ret = bch2_fs_casefold_enabled(trans->c);
+	if (ret)
+		return ret;
+
 	unsigned char *buf = bch2_trans_kmalloc(trans, BCH_NAME_MAX + 1);
-	int ret = PTR_ERR_OR_ZERO(buf);
+	ret = PTR_ERR_OR_ZERO(buf);
 	if (ret)
 		return ret;
 
@@ -30,9 +33,6 @@ int bch2_casefold(struct btree_trans *trans, const struct bch_hash_info *info,
 
 	*out_cf = (struct qstr) QSTR_INIT(buf, ret);
 	return 0;
-#else
-	return bch_err_throw(trans->c, no_casefolding_without_utf8);
-#endif
 }
 
 static unsigned bch2_dirent_name_bytes(struct bkey_s_c_dirent d)
@@ -252,7 +252,10 @@ int bch2_dirent_init_name(struct bch_fs *c,
 		       offsetof(struct bch_dirent, d_name) -
 		       name->len);
 	} else {
-#if IS_ENABLED(CONFIG_UNICODE)
+		int ret = bch2_fs_casefold_enabled(c);
+		if (ret)
+			return ret;
+
 		memcpy(&dirent->v.d_cf_name_block.d_names[0], name->name, name->len);
 
 		char *cf_out = &dirent->v.d_cf_name_block.d_names[name->len];
@@ -278,9 +281,6 @@ int bch2_dirent_init_name(struct bch_fs *c,
 		dirent->v.d_cf_name_block.d_cf_name_len = cpu_to_le16(cf_len);
 
 		EBUG_ON(bch2_dirent_get_casefold_name(dirent_i_to_s_c(dirent)).len != cf_len);
-#else
-	return bch_err_throw(c, no_casefolding_without_utf8);
-#endif
 	}
 
 	unsigned u64s = dirent_val_u64s(name->len, cf_len);

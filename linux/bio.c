@@ -225,6 +225,11 @@ int bio_add_page(struct bio *bio, struct page *page,
 	return len;
 }
 
+void bio_add_virt_nofail(struct bio *bio, void *vaddr, unsigned len)
+{
+	bio_add_page(bio, virt_to_page(vaddr), len, offset_in_page(vaddr));
+}
+
 static inline bool bio_remaining_done(struct bio *bio)
 {
 	/*

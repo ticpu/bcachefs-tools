@@ -7,6 +7,7 @@ enum bch_fsck_flags {
 	FSCK_CAN_IGNORE		= BIT(1),
 	FSCK_AUTOFIX		= BIT(2),
 	FSCK_ERR_NO_LOG		= BIT(3),
+	FSCK_ERR_SILENT		= BIT(4),
 };
 
 #define BCH_SB_ERRS()									\
@@ -157,6 +158,7 @@ enum bch_fsck_flags {
 	x(extent_ptrs_unwritten,				140,	0)		\
 	x(extent_ptrs_written_and_unwritten,			141,	0)		\
 	x(ptr_to_invalid_device,				142,	0)		\
+	x(ptr_to_removed_device,				322,	0)		\
 	x(ptr_to_duplicate_device,				143,	0)		\
 	x(ptr_after_last_bucket,				144,	0)		\
 	x(ptr_before_first_bucket,				145,	0)		\
@@ -290,6 +292,7 @@ enum bch_fsck_flags {
 	x(inode_points_to_missing_dirent,			249,	FSCK_AUTOFIX)	\
 	x(inode_points_to_wrong_dirent,				250,	FSCK_AUTOFIX)	\
 	x(inode_bi_parent_nonzero,				251,	0)		\
+	x(missing_inode_with_contents,				321,	FSCK_AUTOFIX)	\
 	x(dirent_to_missing_parent_subvol,			252,	0)		\
 	x(dirent_not_visible_in_parent_subvol,			253,	0)		\
 	x(subvol_fs_path_parent_wrong,				254,	0)		\
@@ -301,7 +304,7 @@ enum bch_fsck_flags {
 	x(btree_node_bkey_bad_u64s,				260,	0)		\
 	x(btree_node_topology_empty_interior_node,		261,	0)		\
 	x(btree_ptr_v2_min_key_bad,				262,	0)		\
-	x(btree_root_unreadable_and_scan_found_nothing,		263,	FSCK_AUTOFIX)	\
+	x(btree_root_unreadable_and_scan_found_nothing,		263,	0)		\
 	x(snapshot_node_missing,				264,	FSCK_AUTOFIX)	\
 	x(dup_backpointer_to_bad_csum_extent,			265,	0)		\
 	x(btree_bitmap_not_marked,				266,	FSCK_AUTOFIX)	\
@@ -314,7 +317,7 @@ enum bch_fsck_flags {
 	x(accounting_mismatch,					272,	FSCK_AUTOFIX)	\
 	x(accounting_replicas_not_marked,			273,	0)		\
 	x(accounting_to_invalid_device,				289,	0)		\
-	x(invalid_btree_id,					274,	0)		\
+	x(invalid_btree_id,					274,	FSCK_AUTOFIX)		\
 	x(alloc_key_io_time_bad,				275,	0)		\
 	x(alloc_key_fragmentation_lru_wrong,			276,	FSCK_AUTOFIX)	\
 	x(accounting_key_junk_at_end,				277,	FSCK_AUTOFIX)	\
@@ -331,7 +334,7 @@ enum bch_fsck_flags {
 	x(dirent_stray_data_after_cf_name,			305,	0)		\
 	x(rebalance_work_incorrectly_set,			309,	FSCK_AUTOFIX)	\
 	x(rebalance_work_incorrectly_unset,			310,	FSCK_AUTOFIX)	\
-	x(MAX,							321,	0)
+	x(MAX,							323,	0)
 
 enum bch_sb_error_id {
 #define x(t, n, ...) BCH_FSCK_ERR_##t = n,

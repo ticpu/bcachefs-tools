@@ -137,12 +137,15 @@ struct bkey_i *bch2_journal_keys_peek_prev_min(struct bch_fs *c, enum btree_id b
 	struct journal_key *k;
 
 	BUG_ON(*idx > keys->nr);
+
+	if (!keys->nr)
+		return NULL;
 search:
 	if (!*idx)
 		*idx = __bch2_journal_key_search(keys, btree_id, level, pos);
 
 	while (*idx < keys->nr &&
-	       __journal_key_cmp(btree_id, level, end_pos, idx_to_key(keys, *idx - 1)) >= 0) {
+	       __journal_key_cmp(btree_id, level, end_pos, idx_to_key(keys, *idx)) >= 0) {
 		(*idx)++;
 		iters++;
 		if (iters == 10) {
@@ -151,18 +154,23 @@ search:
 		}
 	}
 
+	if (*idx == keys->nr)
+		--(*idx);
+
 	struct bkey_i *ret = NULL;
 	rcu_read_lock(); /* for overwritten_ranges */
 
-	while ((k = *idx < keys->nr ? idx_to_key(keys, *idx) : NULL)) {
+	while (true) {
+		k = idx_to_key(keys, *idx);
 		if (__journal_key_cmp(btree_id, level, end_pos, k) > 0)
 			break;
 
 		if (k->overwritten) {
 			if (k->overwritten_range)
-				*idx = rcu_dereference(k->overwritten_range)->start - 1;
-			else
-				*idx -= 1;
+				*idx = rcu_dereference(k->overwritten_range)->start;
+			if (!*idx)
+				break;
+			--(*idx);
 			continue;
 		}
 
@@ -171,6 +179,8 @@ search:
 			break;
 		}
 
+		if (!*idx)
+			break;
 		--(*idx);
 		iters++;
 		if (iters == 10) {
@@ -707,6 +717,18 @@ static void __journal_keys_sort(struct journal_keys *keys)
 	keys->nr = dst - keys->data;
 }
 
+static bool should_rewind_entry(struct bch_fs *c, struct jset_entry *entry)
+{
+	if (entry->level)
+		return false;
+	if (btree_id_is_alloc(entry->btree_id))
+		return false;
+	if (c->opts.journal_rewind_no_extents &&
+	    entry->btree_id == BTREE_ID_extents)
+		return false;
+	return true;
+}
+
 int bch2_journal_keys_sort(struct bch_fs *c)
 {
 	struct genradix_iter iter;
@@ -725,9 +747,8 @@ int bch2_journal_keys_sort(struct bch_fs *c)
 		cond_resched();
 
 		vstruct_for_each(&i->j, entry) {
-			bool rewind = !entry->level &&
-				!btree_id_is_alloc(entry->btree_id) &&
-				le64_to_cpu(i->j.seq) >= rewind_seq;
+			bool rewind = le64_to_cpu(i->j.seq) >= rewind_seq &&
+				should_rewind_entry(c, entry);
 
 			if (entry->type != (rewind
 					    ? BCH_JSET_ENTRY_overwrite
