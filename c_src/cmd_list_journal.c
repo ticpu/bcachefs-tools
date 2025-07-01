@@ -81,7 +81,10 @@ typedef struct {
 
 typedef struct {
 	bool				blacklisted;
+	bool				flush_only;
+	bool				datetime_only;
 	bool				log;
+	bool				log_only;
 	bool				print_offset;
 	bool				filtering;
 	u64				btree_filter;
@@ -208,6 +211,17 @@ static bool entry_is_log_only(struct jset_entry *entry, struct jset_entry *end)
 	return have_log;
 }
 
+static bool entry_has_log(struct jset_entry *entry, struct jset_entry *end)
+{
+	for (entry = vstruct_next(entry);
+	     entry != end;
+	     entry = vstruct_next(entry))
+		if (entry_is_log_msg(entry))
+			return true;
+
+	return false;
+}
+
 static struct jset_entry *transaction_end(struct jset_entry *entry, struct jset_entry *end)
 {
 	do
@@ -229,6 +243,9 @@ static bool should_print_transaction(journal_filter f,
 
 	if (f.log && entry_is_log_only(entry, end))
 		return true;
+
+	if (f.log_only && !entry_has_log(entry, end))
+		return false;
 
 	if (f.btree_filter != ~0ULL &&
 	    !transaction_matches_btree_filter(f, entry, end))
@@ -343,9 +360,23 @@ static void journal_replay_print(struct bch_fs *c,
 		bch2_journal_seq_is_blacklisted(c, le64_to_cpu(p->j.seq), false);
 	bool printed_header = false;
 
-	if (f.btree_filter == ~0ULL &&
-	    !f.transaction.f.nr &&
-	    !f.key.f.nr)
+	if (f.datetime_only) {
+		prt_printf(&buf,
+			   "%s"
+			   "journal entry     %-8llu ",
+			   blacklisted ? "blacklisted " : "",
+			   le64_to_cpu(p->j.seq));
+		vstruct_for_each(&p->j, entry)
+			if (entry->type == BCH_JSET_ENTRY_datetime) {
+				bch2_journal_entry_to_text(&buf, c, entry);
+				break;
+			}
+
+		prt_newline(&buf);
+		goto print;
+	}
+
+	if (!f.filtering)
 		journal_entry_header_to_text(&buf, c, p, blacklisted, &printed_header);
 
 	struct jset_entry *entry = p->j.start;
@@ -382,11 +413,11 @@ static void journal_replay_print(struct bch_fs *c,
 			print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
 		entry = vstruct_next(entry);
 	}
-
+print:
 	if (buf.buf) {
 		if (blacklisted)
 			star_start_of_lines(buf.buf);
-		write(STDOUT_FILENO, buf.buf, buf.pos);
+		fwrite(buf.buf, 1, buf.pos, stdout);
 	}
 	printbuf_exit(&buf);
 }
@@ -399,7 +430,10 @@ static void list_journal_usage(void)
 	     "Options:\n"
 	     "  -a                               Read entire journal, not just dirty entries\n"
 	     "  -B, --blacklisted                Include blacklisted entries\n"
+	     "  -F, --flush-only                 Only print flush entries/commits\n"
+	     "  -D, --datetime                   Print datetime entries only\n"
 	     "  -l, --log                        When filtering, include log-only entries\n"
+	     "  -L, --log-only                   Only print transactions containing log messages\n"
 	     "  -o, --offset                     Print offset of each subentry\n"
 	     "  -n, --nr-entries=nr              Number of journal entries to print, starting from the most recent\n"
 	     "  -b, --btree=(+|-)btree1,btree2   Filter keys matching or not updating btree(s)\n"
@@ -416,7 +450,10 @@ int cmd_list_journal(int argc, char *argv[])
 	static const struct option longopts[] = {
 		{ "nr-entries",		required_argument,	NULL, 'n' },
 		{ "blacklisted",	no_argument,		NULL, 'B' },
+		{ "flush-only",		no_argument,		NULL, 'F' },
+		{ "datetime",		no_argument,		NULL, 'D' },
 		{ "log",		no_argument,		NULL, 'l' },
+		{ "log-only",		no_argument,		NULL, 'L' },
 		{ "offset",		no_argument,		NULL, 'o' },
 		{ "btree",		required_argument,	NULL, 'b' },
 		{ "transaction",	required_argument,	NULL, 't' },
@@ -442,7 +479,7 @@ int cmd_list_journal(int argc, char *argv[])
 	opt_set(opts, retain_recovery_info ,true);
 	opt_set(opts, read_journal_only,true);
 
-	while ((opt = getopt_long(argc, argv, "an:Blob:t:k:V:vh",
+	while ((opt = getopt_long(argc, argv, "an:BFDlLob:t:k:V:vh",
 				  longopts, NULL)) != -1)
 		switch (opt) {
 		case 'a':
@@ -456,8 +493,18 @@ int cmd_list_journal(int argc, char *argv[])
 		case 'B':
 			f.blacklisted = true;
 			break;
+		case 'F':
+			f.flush_only = true;
+			break;
+		case 'D':
+			f.datetime_only = true;
+			break;
 		case 'l':
 			f.log = true;
+			break;
+		case 'L':
+			f.log_only = true;
+			f.filtering = true;
 			break;
 		case 'o':
 			f.print_offset = true;
@@ -508,15 +555,48 @@ int cmd_list_journal(int argc, char *argv[])
 
 	struct journal_replay *p, **_p;
 	struct genradix_iter iter;
+	u64 seq = 0;
+
 	genradix_for_each(&c->journal_entries, iter, _p) {
 		p = *_p;
 		if (!p)
 			continue;
 		if (le64_to_cpu(p->j.seq) + nr_entries < atomic64_read(&c->journal.seq))
 			continue;
+
+		while (seq < le64_to_cpu(p->j.seq)) {
+			while (seq < le64_to_cpu(p->j.seq) &&
+			       bch2_journal_seq_is_blacklisted(c, seq, false))
+				seq++;
+
+			if (seq == le64_to_cpu(p->j.seq))
+				break;
+
+			u64 missing_start = seq;
+
+			while (seq < le64_to_cpu(p->j.seq) &&
+			       !bch2_journal_seq_is_blacklisted(c, seq, false))
+				seq++;
+
+			u64 missing_end = seq - 1;
+
+			if (missing_start == missing_end)
+				break;
+
+			printf("missing %llu at %llu-%llu\n",
+			       missing_end - missing_start,
+			       missing_start, missing_end);
+		}
+
+		seq = le64_to_cpu(p->j.seq) + 1;
+
 		if (!f.blacklisted &&
 		    (p->ignore_blacklisted ||
 		     bch2_journal_seq_is_blacklisted(c, le64_to_cpu(p->j.seq), false)))
+			continue;
+
+		if (f.flush_only &&
+		    JSET_NO_FLUSH(&p->j))
 			continue;
 
 		journal_replay_print(c, f, p);
