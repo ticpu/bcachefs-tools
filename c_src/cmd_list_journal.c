@@ -428,7 +428,8 @@ static void list_journal_usage(void)
 	     "Usage: bcachefs list_journal [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -a                               Read entire journal, not just dirty entries\n"
+	     "  -a, --all                        Read entire journal, not just contiguous entries\n"
+	     "  -d, --dirty-only                 Only read dirty entries\n"
 	     "  -B, --blacklisted                Include blacklisted entries\n"
 	     "  -F, --flush-only                 Only print flush entries/commits\n"
 	     "  -D, --datetime                   Print datetime entries only\n"
@@ -448,6 +449,8 @@ static void list_journal_usage(void)
 int cmd_list_journal(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
+		{ "all",		no_argument,		NULL, 'a' },
+		{ "dirty-only",		no_argument,		NULL, 'd' },
 		{ "nr-entries",		required_argument,	NULL, 'n' },
 		{ "blacklisted",	no_argument,		NULL, 'B' },
 		{ "flush-only",		no_argument,		NULL, 'F' },
@@ -464,8 +467,9 @@ int cmd_list_journal(int argc, char *argv[])
 		{ NULL }
 	};
 	struct bch_opts opts = bch2_opts_empty();
-	u32 nr_entries = U32_MAX;
+	u32 nr_entries = 0;
 	journal_filter f = { .btree_filter = ~0ULL, .bkey_val = true };
+	bool contiguous_only = true;
 	char *t;
 	int opt, ret;
 
@@ -478,12 +482,16 @@ int cmd_list_journal(int argc, char *argv[])
 	opt_set(opts, fix_errors,	FSCK_FIX_yes);
 	opt_set(opts, retain_recovery_info ,true);
 	opt_set(opts, read_journal_only,true);
+	opt_set(opts, read_entire_journal, true);
 
-	while ((opt = getopt_long(argc, argv, "an:BFDlLob:t:k:V:vh",
+	while ((opt = getopt_long(argc, argv, "adn:BFMDlLob:t:k:V:vh",
 				  longopts, NULL)) != -1)
 		switch (opt) {
 		case 'a':
-			opt_set(opts, read_entire_journal, true);
+			contiguous_only = false;
+			break;
+		case 'd':
+			opt_set(opts, read_entire_journal, false);
 			break;
 		case 'n':
 			if (kstrtouint(optarg, 10, &nr_entries))
@@ -555,37 +563,49 @@ int cmd_list_journal(int argc, char *argv[])
 
 	struct journal_replay *p, **_p;
 	struct genradix_iter iter;
-	u64 seq = 0;
+	u64 min_seq_to_print = 0;
 
+	if (contiguous_only) {
+		u64 seq = 0;
+		genradix_for_each(&c->journal_entries, iter, _p) {
+			p = *_p;
+			if (!p)
+				continue;
+
+			if (!seq)
+				seq = le64_to_cpu(p->j.seq);
+
+			struct u64_range missing;
+			while ((missing = bch2_journal_entry_missing_range(c, seq, le64_to_cpu(p->j.seq))).start)
+				seq = min_seq_to_print = missing.end;
+
+			seq = le64_to_cpu(p->j.seq) + 1;
+		}
+	}
+
+	if (nr_entries)
+		min_seq_to_print = max_t(s64, min_seq_to_print,
+					 atomic64_read(&c->journal.seq) - nr_entries);
+
+	u64 seq = 0;
 	genradix_for_each(&c->journal_entries, iter, _p) {
 		p = *_p;
 		if (!p)
 			continue;
-		if (le64_to_cpu(p->j.seq) + nr_entries < atomic64_read(&c->journal.seq))
+
+		if (le64_to_cpu(p->j.seq) < min_seq_to_print)
 			continue;
 
-		while (seq < le64_to_cpu(p->j.seq)) {
-			while (seq < le64_to_cpu(p->j.seq) &&
-			       bch2_journal_seq_is_blacklisted(c, seq, false))
-				seq++;
+		if (!seq)
+			seq = le64_to_cpu(p->j.seq);
 
-			if (seq == le64_to_cpu(p->j.seq))
-				break;
-
-			u64 missing_start = seq;
-
-			while (seq < le64_to_cpu(p->j.seq) &&
-			       !bch2_journal_seq_is_blacklisted(c, seq, false))
-				seq++;
-
-			u64 missing_end = seq - 1;
-
-			if (missing_start == missing_end)
-				break;
-
-			printf("missing %llu at %llu-%llu\n",
-			       missing_end - missing_start,
-			       missing_start, missing_end);
+		struct u64_range missing;
+		while ((missing = bch2_journal_entry_missing_range(c, seq, le64_to_cpu(p->j.seq))).start) {
+			printf("missing %llu entries at %llu-%llu%s\n",
+			       missing.end - missing.start,
+			       missing.start, missing.end - 1,
+			       missing.end < c->journal.last_seq_ondisk ? " (not dirty)" : "");
+			seq = missing.end;
 		}
 
 		seq = le64_to_cpu(p->j.seq) + 1;
