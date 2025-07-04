@@ -212,9 +212,13 @@ static void device_online_usage(void)
 
 static int cmd_device_online(int argc, char *argv[])
 {
+	static const struct option longopts[] = {
+		{ "help",		0, NULL, 'h' },
+		{ NULL }
+	};
 	int opt;
 
-	while ((opt = getopt(argc, argv, "h")) != -1)
+	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
 		switch (opt) {
 		case 'h':
 			device_online_usage();
@@ -293,9 +297,13 @@ static void device_evacuate_usage(void)
 
 static int cmd_device_evacuate(int argc, char *argv[])
 {
+	static const struct option longopts[] = {
+		{ "help",		0, NULL, 'h' },
+		{ NULL }
+	};
 	int opt;
 
-	while ((opt = getopt(argc, argv, "h")) != -1)
+	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
 		switch (opt) {
 		case 'h':
 			device_evacuate_usage();

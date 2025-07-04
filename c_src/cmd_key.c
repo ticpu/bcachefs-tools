@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <unistd.h>
 #include <uuid/uuid.h>
 
@@ -15,16 +16,23 @@ static void unlock_usage(void)
 	     "Usage: bcachefs unlock [OPTION] device\n"
 	     "\n"
 	     "Options:\n"
-	     "  -c                     Check if a device is encrypted\n"
-	     "  -k (session|user|user_session)\n"
+	     "  -c, --check            Check if a device is encrypted\n"
+	     "  -k, --keyring (session|user|user_session)\n"
 	     "                         Keyring to add to (default: user)\n"
-	     "  -f                     Passphrase file to read from (disables passphrase prompt)\n"
-	     "  -h                     Display this help and exit\n"
+	     "  -f, --file             Passphrase file to read from (disables passphrase prompt)\n"
+	     "  -h, --help             Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
 int cmd_unlock(int argc, char *argv[])
 {
+	static const struct option longopts[] = {
+		{ "check",		no_argument,		NULL, 'c' },
+		{ "keyring",		required_argument,	NULL, 'k' },
+		{ "file",		required_argument,	NULL, 'f' },
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
 	const char *keyring = "user";
 	bool check = false;
 	const char *passphrase_file_path = NULL;
@@ -32,7 +40,7 @@ int cmd_unlock(int argc, char *argv[])
 
 	int opt;
 
-	while ((opt = getopt(argc, argv, "cf:k:h")) != -1)
+	while ((opt = getopt_long(argc, argv, "cf:k:h", longopts, NULL)) != -1)
 		switch (opt) {
 		case 'c':
 			check = true;

@@ -26,9 +26,13 @@ static void data_rereplicate_usage(void)
 
 static int cmd_data_rereplicate(int argc, char *argv[])
 {
+	static const struct option longopts[] = {
+		{ "help",		0, NULL, 'h' },
+		{ NULL }
+	};
 	int opt;
 
-	while ((opt = getopt(argc, argv, "h")) != -1)
+	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
 		switch (opt) {
 		case 'h':
 			data_rereplicate_usage();
@@ -262,16 +266,23 @@ static void data_job_usage(void)
 	     "job: one of scrub, rereplicate, migrate, rewrite_old_nodes, or drop_extra_replicas\n"
 	     "\n"
 	     "Options:\n"
-	     "  -b btree                    btree to operate on\n"
-	     "  -s inode:offset       start position\n"
-	     "  -e inode:offset       end position\n"
-	     "  -h, --help                  display this help and exit\n"
+	     "  -b, --btree   btree              btree to operate on\n"
+	     "  -s, --start   inode:offset       start position\n"
+	     "  -e, --end     inode:offset       end position\n"
+	     "  -h, --help                       display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }
 
 static int cmd_data_job(int argc, char *argv[])
 {
+	static const struct option longopts[] = {
+		{ "btree",		required_argument,	NULL, 'b' },
+		{ "start",		required_argument,	NULL, 's' },
+		{ "end",		required_argument,	NULL, 'e' },
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
 	struct bch_ioctl_data op = {
 		.start_btree	= 0,
 		.start_pos	= POS_MIN,
@@ -280,7 +291,7 @@ static int cmd_data_job(int argc, char *argv[])
 	};
 	int opt;
 
-	while ((opt = getopt(argc, argv, "s:e:h")) != -1)
+	while ((opt = getopt_long(argc, argv, "b:s:e:h", longopts, NULL)) != -1)
 		switch (opt) {
 		case 'b':
 			op.start_btree = read_string_list_or_die(optarg,
@@ -290,8 +301,8 @@ static int cmd_data_job(int argc, char *argv[])
 		case 's':
 			op.start_pos	= bpos_parse(optarg);
 			break;
-			op.end_pos	= bpos_parse(optarg);
 		case 'e':
+			op.end_pos	= bpos_parse(optarg);
 			break;
 		case 'h':
 			data_job_usage();

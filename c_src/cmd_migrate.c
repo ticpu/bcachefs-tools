@@ -370,19 +370,25 @@ static void migrate_superblock_usage(void)
 	     "Usage: bcachefs migrate-superblock [OPTION]...\n"
 	     "\n"
 	     "Options:\n"
-	     "  -d device     Device to create superblock for\n"
-	     "  -o offset     Offset of existing superblock\n"
-	     "  -h            Display this help and exit\n"
+	     "  -d, --dev    device     Device to create superblock for\n"
+	     "  -o, --offset offset     Offset of existing superblock\n"
+	     "  -h, --help              Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
 int cmd_migrate_superblock(int argc, char *argv[])
 {
+	static const struct option longopts[] = {
+		{ "dev",		required_argument,	NULL, 'd' },
+		{ "offset",		required_argument,	NULL, 'o' },
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
 	darray_const_str devs = {};
 	u64 sb_offset = 0;
 	int opt, ret;
 
-	while ((opt = getopt(argc, argv, "d:o:h")) != -1)
+	while ((opt = getopt_long(argc, argv, "d:o:h", longopts, NULL)) != -1)
 		switch (opt) {
 			case 'd':
 				darray_push(&devs, optarg);

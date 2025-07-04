@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <getopt.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -20,8 +21,8 @@ static void kill_btree_node_usage(void)
 	     "Usage: bcachefs kill_btree_node [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -n btree:level:idx                    Node to kill\n"
-	     "  -d dev                                Device index (default: kill all replicas)\n"
+	     "  -n, --node btree:level:idx            Node to kill\n"
+	     "  -d, --dev  dev                        Device index (default: kill all replicas)\n"
 	     "  -h                                    Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
@@ -34,13 +35,19 @@ struct kill_node {
 
 int cmd_kill_btree_node(int argc, char *argv[])
 {
+	static const struct option longopts[] = {
+		{ "node",		required_argument,	NULL, 'n' },
+		{ "dev",		required_argument,	NULL, 'd' },
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
 	struct bch_opts opts = bch2_opts_empty();
 	DARRAY(struct kill_node) kill_nodes = {};
 	int opt, dev_idx = -1;
 
 	opt_set(opts, read_only,	true);
 
-	while ((opt = getopt(argc, argv, "n:d:h")) != -1)
+	while ((opt = getopt_long(argc, argv, "n:d:h", longopts, NULL)) != -1)
 		switch (opt) {
 		case 'n': {
 			char *p = optarg;

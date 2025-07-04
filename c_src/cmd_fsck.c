@@ -47,6 +47,24 @@ static int do_splice(int rfd, int wfd)
 		return 1;
 	do {
 		ssize_t w = write(wfd, b, r);
+
+		/*
+		 * Ugly, but we have no way of doing nonblocking reads and
+		 * blocking writes.
+		 *
+		 * Yes, this means that if one thread has stopped reading (or
+		 * isn't keeping up) we block traffic on the other direction of
+		 * the pipe. No, I don't care.
+		 */
+		if (w < 0 && errno == EAGAIN) {
+			fd_set fds;
+			FD_ZERO(&fds);
+			FD_SET(wfd, &fds);
+			if (select(wfd + 1, NULL, &fds, NULL, NULL) < 0)
+				die("select error: %m");
+			continue;
+		}
+
 		if (w < 0)
 			die("%s: write error: %m", __func__);
 		r -= w;
