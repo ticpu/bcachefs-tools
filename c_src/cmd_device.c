@@ -290,6 +290,7 @@ static void device_evacuate_usage(void)
 	     "Usage: bcachefs device evacuate [OPTION]... device\n"
 	     "\n"
 	     "Options:\n"
+	     "  -f, --force		    Force if data redundancy will be degraded\n"
 	     "  -h, --help                  Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
@@ -298,13 +299,17 @@ static void device_evacuate_usage(void)
 static int cmd_device_evacuate(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",		0, NULL, 'h' },
+		{ "force",			no_argument,	NULL, 'f' },
+		{ "help",			no_argument,	NULL, 'h' },
 		{ NULL }
 	};
-	int opt;
+	int opt, flags = 0;
 
-	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
+	while ((opt = getopt_long(argc, argv, "fh", longopts, NULL)) != -1)
 		switch (opt) {
+		case 'f':
+			flags |= BCH_FORCE_IF_DEGRADED;
+			break;
 		case 'h':
 			device_evacuate_usage();
 			exit(EXIT_SUCCESS);
@@ -325,7 +330,7 @@ static int cmd_device_evacuate(int argc, char *argv[])
 
 	if (u->state == BCH_MEMBER_STATE_rw) {
 		printf("Setting %s readonly\n", dev_path);
-		bchu_disk_set_state(fs, dev_idx, BCH_MEMBER_STATE_ro, 0);
+		bchu_disk_set_state(fs, dev_idx, BCH_MEMBER_STATE_ro, flags);
 	}
 
 	free(u);
@@ -349,8 +354,8 @@ static void device_set_state_usage(void)
 	     "<path>: path to mounted filesystem, optional unless specifying device by id\n"
 	     "\n"
 	     "Options:\n"
-	     "  -f, --force		    Force, if data redundancy will be degraded\n"
-	     "      --force-if-data-lost    Force, if data will be lost\n"
+	     "  -f, --force		    Force if data redundancy will be degraded\n"
+	     "      --force-if-data-lost    Force if data will be lost\n"
 	     "  -o, --offline               Set state of an offline device\n"
 	     "  -h, --help                  display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
@@ -360,10 +365,10 @@ static void device_set_state_usage(void)
 static int cmd_device_set_state(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "force",			0, NULL, 'f' },
-		{ "force-if-data-lost",		0, NULL, 'F' },
-		{ "offline",			0, NULL, 'o' },
-		{ "help",			0, NULL, 'h' },
+		{ "force",			no_argument,	NULL, 'f' },
+		{ "force-if-data-lost",		no_argument,	NULL, 'F' },
+		{ "offline",			no_argument,	NULL, 'o' },
+		{ "help",			no_argument,	NULL, 'h' },
 		{ NULL }
 	};
 	struct bchfs_handle fs;
