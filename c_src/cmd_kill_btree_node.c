@@ -20,9 +20,8 @@ static void kill_btree_node_usage(void)
 	     "Usage: bcachefs kill_btree_node [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -b (extents|inodes|dirents|xattrs)    Btree to delete from\n"
-	     "  -l level                              Levle to delete from (0 == leaves)\n"
-	     "  -i index                              Index of btree node to kill\n"
+	     "  -n btree:level:idx                    Node to kill\n"
+	     "  -d dev                                Device index (default: kill all replicas)\n"
 	     "  -h                                    Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
@@ -37,11 +36,11 @@ int cmd_kill_btree_node(int argc, char *argv[])
 {
 	struct bch_opts opts = bch2_opts_empty();
 	DARRAY(struct kill_node) kill_nodes = {};
-	int opt;
+	int opt, dev_idx = -1;
 
 	opt_set(opts, read_only,	true);
 
-	while ((opt = getopt(argc, argv, "n:h")) != -1)
+	while ((opt = getopt(argc, argv, "n:d:h")) != -1)
 		switch (opt) {
 		case 'n': {
 			char *p = optarg;
@@ -65,6 +64,10 @@ int cmd_kill_btree_node(int argc, char *argv[])
 			darray_push(&kill_nodes, n);
 			break;
 		}
+		case 'd':
+			if (kstrtoint(optarg, 10, &dev_idx))
+				die("invalid device index %s", optarg);
+			break;
 		case 'h':
 			kill_btree_node_usage();
 			exit(EXIT_SUCCESS);
@@ -96,19 +99,23 @@ int cmd_kill_btree_node(int argc, char *argv[])
 
 			int ret2 = 0;
 			if (!i->idx) {
-				struct printbuf buf = PRINTBUF;
-				bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&b->key));
-				bch_info(c, "killing btree node %s l=%u %s",
-					 bch2_btree_id_str(i->btree), i->level, buf.buf);
-				printbuf_exit(&buf);
-
 				ret2 = 1;
 
 				struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(bkey_i_to_s_c(&b->key));
 				bkey_for_each_ptr(ptrs, ptr) {
+					if (dev_idx >= 0 && ptr->dev != dev_idx)
+						continue;
+
 					struct bch_dev *ca = bch2_dev_tryget(c, ptr->dev);
 					if (!ca)
 						continue;
+
+					struct printbuf buf = PRINTBUF;
+					bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&b->key));
+					bch_info(c, "killing btree node on dev %i %s l=%u\n  %s",
+						 ptr->dev,
+						 bch2_btree_id_str(i->btree), i->level, buf.buf);
+					printbuf_exit(&buf);
 
 					int ret3 = pwrite(ca->disk_sb.bdev->bd_fd, zeroes,
 						     c->opts.block_size, ptr->offset << 9);
