@@ -284,7 +284,7 @@ do {						\
 	(dst)->bi_bdev = (src)->bi_bdev;	\
 } while (0)
 
-static inline char *bvec_kmap_irq(struct bio_vec *bvec, unsigned long *flags)
+static inline void *bvec_kmap_irq(struct bio_vec *bvec, unsigned long *flags)
 {
 	return page_address(bvec->bv_page) + bvec->bv_offset;
 }
@@ -294,14 +294,14 @@ static inline void bvec_kunmap_irq(char *buffer, unsigned long *flags)
 	*flags = 0;
 }
 
-static inline char *bvec_kmap_local(struct bio_vec *bvec)
+static inline void *bvec_kmap_local(struct bio_vec *bvec)
 {
 	return page_address(bvec->bv_page) + bvec->bv_offset;
 }
 
 static inline void bvec_kunmap_local(char *buffer) {}
 
-static inline char *__bio_kmap_irq(struct bio *bio, struct bvec_iter iter,
+static inline void *__bio_kmap_irq(struct bio *bio, struct bvec_iter iter,
 				   unsigned long *flags)
 {
 	return bvec_kmap_irq(&bio_iter_iovec(bio, iter), flags);

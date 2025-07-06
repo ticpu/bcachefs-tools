@@ -53,6 +53,12 @@ typedef __s16 s16;
 typedef __u8  u8;
 typedef __s8  s8;
 
+typedef unsigned char		unchar;
+typedef unsigned short		ushort;
+typedef unsigned int		uint;
+typedef unsigned long		ulong;
+typedef unsigned long long	ullong;
+
 #ifdef __CHECKER__
 #define __bitwise__ __attribute__((bitwise))
 #else

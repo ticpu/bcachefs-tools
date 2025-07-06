@@ -343,12 +343,6 @@ enum fsck_err_opts {
 	  OPT_UINT(0, U32_MAX),						\
 	  BCH_SB_JOURNAL_RECLAIM_DELAY,	100,				\
 	  NULL,		"Delay in milliseconds before automatic journal reclaim")\
-	x(large_journal,		bool,				\
-	  OPT_FS|OPT_MOUNT|OPT_FORMAT,					\
-	  OPT_BOOL(),							\
-	  BCH2_NO_SB_OPT,		false,				\
-	  NULL,		"Allocate a bigger than normal journal: recovery from unclean "\
-			"shutdown will be slower, but more info will be available for debugging")\
 	x(move_bytes_in_flight,		u32,				\
 	  OPT_HUMAN_READABLE|OPT_FS|OPT_MOUNT|OPT_RUNTIME,		\
 	  OPT_UINT(1024, U32_MAX),					\
@@ -395,11 +389,6 @@ enum fsck_err_opts {
 	  OPT_UINT(0, U64_MAX),						\
 	  BCH2_NO_SB_OPT,		0,				\
 	  NULL,		"Rewind journal")				\
-	x(journal_rewind_no_extents,	bool,				\
-	  OPT_FS|OPT_MOUNT,						\
-	  OPT_BOOL(),							\
-	  BCH2_NO_SB_OPT,		0,				\
-	  NULL,		"Don't rewind extents when rewinding journal")	\
 	x(recovery_passes,		u64,				\
 	  OPT_FS|OPT_MOUNT,						\
 	  OPT_BITFIELD(bch2_recovery_passes),				\

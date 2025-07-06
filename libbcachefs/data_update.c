@@ -783,9 +783,6 @@ static int can_write_extent(struct bch_fs *c, struct data_update *m)
 	darray_for_each(m->op.devs_have, i)
 		__clear_bit(*i, devs.d);
 
-	CLASS(printbuf, buf)();
-	buf.atomic++;
-
 	guard(rcu)();
 
 	unsigned nr_replicas = 0, i;
@@ -797,11 +794,7 @@ static int can_write_extent(struct bch_fs *c, struct data_update *m)
 		struct bch_dev_usage usage;
 		bch2_dev_usage_read_fast(ca, &usage);
 
-		u64 nr_free = dev_buckets_free(ca, usage, m->op.watermark);
-
-		prt_printf(&buf, "%s=%llu ", ca->name, nr_free);
-
-		if (!nr_free)
+		if (!dev_buckets_free(ca, usage, m->op.watermark))
 			continue;
 
 		nr_replicas += ca->mi.durability;
@@ -809,10 +802,8 @@ static int can_write_extent(struct bch_fs *c, struct data_update *m)
 			break;
 	}
 
-	if (!nr_replicas) {
-		trace_data_update_done_no_rw_devs(c, buf.buf);
+	if (!nr_replicas)
 		return bch_err_throw(c, data_update_done_no_rw_devs);
-	}
 	if (nr_replicas < m->op.nr_replicas)
 		return bch_err_throw(c, insufficient_devices);
 	return 0;
