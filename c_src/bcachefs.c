@@ -40,6 +40,7 @@ void bcachefs_usage(void)
 	     "\n"
 	     "Commands for managing images:\n"
 	     "  image create             Create a new compact disk image\n"
+	     "\n"
 	     "Mount:\n"
 	     "  mount                    Mount a filesystem\n"
 	     "\n"
