@@ -27,6 +27,7 @@
 #include "libbcachefs/alloc_background.h"
 #include "libbcachefs/alloc_foreground.h"
 #include "libbcachefs/data_update.h"
+#include "libbcachefs/disk_accounting.h"
 #include "libbcachefs/errcode.h"
 #include "libbcachefs/journal_reclaim.h"
 #include "libbcachefs/move.h"
@@ -168,17 +169,205 @@ err:
 
 }
 
-static void print_dev_usage_all(struct bch_fs *c)
+static void prt_sectors(struct printbuf *out, u64 v)
+{
+	prt_tab(out);
+	prt_human_readable_u64(out, v << 9);
+	prt_tab_rjust(out);
+	prt_newline(out);
+}
+
+static void print_data_type_usage(struct printbuf *out,
+				  struct bch_dev *ca,
+				  struct bch_dev_usage_full u,
+				  unsigned i)
+{
+	if (u.d[i].buckets) {
+		bch2_prt_data_type(out, i);
+		prt_sectors(out, bucket_to_sector(ca, u.d[i].buckets));
+	}
+
+	if (u.d[i].fragmented) {
+		bch2_prt_data_type(out, i);
+		prt_str(out, " fragmented");
+		prt_sectors(out, u.d[i].fragmented);
+	}
+}
+
+static void print_image_usage(struct bch_fs *c, bool keep_alloc, u64 nbuckets)
 {
 	struct printbuf buf = PRINTBUF;
+	printbuf_tabstop_push(&buf, 24);
+	printbuf_tabstop_push(&buf, 16);
+	printbuf_tabstop_push(&buf, 16);
+	printbuf_tabstop_push(&buf,  8);
 
-	for_each_member_device(c, ca) {
-		struct bch_dev_usage_full stats = bch2_dev_usage_full_read(ca);
-		bch2_dev_usage_to_text(&buf, ca, &stats);
+	struct bch_dev *ca = c->devs[0];
+	struct bch_dev_usage_full dev_stats = bch2_dev_usage_full_read(ca);
+
+	print_data_type_usage(&buf, ca, dev_stats, BCH_DATA_sb);
+	print_data_type_usage(&buf, ca, dev_stats, BCH_DATA_journal);
+	print_data_type_usage(&buf, ca, dev_stats, BCH_DATA_btree);
+
+	printbuf_indent_add(&buf, 2);
+
+	for (unsigned i = 0; i < BTREE_ID_NR; i++) {
+		if (btree_id_is_alloc(i) && !keep_alloc)
+			continue;
+
+		struct disk_accounting_pos a;
+		disk_accounting_key_init(a, btree, i);
+
+		u64 v = 0;
+		bch2_accounting_mem_read(c, disk_accounting_pos_to_bpos(&a), &v, 1);
+
+		if (v) {
+			bch2_btree_id_to_text(&buf, i);
+			prt_sectors(&buf, v);
+		}
 	}
+
+	printbuf_indent_sub(&buf, 2);
+
+	struct disk_accounting_pos acc_replicas_key;
+	memset(&acc_replicas_key, 0, sizeof(acc_replicas_key));
+	acc_replicas_key.type = BCH_DISK_ACCOUNTING_replicas;
+	acc_replicas_key.replicas.data_type	= BCH_DATA_user;
+	acc_replicas_key.replicas.nr_devs	= 0;
+	acc_replicas_key.replicas.nr_required	= 1;
+	acc_replicas_key.replicas.nr_required	= 1;
+	replicas_entry_add_dev(&acc_replicas_key.replicas, 0);
+
+	u64 v = 0;
+	bch2_accounting_mem_read(c, disk_accounting_pos_to_bpos(&acc_replicas_key), &v, 1);
+	prt_printf(&buf, "user");
+	prt_sectors(&buf, v);
+
+	if (dev_stats.d[BCH_DATA_user].fragmented) {
+		prt_printf(&buf, "user fragmented");
+		prt_sectors(&buf, dev_stats.d[BCH_DATA_user].fragmented);
+	}
+
+	bool compression_header = false;
+	for (unsigned i = 1; i < BCH_COMPRESSION_TYPE_NR; i++) {
+		struct disk_accounting_pos a;
+		disk_accounting_key_init(a, compression, .type = i);
+		struct bpos p = disk_accounting_pos_to_bpos(&a);
+		u64 v[3];
+		bch2_accounting_mem_read(c, p, v, ARRAY_SIZE(v));
+
+		if (!v[0])
+			continue;
+
+		if (!compression_header) {
+			prt_printf(&buf, "compression type\tcompressed\runcompressed\rratio\r\n");
+			printbuf_indent_add(&buf, 2);
+		}
+		compression_header = true;
+
+		u64 sectors_uncompressed	= v[1];
+		u64 sectors_compressed		= v[2];
+
+		bch2_prt_compression_type(&buf, i);
+		prt_tab(&buf);
+
+		prt_human_readable_u64(&buf, sectors_compressed << 9);
+		prt_tab_rjust(&buf);
+
+		if (i == BCH_COMPRESSION_TYPE_incompressible) {
+			prt_newline(&buf);
+			continue;
+		}
+
+		prt_human_readable_u64(&buf, sectors_uncompressed << 9);
+		prt_printf(&buf, "\r%llu%%\r\n",
+			   div64_u64(sectors_compressed * 100,
+				     sectors_uncompressed));
+	}
+
+	if (compression_header)
+		printbuf_indent_sub(&buf, 2);
+
+	prt_printf(&buf, "image size");
+	prt_sectors(&buf, bucket_to_sector(c->devs[0], nbuckets));
 
 	printf("%s", buf.buf);
 	printbuf_exit(&buf);
+}
+
+static int finish_image(struct bch_fs *c,
+			bool			keep_alloc,
+			unsigned		verbosity)
+{
+	if (verbosity > 1)
+		printf("moving %stree to primary device\n",
+		       keep_alloc ? "" : "non-alloc ");
+
+	mutex_lock(&c->sb_lock);
+	struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, 0);
+	SET_BCH_MEMBER_DATA_ALLOWED(m, BCH_MEMBER_DATA_ALLOWED(m)|BIT(BCH_DATA_btree));
+	bch2_write_super(c);
+	mutex_unlock(&c->sb_lock);
+
+	bch2_dev_allocator_set_rw(c, c->devs[0], true);
+
+	int ret = move_btree(c, keep_alloc, 0);
+	bch_err_msg(c, ret, "migrating btree from temporary device");
+	if (ret)
+		return ret;
+
+	bch2_fs_read_only(c);
+
+	if (0)
+		check_gaps(c);
+
+	u64 nbuckets;
+	ret = get_nbuckets_used(c, &nbuckets);
+	if (ret)
+		return ret;
+
+	if (verbosity)
+		print_image_usage(c, keep_alloc, nbuckets);
+
+	if (ftruncate(c->devs[0]->disk_sb.bdev->bd_fd, nbuckets * bucket_bytes(c->devs[0]))) {
+		fprintf(stderr, "truncate error: %m\n");
+		return -errno;
+	}
+
+	mutex_lock(&c->sb_lock);
+	if (!keep_alloc) {
+		if (verbosity > 1)
+			printf("Stripping alloc info\n");
+		strip_fs_alloc(c);
+	}
+
+	rcu_assign_pointer(c->devs[1], NULL);
+
+	m = bch2_members_v2_get_mut(c->disk_sb.sb, 0);
+	SET_BCH_MEMBER_DATA_ALLOWED(m, BCH_MEMBER_DATA_ALLOWED(m)|BIT(BCH_DATA_journal));
+
+	bch2_members_v2_get_mut(c->disk_sb.sb, 0)->nbuckets = cpu_to_le64(nbuckets);
+
+	for_each_online_member(c, ca, 0) {
+		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
+		SET_BCH_MEMBER_RESIZE_ON_MOUNT(m, true);
+	}
+
+	c->disk_sb.sb->features[0] |= cpu_to_le64(BIT_ULL(BCH_FEATURE_small_image));
+
+	/*
+	 * sb->nr_devices must be 1 so that it can be mounted without UUID
+	 * conflicts
+	 */
+	unsigned u64s = DIV_ROUND_UP(sizeof(struct bch_sb_field_members_v2) +
+				     sizeof(struct bch_member), sizeof(u64));
+	bch2_sb_field_resize(&c->disk_sb, members_v2, u64s);
+	c->disk_sb.sb->nr_devices = 1;
+	SET_BCH_SB_MULTI_DEVICE(c->disk_sb.sb, false);
+
+	bch2_write_super(c);
+	mutex_unlock(&c->sb_lock);
+	return 0;
 }
 
 /*
@@ -195,9 +384,9 @@ static void print_dev_usage_all(struct bch_fs *c)
  * metadata device is dropped.
  */
 static void image_create(struct bch_opt_strs	fs_opt_strs,
-			 struct bch_opts		fs_opts,
+			 struct bch_opts	fs_opts,
 			 struct format_opts	format_opts,
-			 struct dev_opts		dev_opts,
+			 struct dev_opts	dev_opts,
 			 const char		*src_path,
 			 bool			keep_alloc,
 			 unsigned		verbosity)
@@ -273,78 +462,10 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 		goto err;
 
 	struct copy_fs_state s = {};
-	ret = copy_fs(c, &s, src_fd, src_path);
+	ret =   copy_fs(c, &s, src_fd, src_path) ?:
+		finish_image(c, keep_alloc, verbosity);
 	if (ret)
 		goto err;
-
-	if (verbosity > 1)
-		printf("moving non-alloc btree to primary device\n");
-
-	mutex_lock(&c->sb_lock);
-	struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, 0);
-	SET_BCH_MEMBER_DATA_ALLOWED(m, BCH_MEMBER_DATA_ALLOWED(m)|BIT(BCH_DATA_btree));
-	bch2_write_super(c);
-	mutex_unlock(&c->sb_lock);
-
-	bch2_dev_allocator_set_rw(c, c->devs[0], true);
-
-	ret = move_btree(c, keep_alloc, 0);
-	if (ret) {
-		fprintf(stderr, "error migrating btree from temporary device: %s\n",
-			bch2_err_str(ret));
-		goto err;
-	}
-
-	bch2_fs_read_only(c);
-
-	if (verbosity > 1)
-		print_dev_usage_all(c);
-
-	if (0)
-		check_gaps(c);
-
-	u64 nbuckets;
-	ret = get_nbuckets_used(c, &nbuckets);
-	if (ret)
-		goto err;
-
-	if (ftruncate(c->devs[0]->disk_sb.bdev->bd_fd, nbuckets * bucket_bytes(c->devs[0]))) {
-		fprintf(stderr, "truncate error: %m\n");
-		goto err;
-	}
-
-	mutex_lock(&c->sb_lock);
-	if (!keep_alloc) {
-		printf("Stripping alloc info\n");
-		strip_fs_alloc(c);
-	}
-
-	rcu_assign_pointer(c->devs[1], NULL);
-
-	m = bch2_members_v2_get_mut(c->disk_sb.sb, 0);
-	SET_BCH_MEMBER_DATA_ALLOWED(m, BCH_MEMBER_DATA_ALLOWED(m)|BIT(BCH_DATA_journal));
-
-	bch2_members_v2_get_mut(c->disk_sb.sb, 0)->nbuckets = cpu_to_le64(nbuckets);
-
-	for_each_online_member(c, ca, 0) {
-		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
-		SET_BCH_MEMBER_RESIZE_ON_MOUNT(m, true);
-	}
-
-	c->disk_sb.sb->features[0] |= cpu_to_le64(BIT_ULL(BCH_FEATURE_small_image));
-
-	/*
-	 * sb->nr_devices must be 1 so that it can be mounted without UUID
-	 * conflicts
-	 */
-	unsigned u64s = DIV_ROUND_UP(sizeof(struct bch_sb_field_members_v2) +
-				     sizeof(struct bch_member), sizeof(u64));
-	bch2_sb_field_resize(&c->disk_sb, members_v2, u64s);
-	c->disk_sb.sb->nr_devices = 1;
-	SET_BCH_SB_MULTI_DEVICE(c->disk_sb.sb, false);
-
-	bch2_write_super(c);
-	mutex_unlock(&c->sb_lock);
 
 	bch2_fs_stop(c);
 	darray_exit(&device_paths);
@@ -481,7 +602,8 @@ static int cmd_image_create(int argc, char *argv[])
 
 	dev_opts.path = argv[0];
 
-	image_create(fs_opt_strs, fs_opts, opts, dev_opts, opts.source, keep_alloc, verbosity);
+	image_create(fs_opt_strs, fs_opts, opts, dev_opts, opts.source,
+		     keep_alloc, verbosity);
 	bch2_opt_strs_free(&fs_opt_strs);
 	return 0;
 }
