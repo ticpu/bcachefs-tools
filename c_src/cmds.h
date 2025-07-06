@@ -31,6 +31,7 @@ int cmd_set_passphrase(int argc, char *argv[]);
 int cmd_remove_passphrase(int argc, char *argv[]);
 
 int cmd_fsck(int argc, char *argv[]);
+int cmd_recovery_pass(int argc, char *argv[]);
 
 int cmd_dump(int argc, char *argv[]);
 int cmd_list_journal(int argc, char *argv[]);

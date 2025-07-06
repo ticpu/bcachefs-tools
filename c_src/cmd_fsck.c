@@ -6,26 +6,10 @@
 #include "cmds.h"
 #include "libbcachefs/error.h"
 #include "libbcachefs.h"
+#include "libbcachefs/recovery_passes.h"
 #include "libbcachefs/super.h"
 #include "libbcachefs/super-io.h"
 #include "tools-util.h"
-
-static void fsck_usage(void)
-{
-	puts("bcachefs fsck - filesystem check and repair\n"
-	     "Usage: bcachefs fsck [OPTION]... <devices>\n"
-	     "\n"
-	     "Options:\n"
-	     "  -p                      Automatic repair (no questions)\n"
-	     "  -n                      Don't repair, only check for errors\n"
-	     "  -y                      Assume \"yes\" to all questions\n"
-	     "  -f                      Force checking even if filesystem is marked clean\n"
-	     "  -r, --ratelimit_errors  Don't display more than 10 errors of a given type\n"
-	     "  -k, --kernel            Use the in-kernel fsck implementation\n"
-	     "  -v                      Be verbose\n"
-	     "  -h, --help              Display this help and exit\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-}
 
 static void setnonblocking(int fd)
 {
@@ -212,6 +196,23 @@ static char *loopdev_alloc(const char *path)
 	return line;
 }
 
+static void fsck_usage(void)
+{
+	puts("bcachefs fsck - filesystem check and repair\n"
+	     "Usage: bcachefs fsck [OPTION]... <devices>\n"
+	     "\n"
+	     "Options:\n"
+	     "  -p                      Automatic repair (no questions)\n"
+	     "  -n                      Don't repair, only check for errors\n"
+	     "  -y                      Assume \"yes\" to all questions\n"
+	     "  -f                      Force checking even if filesystem is marked clean\n"
+	     "  -r, --ratelimit_errors  Don't display more than 10 errors of a given type\n"
+	     "  -k, --kernel            Use the in-kernel fsck implementation\n"
+	     "  -v                      Be verbose\n"
+	     "  -h, --help              Display this help and exit\n"
+	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+}
+
 int cmd_fsck(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
@@ -370,3 +371,94 @@ userland_fsck:
 	printbuf_exit(&opts_str);
 	return ret;
 }
+
+static void recovery_pass_usage(void)
+{
+	puts("bcachefs recovery-pass - list and manage scheduled recovery passes\n"
+	     "Usage: bcachefs recovery-pass [OPTION]... <devices>\n"
+	     "\n"
+	     "Currently only supports unmounted/offline filesystems\n"
+	     "\n"
+	     "Options:\n"
+	     "  -s, --set               Schedule a recovery pass in the superblock\n"
+	     "  -u, --unset             Deschedule a recovery pass\n"
+	     "  -h, --help              Display this help and exit\n"
+	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+}
+
+int cmd_recovery_pass(int argc, char *argv[])
+{
+	static const struct option longopts[] = {
+		{ "set",		required_argument,	NULL, 's' },
+		{ "unset",		required_argument,	NULL, 'u' },
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
+	u64 passes_to_set = 0, passes_to_unset = 0;
+	int opt;
+
+	while ((opt = getopt_long(argc, argv, "s:u:h", longopts, NULL)) != -1)
+		switch (opt) {
+		case 's':
+			passes_to_set |= read_flag_list_or_die(optarg,
+						bch2_recovery_passes,
+						"recovery pass");
+			break;
+		case 'u':
+			passes_to_unset |= read_flag_list_or_die(optarg,
+						bch2_recovery_passes,
+						"recovery pass");
+			break;
+		case 'h':
+			recovery_pass_usage();
+			exit(EXIT_SUCCESS);
+		}
+	args_shift(optind);
+
+	passes_to_set	= bch2_recovery_passes_to_stable(passes_to_set);
+	passes_to_unset	= bch2_recovery_passes_to_stable(passes_to_unset);
+
+	darray_const_str devs = get_or_split_cmdline_devs(argc, argv);
+
+	struct bch_opts opts = bch2_opts_empty();
+	opt_set(opts, nostart, true);
+
+	struct bch_fs *c = bch2_fs_open(&devs, &opts);
+	int ret = PTR_ERR_OR_ZERO(c);
+	if (ret)
+		die("Error opening filesystem: %s", bch2_err_str(ret));
+
+	scoped_guard(mutex, &c->sb_lock) {
+		struct bch_sb_field_ext *ext =
+			bch2_sb_field_get_minsize(&c->disk_sb, ext,
+				sizeof(struct bch_sb_field_ext) / sizeof(u64));
+		if (!ext) {
+			fprintf(stderr, "Error getting sb_field_ext\n");
+			goto err;
+		}
+
+		u64 scheduled = le64_to_cpu(ext->recovery_passes_required[0]);
+
+		if (passes_to_set || passes_to_unset) {
+			ext->recovery_passes_required[0] &= ~cpu_to_le64(passes_to_unset);
+			ext->recovery_passes_required[0] |=  cpu_to_le64(passes_to_set);
+
+			scheduled = le64_to_cpu(ext->recovery_passes_required[0]);
+
+			bch2_write_super(c);
+		}
+
+		CLASS(printbuf, buf)();
+		prt_str(&buf, "Scheduled recovery passes: ");
+		if (scheduled)
+			prt_bitflags(&buf, bch2_recovery_passes,
+				     bch2_recovery_passes_from_stable(scheduled));
+		else
+			prt_str(&buf, "(none)");
+		printf("%s\n", buf.buf);
+	}
+err:
+	bch2_fs_stop(c);
+	return ret;
+}
+

@@ -559,3 +559,18 @@ int cmd_fs_usage(int argc, char *argv[])
 	printbuf_exit(&buf);
 	return 0;
 }
+
+int fs_cmds(int argc, char *argv[])
+{
+	char *cmd = pop_cmd(&argc, argv);
+
+	if (argc < 1)
+		return fs_usage();
+	if (!strcmp(cmd, "usage"))
+		return cmd_fs_usage(argc, argv);
+	if (!strcmp(cmd, "top"))
+		return cmd_fs_top(argc, argv);
+
+	fs_usage();
+	return -EINVAL;
+}

@@ -46,6 +46,7 @@ void bcachefs_usage(void)
 	     "\n"
 	     "Repair:\n"
 	     "  fsck                     Check an existing filesystem for errors\n"
+	     "  recovery-pass            Schedule or deschedule recovery passes\n"
 	     "\n"
 #if 0
 	     "Startup/shutdown, assembly of multi device filesystems:\n"
@@ -105,19 +106,4 @@ void bcachefs_usage(void)
 	     "Miscellaneous:\n"
          "  completions              Generate shell completions\n"
 	     "  version                  Display the version of the invoked bcachefs tool\n");
-}
-
-int fs_cmds(int argc, char *argv[])
-{
-	char *cmd = pop_cmd(&argc, argv);
-
-	if (argc < 1)
-		return fs_usage();
-	if (!strcmp(cmd, "usage"))
-		return cmd_fs_usage(argc, argv);
-	if (!strcmp(cmd, "top"))
-		return cmd_fs_top(argc, argv);
-
-	fs_usage();
-	return -EINVAL;
 }
