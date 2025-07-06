@@ -273,7 +273,9 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 		goto err;
 
 	struct copy_fs_state s = {};
-	copy_fs(c, src_fd, src_path, &s, 0);
+	ret = copy_fs(c, &s, src_fd, src_path);
+	if (ret)
+		goto err;
 
 	if (verbosity > 1)
 		printf("moving non-alloc btree to primary device\n");
