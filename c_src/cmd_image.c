@@ -28,6 +28,7 @@
 #include "libbcachefs/alloc_foreground.h"
 #include "libbcachefs/data_update.h"
 #include "libbcachefs/errcode.h"
+#include "libbcachefs/journal_reclaim.h"
 #include "libbcachefs/move.h"
 #include "libbcachefs/opts.h"
 #include "libbcachefs/super-io.h"
@@ -91,6 +92,12 @@ static bool move_btree_pred(struct bch_fs *c, void *_arg,
 
 static int move_btree(struct bch_fs *c, bool move_alloc, unsigned target_dev)
 {
+	/*
+	 * Flush the key cache first, otherwise key cache flushing later will do
+	 * btree updates to the wrong device
+	 */
+	bch2_journal_flush_all_pins(&c->journal);
+
 	struct move_btree_args args = {
 		.move_alloc	= move_alloc,
 		.target		= dev_to_target(target_dev),
