@@ -681,6 +681,15 @@ static int kstrtouint_symbolic(const char *s, unsigned int base, unsigned *res)
 
 struct bpos bpos_parse(char *buf)
 {
+	if (!strcmp(buf, "POS_MIN"))
+		return POS_MIN;
+
+	if (!strcmp(buf, "POS_MAX"))
+		return POS_MAX;
+
+	if (!strcmp(buf, "SPOS_MAX"))
+		return SPOS_MAX;
+
 	char *orig = strdup(buf);
 	char *s = buf;
 
