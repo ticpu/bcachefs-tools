@@ -315,6 +315,9 @@ static int cmd_data_job(int argc, char *argv[])
 
 	op.op = read_string_list_or_die(job, bch2_data_ops_strs, "bad job type");
 
+	if (op.op == BCH_DATA_OP_scrub)
+		die("scrub should be invoked with 'bcachefs data scrub'");
+
 	char *fs_path = arg_pop();
 	if (!fs_path)
 		fs_path = ".";
