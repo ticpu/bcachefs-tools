@@ -14,7 +14,33 @@
 #include "libbcachefs/str_hash.h"
 #include "libbcachefs/xattr.h"
 
-void update_inode(struct bch_fs *c,
+static int unlink_and_rm(struct bch_fs *c,
+			 subvol_inum dir_inum,
+			 struct bch_inode_unpacked *dir,
+			 const char *child_name)
+{
+	struct qstr child_name_q = QSTR_INIT(child_name, strlen(child_name));
+
+	struct bch_inode_unpacked child;
+	int ret = bch2_trans_commit_do(c, NULL, NULL,
+			BCH_TRANS_COMMIT_no_enospc,
+		bch2_unlink_trans(trans, dir_inum, dir, &child, &child_name_q, false));
+	bch_err_msg(c, ret, "unlinking %s", child_name);
+	if (ret)
+		return ret;
+
+	if (!(child.bi_flags & BCH_INODE_unlinked))
+		return 0;
+
+	subvol_inum child_inum = dir_inum;
+	child_inum.inum = child.bi_inum;
+
+	ret = bch2_inode_rm(c, child_inum);
+	bch_err_msg(c, ret, "deleting %s", child_name);
+	return ret;
+}
+
+static void update_inode(struct bch_fs *c,
 			 struct bch_inode_unpacked *inode)
 {
 	struct bkey_inode_buf packed;
@@ -28,23 +54,40 @@ void update_inode(struct bch_fs *c,
 		die("error updating inode: %s", bch2_err_str(ret));
 }
 
-void create_link(struct bch_fs *c,
-			struct bch_inode_unpacked *parent,
-			const char *name, u64 inum, mode_t mode)
+static int create_or_update_link(struct bch_fs *c,
+				 subvol_inum dir_inum,
+				 struct bch_inode_unpacked *dir,
+				 const char *name, subvol_inum inum, mode_t mode)
 {
+	struct bch_hash_info dir_hash = bch2_hash_info_init(c, dir);
+
 	struct qstr qstr = QSTR(name);
-	struct bch_inode_unpacked parent_u;
+	struct bch_inode_unpacked dir_u;
 	struct bch_inode_unpacked inode;
 
-	int ret = bch2_trans_commit_do(c, NULL, NULL, 0,
-		bch2_link_trans(trans,
-				(subvol_inum) { 1, parent->bi_inum }, &parent_u,
-				(subvol_inum) { 1, inum }, &inode, &qstr));
+	subvol_inum old_inum;
+	int ret = bch2_dirent_lookup(c, dir_inum, &dir_hash, &qstr, &old_inum);
+	if (bch2_err_matches(ret, ENOENT))
+		goto create;
 	if (ret)
-		die("error creating hardlink: %s", bch2_err_str(ret));
+		return ret;
+
+	if (subvol_inum_eq(inum, old_inum))
+		return 0;
+
+	ret = unlink_and_rm(c, dir_inum, dir, name);
+	if (ret)
+		return ret;
+create:
+	ret = bch2_trans_commit_do(c, NULL, NULL, 0,
+		bch2_link_trans(trans,
+				dir_inum, &dir_u,
+				inum, &inode, &qstr));
+	bch_err_msg(c, ret, "error creating hardlink %s", name);
+	return ret;
 }
 
-struct bch_inode_unpacked create_or_update_file(struct bch_fs *c,
+static struct bch_inode_unpacked create_or_update_file(struct bch_fs *c,
 			subvol_inum dir_inum,
 			struct bch_inode_unpacked *dir,
 			const char *name,
@@ -122,7 +165,7 @@ static const struct xattr_handler *xattr_resolve_name(char **name)
 	return ERR_PTR(-EOPNOTSUPP);
 }
 
-void copy_times(struct bch_fs *c, struct bch_inode_unpacked *dst,
+static void copy_times(struct bch_fs *c, struct bch_inode_unpacked *dst,
 		       struct stat *src)
 {
 	dst->bi_atime = timespec_to_bch2_time(c, src->st_atim);
@@ -130,7 +173,7 @@ void copy_times(struct bch_fs *c, struct bch_inode_unpacked *dst,
 	dst->bi_ctime = timespec_to_bch2_time(c, src->st_ctim);
 }
 
-void copy_xattrs(struct bch_fs *c, struct bch_inode_unpacked *dst,
+static void copy_xattrs(struct bch_fs *c, struct bch_inode_unpacked *dst,
 			char *src)
 {
 	struct bch_hash_info hash_info = bch2_hash_info_init(c, dst);
@@ -318,10 +361,10 @@ static void link_data(struct bch_fs *c, struct bch_inode_unpacked *dst,
 	}
 }
 
-void copy_link(struct bch_fs *c,
-	       subvol_inum dst_inum,
-	       struct bch_inode_unpacked *dst,
-	       char *src)
+static void copy_link(struct bch_fs *c,
+		      subvol_inum dst_inum,
+		      struct bch_inode_unpacked *dst,
+		      char *src)
 {
 	s64 i_sectors_delta = 0;
 	int ret = bch2_fpunch(c, dst_inum, 0, U64_MAX, &i_sectors_delta);
@@ -622,21 +665,7 @@ static int recursive_remove(struct bch_fs *c,
 		darray_exit(&child_dirents);
 	}
 
-	struct qstr d_name = QSTR_INIT(d->d_name, strlen(d->d_name));
-
-	ret = bch2_trans_commit_do(c, NULL, NULL,
-			BCH_TRANS_COMMIT_no_enospc,
-		bch2_unlink_trans(trans, dir_inum, dir, &child, &d_name, false));
-	bch_err_msg(c, ret, "unlinking %s", d->d_name);
-	if (ret)
-		return ret;
-
-	if (!(child.bi_flags & BCH_INODE_unlinked))
-		return 0;
-
-	ret = bch2_inode_rm(c, child_inum);
-	bch_err_msg(c, ret, "deleting %s", d->d_name);
-	return ret;
+	return unlink_and_rm(c, dir_inum, dir, d->d_name);
 }
 
 static int delete_non_matching_dirents(struct bch_fs *c,
@@ -728,12 +757,16 @@ static int copy_dir(struct bch_fs *c,
 			? genradix_ptr_alloc(&s->hardlinks, stat.st_ino, GFP_KERNEL)
 			: NULL;
 
+		subvol_inum dst_dir_inum = { 1, dst->bi_inum };
+
 		if (dst_inum_p && *dst_inum_p) {
-			create_link(c, dst, d->d_name, *dst_inum_p, S_IFREG);
+			ret = create_or_update_link(c, dst_dir_inum, dst, d->d_name,
+						    (subvol_inum) { 1, *dst_inum_p }, S_IFREG);
+			if (ret)
+				goto err;
 			goto next;
 		}
 
-		subvol_inum dst_dir_inum = { 1, dst->bi_inum };
 		inode = create_or_update_file(c, dst_dir_inum, dst, d->d_name,
 				    stat.st_uid, stat.st_gid,
 				    stat.st_mode, stat.st_rdev);
