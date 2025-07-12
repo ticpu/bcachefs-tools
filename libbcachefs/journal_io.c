@@ -1780,6 +1780,7 @@ static CLOSURE_CALLBACK(journal_write_done)
 
 			closure_wake_up(&c->freelist_wait);
 			bch2_reset_alloc_cursors(c);
+			do_discards = true;
 		}
 
 		j->seq_ondisk = seq;
