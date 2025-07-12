@@ -253,11 +253,9 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 	struct bch_opts opts = bch2_opts_empty();
 	opt_set(opts, copygc_enabled,		false);
 	opt_set(opts, rebalance_enabled,	false);
+	opt_set(opts, nostart,			true);
 
 	struct bch_fs *c = bch2_fs_open(&device_paths, &opts);
-
-	unlink(device_paths.data[1]);
-
 	int ret = PTR_ERR_OR_ZERO(c);
 	if (ret) {
 		fprintf(stderr, "error opening %s: %s\n",
@@ -265,10 +263,20 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 		goto err;
 	}
 
+	c->loglevel = 5 + max_t(int, 0, verbosity - 1);
+
+	unlink(device_paths.data[1]);
+
+	ret = bch2_fs_start(c);
+	bch_err_msg(c, ret, "starting fs");
+	if (ret)
+		goto err;
+
 	struct copy_fs_state s = {};
 	copy_fs(c, src_fd, src_path, &s, 0);
 
-	printf("moving non-alloc btree to primary device\n");
+	if (verbosity > 1)
+		printf("moving non-alloc btree to primary device\n");
 
 	mutex_lock(&c->sb_lock);
 	struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, 0);
