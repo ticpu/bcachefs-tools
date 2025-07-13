@@ -1336,6 +1336,10 @@ int bch2_btree_node_read_done(struct bch_fs *c, struct bch_dev *ca,
 		k = bkey_p_next(k);
 	}
 
+	for (k = i->start; k != vstruct_last(i);) {
+		BUG_ON(!k->u64s);
+	}
+
 	bch2_bset_build_aux_tree(b, b->set, false);
 
 	set_needs_whiteout(btree_bset_first(b), true);
