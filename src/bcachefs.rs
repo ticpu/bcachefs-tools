@@ -1,5 +1,6 @@
 mod commands;
 mod key;
+mod dump_stack;
 mod logging;
 mod wrappers;
 

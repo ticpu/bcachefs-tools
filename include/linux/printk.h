@@ -205,4 +205,7 @@ void printk(const char *fmt, ...);
 #define pr_devel_ratelimited(fmt, ...)					\
 	no_printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
 #endif
+
+void dump_stack(void);
+
 #endif /* __TOOLS_LINUX_PRINTK_H */

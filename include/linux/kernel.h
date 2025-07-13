@@ -254,8 +254,6 @@ struct qstr {
 
 #define POISON_FREE 0x6b
 
-static inline void dump_stack(void) {}
-
 #define unsafe_memcpy(dst, src, bytes, justification)		\
 	memcpy(dst, src, bytes)
 
