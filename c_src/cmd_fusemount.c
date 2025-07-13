@@ -946,7 +946,9 @@ static void bcachefs_fuse_readdir(fuse_req_t req, fuse_ino_t dir_ino,
 	if (!handle_dots(&ctx, dir.inum))
 		goto reply;
 
-	ret = bch2_readdir(c, dir, &ctx.ctx);
+	struct bch_hash_info dir_hash = bch2_hash_info_init(c, &bi);
+
+	ret = bch2_readdir(c, dir, &dir_hash, &ctx.ctx);
 reply:
 	if (!ret) {
 		fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_readdir reply %zd\n",
@@ -1113,19 +1115,16 @@ static const struct fuse_lowlevel_ops bcachefs_fuse_ops = {
  */
 
 struct bf_context {
-	char            *devices_str;
-	char            **devices;
-	int             nr_devices;
+	char			*devices_str;
+	darray_const_str	devices;
 };
 
 static void bf_context_free(struct bf_context *ctx)
 {
-	int i;
-
 	free(ctx->devices_str);
-	for (i = 0; i < ctx->nr_devices; ++i)
-		free(ctx->devices[i]);
-	free(ctx->devices);
+	darray_for_each(ctx->devices, i)
+		free((void *) *i);
+	darray_exit(&ctx->devices);
 }
 
 static struct fuse_opt bf_opts[] = {
@@ -1162,26 +1161,11 @@ static void tokenize_devices(struct bf_context *ctx)
 {
 	char *devices_str = strdup(ctx->devices_str);
 	char *devices_tmp = devices_str;
-	char **devices = NULL;
-	int nr = 0;
 	char *dev = NULL;
 
-	while ((dev = strsep(&devices_tmp, ":"))) {
-		if (strlen(dev) > 0) {
-			devices = realloc(devices, (nr + 1) * sizeof *devices);
-			devices[nr] = strdup(dev);
-			nr++;
-		}
-	}
-
-	if (!devices) {
-		devices = malloc(sizeof *devices);
-		devices[0] = strdup(ctx->devices_str);
-		nr = 1;
-	}
-
-	ctx->devices = devices;
-	ctx->nr_devices = nr;
+	while ((dev = strsep(&devices_tmp, ":")))
+		if (strlen(dev) > 0)
+			darray_push(&ctx->devices, strdup(dev));
 
 	free(devices_str);
 }
@@ -1200,7 +1184,7 @@ int cmd_fusemount(int argc, char *argv[])
 	struct bf_context ctx = { 0 };
 	struct bch_fs *c = NULL;
 	struct fuse_session *se = NULL;
-	int ret = 0, i;
+	int ret = 0;
 
 	/* Parse arguments. */
 	if (fuse_opt_parse(&args, &ctx, bf_opts, bf_opt_proc) < 0)
@@ -1240,21 +1224,19 @@ int cmd_fusemount(int argc, char *argv[])
 
 	struct printbuf fsname = PRINTBUF;
 	prt_printf(&fsname, "fsname=");
-	for (i = 0; i < ctx.nr_devices; ++i) {
-		if (i)
+	darray_for_each(ctx.devices, i) {
+		if (i != ctx.devices.data)
 			prt_str(&fsname, ":");
-		prt_str(&fsname, ctx.devices[i]);
+		prt_str(&fsname, *i);
 	}
 
 	fuse_opt_add_arg(&args, "-o");
 	fuse_opt_add_arg(&args, fsname.buf);
 
 	/* Open bch */
-	printf("Opening bcachefs filesystem on:\n");
-	for (i = 0; i < ctx.nr_devices; ++i)
-                printf("\t%s\n", ctx.devices[i]);
+	printf("Opening bcachefs filesystem on %s\n", ctx.devices_str);
 
-	c = bch2_fs_open(ctx.devices, ctx.nr_devices, bch_opts);
+	c = bch2_fs_open(&ctx.devices, &bch_opts);
 	if (IS_ERR(c))
 		die("error opening %s: %s", ctx.devices_str,
 		    bch2_err_str(PTR_ERR(c)));
