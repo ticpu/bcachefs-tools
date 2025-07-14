@@ -87,7 +87,7 @@ void bch2_dev_congested_to_text(struct printbuf *out, struct bch_dev *ca)
 
 	prt_printf(out, "read latency threshold:\t");
 	bch2_pr_time_units(out,
-			   ca->io_latency[READ].quantiles.entries[QUANTILE_IDX(1)].m * 2);
+			   ca->io_latency[READ].quantiles.entries[QUANTILE_IDX(1)].m << 2);
 	prt_newline(out);
 
 	prt_printf(out, "median read latency:\t");
@@ -97,7 +97,7 @@ void bch2_dev_congested_to_text(struct printbuf *out, struct bch_dev *ca)
 
 	prt_printf(out, "write latency threshold:\t");
 	bch2_pr_time_units(out,
-			   ca->io_latency[WRITE].quantiles.entries[QUANTILE_IDX(1)].m * 3);
+			   ca->io_latency[WRITE].quantiles.entries[QUANTILE_IDX(1)].m << 3);
 	prt_newline(out);
 
 	prt_printf(out, "median write latency:\t");
