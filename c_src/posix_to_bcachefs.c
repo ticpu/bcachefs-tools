@@ -282,7 +282,7 @@ static void write_data(struct bch_fs *c,
 	closure_call(&op.cl, bch2_write, NULL, NULL);
 
 	BUG_ON(!(op.flags & BCH_WRITE_submitted));
-	dst_inode->bi_sectors += len >> 9;
+	dst_inode->bi_sectors += op.i_sectors_delta;
 
 	if (op.error)
 		die("write error: %s", bch2_err_str(op.error));
@@ -370,6 +370,8 @@ static void copy_link(struct bch_fs *c,
 	int ret = bch2_fpunch(c, dst_inum, 0, U64_MAX, &i_sectors_delta);
 	if (ret)
 		die("bch2_fpunch error: %s", bch2_err_str(ret));
+
+	dst->bi_sectors += i_sectors_delta;
 
 	ret = readlink(src, src_buf, sizeof(src_buf));
 	if (ret < 0)
