@@ -265,6 +265,7 @@ static inline void bio_set_op_attrs(struct bio *bio, unsigned op,
 
 #define REQ_FUA			(1ULL << __REQ_FUA)
 #define REQ_PREFLUSH		(1ULL << __REQ_PREFLUSH)
+#define REQ_IDLE		(1ULL << __REQ_IDLE)
 
 #define RW_MASK			REQ_OP_WRITE
 

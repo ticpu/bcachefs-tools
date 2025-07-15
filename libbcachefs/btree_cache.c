@@ -78,9 +78,8 @@ void bch2_btree_node_to_freelist(struct bch_fs *c, struct btree *b)
 {
 	struct btree_cache *bc = &c->btree_cache;
 
-	mutex_lock(&bc->lock);
-	__bch2_btree_node_to_freelist(bc, b);
-	mutex_unlock(&bc->lock);
+	scoped_guard(mutex, &bc->lock)
+		__bch2_btree_node_to_freelist(bc, b);
 
 	six_unlock_write(&b->c.lock);
 	six_unlock_intent(&b->c.lock);
@@ -215,14 +214,13 @@ void bch2_node_pin(struct bch_fs *c, struct btree *b)
 {
 	struct btree_cache *bc = &c->btree_cache;
 
-	mutex_lock(&bc->lock);
+	guard(mutex)(&bc->lock);
 	if (b != btree_node_root(c, b) && !btree_node_pinned(b)) {
 		set_btree_node_pinned(b);
 		list_move(&b->list, &bc->live[1].list);
 		bc->live[0].nr--;
 		bc->live[1].nr++;
 	}
-	mutex_unlock(&bc->lock);
 }
 
 void bch2_btree_cache_unpin(struct bch_fs *c)
@@ -230,7 +228,7 @@ void bch2_btree_cache_unpin(struct bch_fs *c)
 	struct btree_cache *bc = &c->btree_cache;
 	struct btree *b, *n;
 
-	mutex_lock(&bc->lock);
+	guard(mutex)(&bc->lock);
 	c->btree_cache.pinned_nodes_mask[0] = 0;
 	c->btree_cache.pinned_nodes_mask[1] = 0;
 
@@ -240,8 +238,6 @@ void bch2_btree_cache_unpin(struct bch_fs *c)
 		bc->live[0].nr++;
 		bc->live[1].nr--;
 	}
-
-	mutex_unlock(&bc->lock);
 }
 
 /* Btree in memory cache - hash table */
@@ -296,11 +292,8 @@ int bch2_btree_node_hash_insert(struct btree_cache *bc, struct btree *b,
 	b->c.level	= level;
 	b->c.btree_id	= id;
 
-	mutex_lock(&bc->lock);
-	int ret = __bch2_btree_node_hash_insert(bc, b);
-	mutex_unlock(&bc->lock);
-
-	return ret;
+	guard(mutex)(&bc->lock);
+	return __bch2_btree_node_hash_insert(bc, b);
 }
 
 void bch2_btree_node_update_key_early(struct btree_trans *trans,
@@ -317,7 +310,7 @@ void bch2_btree_node_update_key_early(struct btree_trans *trans,
 
 	b = bch2_btree_node_get_noiter(trans, tmp.k, btree, level, true);
 	if (!IS_ERR_OR_NULL(b)) {
-		mutex_lock(&c->btree_cache.lock);
+		guard(mutex)(&c->btree_cache.lock);
 
 		__bch2_btree_node_hash_remove(&c->btree_cache, b);
 
@@ -325,7 +318,6 @@ void bch2_btree_node_update_key_early(struct btree_trans *trans,
 		ret = __bch2_btree_node_hash_insert(&c->btree_cache, b);
 		BUG_ON(ret);
 
-		mutex_unlock(&c->btree_cache.lock);
 		six_unlock_read(&b->c.lock);
 	}
 
@@ -930,20 +922,18 @@ static noinline struct btree *bch2_btree_node_fill(struct btree_trans *trans,
 	}
 
 	if (unlikely(!bkey_is_btree_ptr(&k->k))) {
-		struct printbuf buf = PRINTBUF;
+		CLASS(printbuf, buf)();
 		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(k));
 
 		int ret = bch2_fs_topology_error(c, "attempting to get btree node with non-btree key %s", buf.buf);
-		printbuf_exit(&buf);
 		return ERR_PTR(ret);
 	}
 
 	if (unlikely(k->k.u64s > BKEY_BTREE_PTR_U64s_MAX)) {
-		struct printbuf buf = PRINTBUF;
+		CLASS(printbuf, buf)();
 		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(k));
 
 		int ret = bch2_fs_topology_error(c, "attempting to get btree node with too big key %s", buf.buf);
-		printbuf_exit(&buf);
 		return ERR_PTR(ret);
 	}
 
@@ -1018,11 +1008,10 @@ static noinline struct btree *bch2_btree_node_fill(struct btree_trans *trans,
 
 static noinline void btree_bad_header(struct bch_fs *c, struct btree *b)
 {
-	struct printbuf buf = PRINTBUF;
-
 	if (c->recovery.pass_done < BCH_RECOVERY_PASS_check_allocations)
 		return;
 
+	CLASS(printbuf, buf)();
 	prt_printf(&buf,
 		   "btree node header doesn't match ptr: ");
 	bch2_btree_id_level_to_text(&buf, b->c.btree_id, b->c.level);
@@ -1038,8 +1027,6 @@ static noinline void btree_bad_header(struct bch_fs *c, struct btree *b)
 	bch2_bpos_to_text(&buf, b->data->max_key);
 
 	bch2_fs_topology_error(c, "%s", buf.buf);
-
-	printbuf_exit(&buf);
 }
 
 static inline void btree_check_header(struct bch_fs *c, struct btree *b)

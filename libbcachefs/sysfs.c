@@ -62,7 +62,7 @@ static ssize_t fn ## _to_text(struct printbuf *,			\
 static ssize_t fn ## _show(struct kobject *kobj, struct attribute *attr,\
 			   char *buf)					\
 {									\
-	struct printbuf out = PRINTBUF;					\
+	CLASS(printbuf, out)();						\
 	ssize_t ret = fn ## _to_text(&out, kobj, attr);			\
 									\
 	if (out.pos && out.buf[out.pos - 1] != '\n')			\
@@ -75,7 +75,6 @@ static ssize_t fn ## _show(struct kobject *kobj, struct attribute *attr,\
 		ret = min_t(size_t, out.pos, PAGE_SIZE - 1);		\
 		memcpy(buf, out.buf, ret);				\
 	}								\
-	printbuf_exit(&out);						\
 	return bch2_err_class(ret);					\
 }									\
 									\
@@ -235,14 +234,13 @@ static size_t bch2_btree_cache_size(struct bch_fs *c)
 	size_t ret = 0;
 	struct btree *b;
 
-	mutex_lock(&bc->lock);
+	guard(mutex)(&bc->lock);
 	list_for_each_entry(b, &bc->live[0].list, list)
 		ret += btree_buf_bytes(b);
 	list_for_each_entry(b, &bc->live[1].list, list)
 		ret += btree_buf_bytes(b);
 	list_for_each_entry(b, &bc->freeable, list)
 		ret += btree_buf_bytes(b);
-	mutex_unlock(&bc->lock);
 	return ret;
 }
 
@@ -565,9 +563,8 @@ STORE(bch2_fs)
 		closure_wake_up(&c->freelist_wait);
 
 	if (attr == &sysfs_trigger_recalc_capacity) {
-		down_read(&c->state_lock);
+		guard(rwsem_read)(&c->state_lock);
 		bch2_recalc_capacity(c);
-		up_read(&c->state_lock);
 	}
 
 	if (attr == &sysfs_trigger_delete_dead_snapshots)
