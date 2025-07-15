@@ -36,6 +36,7 @@ struct copy_fs_state {
 	GENRADIX(u64)		hardlinks;
 	ranges			extents;
 	enum bch_migrate_type	type;
+	unsigned		verbosity;
 
 	u64			reserve_start;
 

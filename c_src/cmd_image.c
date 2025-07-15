@@ -477,7 +477,7 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 	if (ret)
 		goto err;
 
-	struct copy_fs_state s = {};
+	struct copy_fs_state s = { .verbosity = verbosity };
 	ret =   copy_fs(c, &s, src_fd, src_path) ?:
 		finish_image(c, keep_alloc, verbosity);
 	if (ret)
@@ -705,7 +705,7 @@ static int image_update(const char *src_path, const char *dst_image,
 		goto err_stop;
 
 	bch_verbose(c, "Syncing data");
-	struct copy_fs_state s = {};
+	struct copy_fs_state s = { .verbosity = verbosity };
 
 	ret =   copy_fs(c, &s, src_fd, src_path) ?:
 		finish_image(c, keep_alloc, verbosity);

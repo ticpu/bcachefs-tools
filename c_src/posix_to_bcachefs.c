@@ -671,6 +671,7 @@ static int recursive_remove(struct bch_fs *c,
 }
 
 static int delete_non_matching_dirents(struct bch_fs *c,
+				       struct copy_fs_state *s,
 				       subvol_inum dst_dir_inum,
 				       struct bch_inode_unpacked *dst_dir,
 				       dirents src_dirents)
@@ -694,7 +695,8 @@ static int delete_non_matching_dirents(struct bch_fs *c,
 			    !strcmp(dst_d->d_name, "lost+found"))
 				continue;
 
-			printf("deleting %s type %u\n", dst_d->d_name, dst_d->d_type);
+			if (s->verbosity > 1)
+				printf("deleting %s\n", dst_d->d_name);
 
 			ret = recursive_remove(c, dst_dir_inum, dst_dir, dst_d);
 			if (ret)
@@ -726,7 +728,7 @@ static int copy_dir(struct bch_fs *c,
 	sort(dirents.data, dirents.nr, sizeof(dirents.data[0]), dirent_cmp, NULL);
 
 	subvol_inum dir_inum = { 1, dst->bi_inum };
-	int ret = delete_non_matching_dirents(c, dir_inum, dst, dirents);
+	int ret = delete_non_matching_dirents(c, s, dir_inum, dst, dirents);
 	if (ret)
 		goto err;
 
