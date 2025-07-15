@@ -635,7 +635,7 @@ static int image_update(const char *src_path, const char *dst_image,
 
 	u64 input_bytes = count_input_size(src_fd);
 
-	if (truncate(dst_image, input_bytes * 2))
+	if (truncate(dst_image, xstat(dst_image).st_size + input_bytes * 2))
 		die("truncate error: %m");
 
 	darray_const_str device_paths = {};
