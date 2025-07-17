@@ -87,7 +87,7 @@ struct super_block {
 };
 
 static inline void evict_inodes(struct super_block *sb) {}
-static inline int sync_filesystem(struct super_block *) { return 0; }
+static inline int sync_filesystem(struct super_block *sb) { return 0; }
 
 /*
  * File types

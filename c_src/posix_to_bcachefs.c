@@ -439,40 +439,38 @@ static void link_file_data(struct bch_fs *c,
 	fiemap_iter_exit(&iter);
 }
 
+static struct range align_range(struct range r, unsigned bs)
+{
+	r.start	= round_down(r.start,	bs);
+	r.end	= round_up(r.end,	bs);
+	return r;
+}
+
+struct range seek_data(int fd, u64 i_size, loff_t o)
+{
+	s64 s = lseek(fd, o, SEEK_DATA);
+	if (s < 0 && errno == ENXIO)
+		return (struct range) {};
+	if (s < 0)
+		die("lseek error: %m");
+
+	s64 e = lseek(fd, s, SEEK_HOLE);
+	if (e < 0 && errno == ENXIO)
+		e = i_size;
+	if (e < 0)
+		die("lseek error: %m");
+
+	return (struct range) { s, e };
+}
+
 static struct range seek_data_aligned(int fd, u64 i_size, loff_t o, unsigned bs)
 {
-	struct range seek_data(int fd, loff_t o)
-	{
-		s64 s = lseek(fd, o, SEEK_DATA);
-		if (s < 0 && errno == ENXIO)
-			return (struct range) {};
-		if (s < 0)
-			die("lseek error: %m");
-
-		s64 e = lseek(fd, s, SEEK_HOLE);
-		if (e < 0 && errno == ENXIO)
-			e = i_size;
-		if (e < 0)
-			die("lseek error: %m");
-
-		return (struct range) { s, e };
-	}
-
-	struct range __seek_data_aligned(int fd, loff_t o, unsigned bs)
-	{
-		struct range r = seek_data(fd, o);
-
-		r.start	= round_down(r.start,	bs);
-		r.end	= round_up(r.end,	bs);
-		return r;
-	}
-
-	struct range r = __seek_data_aligned(fd, o, bs);
+	struct range r = align_range(seek_data(fd, i_size, o), bs);
 	if (!r.end)
 		return r;
 
 	while (true) {
-		struct range n = __seek_data_aligned(fd, r.end, bs);
+		struct range n = align_range(seek_data(fd, i_size, r.end), bs);
 		if (!n.end || r.end < n.start)
 			break;
 
@@ -482,38 +480,30 @@ static struct range seek_data_aligned(int fd, u64 i_size, loff_t o, unsigned bs)
 	return r;
 }
 
+struct range seek_mismatch(const char *buf1, const char *buf2,
+			   unsigned o, unsigned len)
+{
+	while (o < len && buf1[o] == buf2[o])
+		o++;
+
+	if (o == len)
+		return (struct range) {};
+
+	unsigned s = o;
+	while (o < len && buf1[o] != buf2[o])
+		o++;
+
+	return (struct range) { s, o };
+}
+
 static struct range seek_mismatch_aligned(const char *buf1, const char *buf2,
 					  unsigned offset, unsigned len,
 					  unsigned bs)
 {
-	struct range seek_mismatch(unsigned o)
-	{
-		while (o < len && buf1[o] == buf2[o])
-			o++;
-
-		if (o == len)
-			return (struct range) {};
-
-		unsigned s = o;
-		while (o < len && buf1[o] != buf2[o])
-			o++;
-
-		return (struct range) { s, o };
-	}
-
-	struct range __seek_mismatch_aligned(unsigned o)
-	{
-		struct range r = seek_mismatch(o);
-
-		r.start	= round_down(r.start,	bs);
-		r.end	= round_up(r.end,	bs);
-		return r;
-	}
-
-	struct range r = __seek_mismatch_aligned(offset);
+	struct range r = align_range(seek_mismatch(buf1, buf2, offset, len), bs);
 	if (r.end)
 		while (true) {
-			struct range n = __seek_mismatch_aligned(r.end);
+			struct range n = align_range(seek_mismatch(buf1, buf2, r.end, len), bs);
 			if (!n.end || r.end < n.start)
 				break;
 
