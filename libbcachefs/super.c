@@ -514,6 +514,10 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 	if (ret)
 		return ret;
 
+	ret = bch2_fs_mark_dirty(c);
+	if (ret)
+		return ret;
+
 	clear_bit(BCH_FS_clean_shutdown, &c->flags);
 
 	scoped_guard(rcu)
@@ -536,10 +540,6 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 		set_bit(JOURNAL_running, &c->journal.flags);
 		bch2_journal_space_available(&c->journal);
 	}
-
-	ret = bch2_fs_mark_dirty(c);
-	if (ret)
-		return ret;
 
 	/*
 	 * Don't jump to our error path, and call bch2_fs_read_only(), unless we

@@ -223,9 +223,8 @@ static int bch2_flush_inode(struct bch_fs *c,
 	if (!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_fsync))
 		return -EROFS;
 
-	CLASS(btree_trans, trans)(c);
 	u64 seq;
-	int ret = commit_do(trans, NULL, NULL, 0,
+	int ret = bch2_trans_commit_do(c, NULL, NULL, 0,
 			    bch2_get_inode_journal_seq_trans(trans, inode_inum(inode), &seq)) ?:
 		  bch2_journal_flush_seq(&c->journal, seq, TASK_INTERRUPTIBLE) ?:
 		  bch2_inode_flush_nocow_writes(c, inode);

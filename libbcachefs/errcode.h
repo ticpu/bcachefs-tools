@@ -90,6 +90,8 @@
 	x(ENOMEM,			ENOMEM_disk_accounting)			\
 	x(ENOMEM,			ENOMEM_stripe_head_alloc)		\
 	x(ENOMEM,                       ENOMEM_journal_read_bucket)             \
+	x(ENOMEM,                       ENOMEM_acl)				\
+	x(ENOMEM,                       ENOMEM_move_extent)			\
 	x(ENOSPC,			ENOSPC_disk_reservation)		\
 	x(ENOSPC,			ENOSPC_bucket_alloc)			\
 	x(ENOSPC,			ENOSPC_disk_label_add)			\
@@ -216,9 +218,13 @@
 	x(EINVAL,			varint_decode_error)			\
 	x(EINVAL,			erasure_coding_found_btree_node)	\
 	x(EINVAL,			option_negative)			\
+	x(EINVAL,			topology_repair)			\
+	x(BCH_ERR_topology_repair,	topology_repair_drop_this_node)		\
+	x(BCH_ERR_topology_repair,	topology_repair_drop_prev_node)		\
+	x(BCH_ERR_topology_repair,	topology_repair_did_fill_from_scan)	\
 	x(EOPNOTSUPP,			may_not_use_incompat_feature)		\
 	x(EOPNOTSUPP,			no_casefolding_without_utf8)		\
-	x(EOPNOTSUPP,			casefolding_disabled)		\
+	x(EOPNOTSUPP,			casefolding_disabled)			\
 	x(EOPNOTSUPP,			casefold_opt_is_dir_only)		\
 	x(EOPNOTSUPP,			unsupported_fsx_flag)			\
 	x(EOPNOTSUPP,			unsupported_fa_flag)			\

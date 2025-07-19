@@ -329,7 +329,6 @@ duplicate_entries:
 out:
 fsck_err:
 	bch2_trans_iter_exit(trans, dup_iter);
-	printbuf_exit(&buf);
 	if (free_snapshots_seen)
 		darray_exit(&s->ids);
 	return ret;

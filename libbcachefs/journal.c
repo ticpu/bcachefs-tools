@@ -182,6 +182,8 @@ journal_error_check_stuck(struct journal *j, int error, unsigned flags)
 
 void bch2_journal_do_writes(struct journal *j)
 {
+	struct bch_fs *c = container_of(j, struct bch_fs, journal);
+
 	for (u64 seq = journal_last_unwritten_seq(j);
 	     seq <= journal_cur_seq(j);
 	     seq++) {
@@ -196,6 +198,7 @@ void bch2_journal_do_writes(struct journal *j)
 		if (!journal_state_seq_count(j, j->reservations, seq)) {
 			j->seq_write_started = seq;
 			w->write_started = true;
+			closure_get(&c->cl);
 			closure_call(&w->io, bch2_journal_write, j->wq, NULL);
 		}
 
@@ -1063,6 +1066,8 @@ static struct journal_buf *__bch2_next_write_buffer_flush_journal_buf(struct jou
 			ret = journal_state_count(s, idx & JOURNAL_STATE_BUF_MASK) > open
 				? ERR_PTR(-EAGAIN)
 				: buf;
+			if (!ret)
+				smp_mb();
 			break;
 		}
 	}

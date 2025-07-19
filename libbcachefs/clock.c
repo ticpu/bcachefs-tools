@@ -21,7 +21,7 @@ static const struct min_heap_callbacks callbacks = {
 
 void bch2_io_timer_add(struct io_clock *clock, struct io_timer *timer)
 {
-	guard(spinlock)(&clock->timer_lock);
+	spin_lock(&clock->timer_lock);
 
 	if (time_after_eq64((u64) atomic64_read(&clock->now), timer->expire)) {
 		spin_unlock(&clock->timer_lock);
@@ -31,9 +31,11 @@ void bch2_io_timer_add(struct io_clock *clock, struct io_timer *timer)
 
 	for (size_t i = 0; i < clock->timers.nr; i++)
 		if (clock->timers.data[i] == timer)
-			return;
+			goto out;
 
 	BUG_ON(!min_heap_push(&clock->timers, &timer, &callbacks, NULL));
+out:
+	spin_unlock(&clock->timer_lock);
 }
 
 void bch2_io_timer_del(struct io_clock *clock, struct io_timer *timer)
