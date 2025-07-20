@@ -1,3 +1,11 @@
+bcachefs-tools (1:1.25.3-1) unstable; urgency=medium
+
+  New image tooling:
+  * bcachefs image create
+  * bcachefs image update
+
+ -- Kent Overstreet <kent.overstreet@linux.dev>  Sun, 20 Jul 2025 12:21:03 -0400
+
 bcachefs-tools (1:1.25.2-1) unstable; urgency=medium
 
   * don't pick a non power of two bucket size
