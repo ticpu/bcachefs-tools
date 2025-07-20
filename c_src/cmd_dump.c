@@ -14,6 +14,7 @@
 #include "libbcachefs/btree_iter.h"
 #include "libbcachefs/error.h"
 #include "libbcachefs/extents.h"
+#include "libbcachefs/journal_io.h"
 #include "libbcachefs/sb-members.h"
 #include "libbcachefs/super.h"
 
@@ -67,8 +68,136 @@ struct dump_opts {
 	bool		noexcl;
 };
 
+static void sanitize_key(struct bkey_packed *k, struct bkey_format *f, void *end,
+			 bool *modified)
+{
+	struct bch_val *v = bkeyp_val(f, k);
+	unsigned len = min_t(unsigned, end - (void *) v, bkeyp_val_bytes(f, k));
+
+	switch (k->type) {
+	case KEY_TYPE_inline_data: {
+		struct bch_inline_data *d = container_of(v, struct bch_inline_data, v);
+
+		memset(&d->data[0], 0, len - offsetof(struct bch_inline_data, data));
+		*modified = true;
+		break;
+	}
+	case KEY_TYPE_indirect_inline_data: {
+		struct bch_indirect_inline_data *d = container_of(v, struct bch_indirect_inline_data, v);
+
+		memset(&d->data[0], 0, len - offsetof(struct bch_indirect_inline_data, data));
+		*modified = true;
+		break;
+	}
+	}
+}
+
+static void sanitize_journal(struct bch_fs *c, void *buf, size_t len)
+{
+	struct bkey_format f = BKEY_FORMAT_CURRENT;
+	void *end = buf + len;
+
+	while (len) {
+		struct jset *j = buf;
+		bool modified = false;
+
+		if (le64_to_cpu(j->magic) != jset_magic(c))
+			break;
+
+		vstruct_for_each(j, i) {
+			if ((void *) i >= end)
+				break;
+
+			if (!jset_entry_is_key(i))
+				continue;
+
+			jset_entry_for_each_key(i, k) {
+				if ((void *) k >= end)
+					break;
+				if (!k->k.u64s)
+					break;
+				sanitize_key(bkey_to_packed(k), &f, end, &modified);
+			}
+		}
+
+		if (modified) {
+			memset(&j->csum, 0, sizeof(j->csum));
+			SET_JSET_CSUM_TYPE(j, 0);
+		}
+
+		unsigned b = min(len, vstruct_sectors(j, c->block_bits) << 9);
+		len -= b;
+		buf += b;
+	}
+}
+
+static void sanitize_btree(struct bch_fs *c, void *buf, size_t len)
+{
+	void *end = buf + len;
+	bool first = true;
+	struct bkey_format f_current = BKEY_FORMAT_CURRENT;
+	struct bkey_format f;
+	u64 seq;
+
+	while (len) {
+		unsigned sectors;
+		struct bset *i;
+		bool modified = false;
+
+		if (first) {
+			struct btree_node *bn = buf;
+
+			if (le64_to_cpu(bn->magic) != bset_magic(c))
+				break;
+
+			i = &bn->keys;
+			seq = bn->keys.seq;
+			f = bn->format;
+
+			sectors = vstruct_sectors(bn, c->block_bits);
+		} else {
+			struct btree_node_entry *bne = buf;
+
+			if (bne->keys.seq != seq)
+				break;
+
+			i = &bne->keys;
+			sectors = vstruct_sectors(bne, c->block_bits);
+		}
+
+		vstruct_for_each(i, k) {
+			if ((void *) k >= end)
+				break;
+			if (!k->u64s)
+				break;
+
+			sanitize_key(k, bkey_packed(k) ? &f : &f_current, end, &modified);
+		}
+
+		if (modified) {
+			if (first) {
+				struct btree_node *bn = buf;
+				memset(&bn->csum, 0, sizeof(bn->csum));
+			} else {
+				struct btree_node_entry *bne = buf;
+				memset(&bne->csum, 0, sizeof(bne->csum));
+			}
+			SET_BSET_CSUM_TYPE(i, 0);
+		}
+
+		first = false;
+
+		unsigned b = min(len, sectors << 9);
+		len -= b;
+		buf += b;
+	}
+}
+
 static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 {
+	if (opts.sanitize)
+		printf("Sanitizing inline data extents\n");
+
 	dump_devs devs = {};
 	while (devs.nr < c->sb.nr_devices)
 		darray_push(&devs, (struct dump_dev) {});
@@ -77,10 +206,14 @@ static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 
 	unsigned nr_online = 0;
 	for_each_online_member(c, ca, 0) {
+		if (opts.sanitize && ca->mi.bucket_size % block_sectors(c))
+			die("%s has unaligned buckets, cannot sanitize", ca->name);
+
 		get_sb_journal(c, ca, opts.entire_journal, &devs.data[ca->dev_idx]);
 		nr_online++;
 	}
 
+	bch_verbose(c, "walking metadata to dump");
 	for (unsigned i = 0; i < BTREE_ID_NR; i++) {
 		CLASS(btree_trans, trans)(c);
 
@@ -102,6 +235,7 @@ static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 			dump_node(c, &devs, bkey_i_to_s_c(&b->key));
 	}
 
+	bch_verbose(c, "writing metadata image(s)");
 	for_each_online_member(c, ca, 0) {
 		int flags = O_WRONLY|O_CREAT|O_TRUNC;
 
@@ -117,9 +251,39 @@ static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 		struct qcow2_image img;
 		qcow2_image_init(&img, ca->disk_sb.bdev->bd_fd, fd, c->opts.block_size);
 
-		qcow2_write_ranges(&img, &devs.data[ca->dev_idx].sb);
-		qcow2_write_ranges(&img, &devs.data[ca->dev_idx].journal);
-		qcow2_write_ranges(&img, &devs.data[ca->dev_idx].btree);
+		struct dump_dev *d = &devs.data[ca->dev_idx];
+
+		qcow2_write_ranges(&img, &d->sb);
+
+		if (!opts.sanitize) {
+			qcow2_write_ranges(&img, &d->journal);
+			qcow2_write_ranges(&img, &d->btree);
+		} else {
+			ranges_sort(&d->journal);
+			ranges_sort(&d->btree);
+
+			u64 bucket_bytes = ca->mi.bucket_size << 9;
+			char *buf = xmalloc(bucket_bytes);
+
+			darray_for_each(d->journal, r) {
+				u64 len = r->end - r->start;
+				BUG_ON(len > bucket_bytes);
+
+				xpread(img.infd, buf, len, r->start);
+				sanitize_journal(c, buf, len);
+				qcow2_write_buf(&img, buf, len, r->start);
+			}
+
+			darray_for_each(d->btree, r) {
+				u64 len = r->end - r->start;
+				BUG_ON(len > bucket_bytes);
+
+				xpread(img.infd, buf, len, r->start);
+				sanitize_btree(c, buf, len);
+				qcow2_write_buf(&img, buf, len, r->start);
+			}
+			free(buf);
+		}
 
 		qcow2_image_finish(&img);
 		xclose(fd);
@@ -188,6 +352,7 @@ int cmd_dump(int argc, char *argv[])
 			break;
 		case 's':
 			opts.sanitize = true;
+			break;
 		case 'j':
 			opts.entire_journal = false;
 			break;
