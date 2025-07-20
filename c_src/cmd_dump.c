@@ -17,20 +17,6 @@
 #include "libbcachefs/sb-members.h"
 #include "libbcachefs/super.h"
 
-static void dump_usage(void)
-{
-	puts("bcachefs dump - dump filesystem metadata\n"
-	     "Usage: bcachefs dump [OPTION]... <devices>\n"
-	     "\n"
-	     "Options:\n"
-	     "  -o output       Output qcow2 image(s)\n"
-	     "  -f, --force     Force; overwrite when needed\n"
-	     "      --nojournal Don't dump entire journal, just dirty entries\n"
-	     "      --noexcl    Open devices with O_NOEXCL (not recommended)\n"
-	     "  -h, --help      Display this help and exit\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-}
-
 struct dump_dev {
 	ranges	sb, journal, btree;
 };
@@ -73,65 +59,16 @@ static void get_sb_journal(struct bch_fs *c, struct bch_dev *ca,
 		}
 }
 
-int cmd_dump(int argc, char *argv[])
+struct dump_opts {
+	char		*out;
+	bool		force;
+	bool		sanitize;
+	bool		entire_journal;
+	bool		noexcl;
+};
+
+static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 {
-	static const struct option longopts[] = {
-		{ "force",		no_argument,		NULL, 'f' },
-		{ "nojournal",		no_argument,		NULL, 'j' },
-		{ "noexcl",		no_argument,		NULL, 'e' },
-		{ "verbose",		no_argument,		NULL, 'v' },
-		{ "help",		no_argument,		NULL, 'h' },
-		{ NULL }
-	};
-	struct bch_opts opts = bch2_opts_empty();
-	char *out = NULL;
-	bool force = false, entire_journal = true;
-	int fd, opt;
-
-	opt_set(opts, direct_io,	false);
-	opt_set(opts, read_only,	true);
-	opt_set(opts, nochanges,	true);
-	opt_set(opts, norecovery,	true);
-	opt_set(opts, degraded,		BCH_DEGRADED_very);
-	opt_set(opts, errors,		BCH_ON_ERROR_continue);
-	opt_set(opts, fix_errors,	FSCK_FIX_no);
-
-	while ((opt = getopt_long(argc, argv, "o:fvh",
-				  longopts, NULL)) != -1)
-		switch (opt) {
-		case 'o':
-			out = optarg;
-			break;
-		case 'f':
-			force = true;
-			break;
-		case 'j':
-			entire_journal = false;
-			break;
-		case 'e':
-			opt_set(opts, noexcl,		true);
-			break;
-		case 'v':
-			opt_set(opts, verbose, true);
-			break;
-		case 'h':
-			dump_usage();
-			exit(EXIT_SUCCESS);
-		}
-	args_shift(optind);
-
-	if (!out)
-		die("Please supply output filename");
-
-	if (!argc)
-		die("Please supply device(s) to check");
-
-	darray_const_str dev_names = get_or_split_cmdline_devs(argc, argv);
-
-	struct bch_fs *c = bch2_fs_open(&dev_names, &opts);
-	if (IS_ERR(c))
-		die("error opening devices: %s", bch2_err_str(PTR_ERR(c)));
-
 	dump_devs devs = {};
 	while (devs.nr < c->sb.nr_devices)
 		darray_push(&devs, (struct dump_dev) {});
@@ -140,7 +77,7 @@ int cmd_dump(int argc, char *argv[])
 
 	unsigned nr_online = 0;
 	for_each_online_member(c, ca, 0) {
-		get_sb_journal(c, ca, entire_journal, &devs.data[ca->dev_idx]);
+		get_sb_journal(c, ca, opts.entire_journal, &devs.data[ca->dev_idx]);
 		nr_online++;
 	}
 
@@ -168,13 +105,13 @@ int cmd_dump(int argc, char *argv[])
 	for_each_online_member(c, ca, 0) {
 		int flags = O_WRONLY|O_CREAT|O_TRUNC;
 
-		if (!force)
+		if (!opts.force)
 			flags |= O_EXCL;
 
 		char *path = nr_online > 1
-			? mprintf("%s.%u.qcow2", out, ca->dev_idx)
-			: mprintf("%s.qcow2", out);
-		fd = xopen(path, flags, 0600);
+			? mprintf("%s.%u.qcow2", opts.out, ca->dev_idx)
+			: mprintf("%s.qcow2", opts.out);
+		int fd = xopen(path, flags, 0600);
 		free(path);
 
 		struct qcow2_image img;
@@ -198,6 +135,87 @@ int cmd_dump(int argc, char *argv[])
 		darray_exit(&d->btree);
 	}
 	darray_exit(&devs);
-	darray_exit(&dev_names);
 	return 0;
+}
+
+static void dump_usage(void)
+{
+	puts("bcachefs dump - dump filesystem metadata\n"
+	     "Usage: bcachefs dump [OPTION]... <devices>\n"
+	     "\n"
+	     "Options:\n"
+	     "  -o output       Output qcow2 image(s)\n"
+	     "  -f, --force     Force; overwrite when needed\n"
+	     "  -s, --sanitize  Zero out inline data extents\n"
+	     "      --nojournal Don't dump entire journal, just dirty entries\n"
+	     "      --noexcl    Open devices with O_NOEXCL (not recommended)\n"
+	     "  -v, --verbose\n"
+	     "  -h, --help      Display this help and exit\n"
+	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+}
+
+int cmd_dump(int argc, char *argv[])
+{
+	static const struct option longopts[] = {
+		{ "force",		no_argument,		NULL, 'f' },
+		{ "sanitize",		no_argument,		NULL, 's' },
+		{ "nojournal",		no_argument,		NULL, 'j' },
+		{ "noexcl",		no_argument,		NULL, 'e' },
+		{ "verbose",		no_argument,		NULL, 'v' },
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
+	struct bch_opts fs_opts = bch2_opts_empty();
+	struct dump_opts opts = { .entire_journal = true };
+	int opt;
+
+	opt_set(fs_opts, direct_io,	false);
+	opt_set(fs_opts, read_only,	true);
+	opt_set(fs_opts, nochanges,	true);
+	opt_set(fs_opts, norecovery,	true);
+	opt_set(fs_opts, degraded,	BCH_DEGRADED_very);
+	opt_set(fs_opts, errors,	BCH_ON_ERROR_continue);
+	opt_set(fs_opts, fix_errors,	FSCK_FIX_no);
+
+	while ((opt = getopt_long(argc, argv, "o:fsvh",
+				  longopts, NULL)) != -1)
+		switch (opt) {
+		case 'o':
+			opts.out = optarg;
+			break;
+		case 'f':
+			opts.force = true;
+			break;
+		case 's':
+			opts.sanitize = true;
+		case 'j':
+			opts.entire_journal = false;
+			break;
+		case 'e':
+			opt_set(fs_opts, noexcl,	true);
+			break;
+		case 'v':
+			opt_set(fs_opts, verbose, true);
+			break;
+		case 'h':
+			dump_usage();
+			exit(EXIT_SUCCESS);
+		}
+	args_shift(optind);
+
+	if (!opts.out)
+		die("Please supply output filename");
+
+	if (!argc)
+		die("Please supply device(s) to check");
+
+	darray_const_str dev_names = get_or_split_cmdline_devs(argc, argv);
+
+	struct bch_fs *c = bch2_fs_open(&dev_names, &fs_opts);
+	if (IS_ERR(c))
+		die("error opening devices: %s", bch2_err_str(PTR_ERR(c)));
+
+	int ret = dump_fs(c, opts);
+	darray_exit(&dev_names);
+	return ret;
 }
