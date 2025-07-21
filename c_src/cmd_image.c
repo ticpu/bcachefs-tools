@@ -665,7 +665,10 @@ static int image_update(const char *src_path, const char *dst_image,
 			goto err;
 		}
 
-		if (ftruncate(dev_opts.bdev->bd_fd, input_bytes)) {
+		u64 metadata_dev_size = max(input_bytes,
+				c->opts.btree_node_size * BCH_MIN_NR_NBUCKETS);
+
+		if (ftruncate(dev_opts.bdev->bd_fd, metadata_dev_size)) {
 			fprintf(stderr, "ftruncate error: %m");
 			goto err;
 		}
