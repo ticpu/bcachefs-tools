@@ -20,6 +20,7 @@
 #include "enumerated_ref.h"
 #include "error.h"
 #include "lru.h"
+#include "progress.h"
 #include "recovery.h"
 #include "varint.h"
 
@@ -389,7 +390,7 @@ void __bch2_alloc_to_v4(struct bkey_s_c k, struct bch_alloc_v4 *out)
 	if (k.k->type == KEY_TYPE_alloc_v4) {
 		void *src, *dst;
 
-		*out = *bkey_s_c_to_alloc_v4(k).v;
+		bkey_val_copy(out, bkey_s_c_to_alloc_v4(k));
 
 		src = alloc_v4_backpointers(out);
 		SET_BCH_ALLOC_V4_BACKPOINTERS_START(out, BCH_ALLOC_V4_U64s);
@@ -1736,12 +1737,16 @@ int bch2_check_alloc_to_lru_refs(struct bch_fs *c)
 	bch2_bkey_buf_init(&last_flushed);
 	bkey_init(&last_flushed.k->k);
 
+	struct progress_indicator_state progress;
+	bch2_progress_init(&progress, c, BIT_ULL(BTREE_ID_alloc));
+
 	CLASS(btree_trans, trans)(c);
 	int ret = for_each_btree_key_commit(trans, iter, BTREE_ID_alloc,
 				POS_MIN, BTREE_ITER_prefetch, k,
-				NULL, NULL, BCH_TRANS_COMMIT_no_enospc,
-			bch2_check_alloc_to_lru_ref(trans, &iter, &last_flushed)) ?:
-		bch2_check_stripe_to_lru_refs(trans);
+				NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+			progress_update_iter(trans, &progress, &iter);
+			bch2_check_alloc_to_lru_ref(trans, &iter, &last_flushed);
+	}))?: bch2_check_stripe_to_lru_refs(trans);
 
 	bch2_bkey_buf_exit(&last_flushed, c);
 	return ret;
