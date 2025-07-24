@@ -79,14 +79,25 @@ void bch2_sb_layout_init(struct bch_sb_layout *l,
 	}
 }
 
-static u64 dev_max_bucket_size(struct bch_opts fs_opts, u64 dev_size)
+static u64 dev_bucket_size_clamp(struct bch_opts fs_opts, u64 dev_size, u64 fs_bucket_size)
 {
-	u64 size = rounddown_pow_of_two(dev_size / (BCH_MIN_NR_NBUCKETS * 4));
+	u64 max_size = rounddown_pow_of_two(dev_size / (BCH_MIN_NR_NBUCKETS * 4));
 	if (opt_defined(fs_opts, btree_node_size))
-		size = max(size, fs_opts.btree_node_size);
-	if (size * BCH_MIN_NR_NBUCKETS > dev_size)
-		die("bucket size %llu too big for device size", size);
-	return size;
+		max_size = max(max_size, fs_opts.btree_node_size);
+	if (max_size * BCH_MIN_NR_NBUCKETS > dev_size)
+		die("bucket size %llu too big for device size", max_size);
+
+	u64 dev_bucket_size = min(max_size, fs_bucket_size);
+
+	/*
+	 * Use encoded_extent_max instead of 64k?
+	 */
+
+	while (dev_bucket_size < 64 << 10 &&
+	       dev_size / (dev_bucket_size * 2) >= BCH_MIN_NR_NBUCKETS)
+		dev_bucket_size *= 2;
+
+	return dev_bucket_size;
 }
 
 u64 bch2_pick_bucket_size(struct bch_opts opts, dev_opts_list devs)
@@ -214,7 +225,7 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	darray_for_each(devs, i)
 		if (!opt_defined(i->opts, bucket_size))
 			opt_set(i->opts, bucket_size,
-				min(fs_bucket_size, dev_max_bucket_size(fs_opts, i->fs_size)));
+				dev_bucket_size_clamp(fs_opts, i->fs_size, fs_bucket_size));
 
 	darray_for_each(devs, i) {
 		i->nbuckets = i->fs_size / i->opts.bucket_size;
