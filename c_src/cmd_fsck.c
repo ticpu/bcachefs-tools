@@ -208,6 +208,7 @@ static void fsck_usage(void)
 	     "  -f                      Force checking even if filesystem is marked clean\n"
 	     "  -r, --ratelimit_errors  Don't display more than 10 errors of a given type\n"
 	     "  -k, --kernel            Use the in-kernel fsck implementation\n"
+	     "  -K, --no-kernel\n"
 	     "  -v                      Be verbose\n"
 	     "  -h, --help              Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
