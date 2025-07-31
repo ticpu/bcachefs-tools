@@ -713,6 +713,7 @@ static int bch2_gc_btree(struct btree_trans *trans,
 			gc_pos_set(c, gc_pos_btree(btree, level, k.k->p));
 			bch2_gc_mark_key(trans, btree, level, &prev, &iter, k, initial);
 		}));
+		bch2_trans_iter_exit(&iter);
 		if (ret)
 			goto err;
 	}
@@ -725,13 +726,13 @@ retry_root:
 		struct btree_iter iter;
 		bch2_trans_node_iter_init(trans, &iter, btree, POS_MIN,
 					  0, bch2_btree_id_root(c, btree)->b->c.level, 0);
-		struct btree *b = bch2_btree_iter_peek_node(trans, &iter);
+		struct btree *b = bch2_btree_iter_peek_node(&iter);
 		ret = PTR_ERR_OR_ZERO(b);
 		if (ret)
 			goto err_root;
 
 		if (b != btree_node_root(c, b)) {
-			bch2_trans_iter_exit(trans, &iter);
+			bch2_trans_iter_exit(&iter);
 			goto retry_root;
 		}
 
@@ -739,7 +740,7 @@ retry_root:
 		struct bkey_s_c k = bkey_i_to_s_c(&b->key);
 		ret = bch2_gc_mark_key(trans, btree, b->c.level + 1, NULL, NULL, k, initial);
 err_root:
-		bch2_trans_iter_exit(trans, &iter);
+		bch2_trans_iter_exit(&iter);
 	} while (bch2_err_matches(ret, BCH_ERR_transaction_restart));
 err:
 	bch_err_fn(c, ret);
@@ -1228,7 +1229,7 @@ int bch2_gc_gens(struct bch_fs *c)
 				BCH_TRANS_COMMIT_no_enospc, ({
 			ca = bch2_dev_iterate(c, ca, k.k->p.inode);
 			if (!ca) {
-				bch2_btree_iter_set_pos(trans, &iter, POS(k.k->p.inode + 1, 0));
+				bch2_btree_iter_set_pos(&iter, POS(k.k->p.inode + 1, 0));
 				continue;
 			}
 			bch2_alloc_write_oldest_gen(trans, ca, &iter, k);

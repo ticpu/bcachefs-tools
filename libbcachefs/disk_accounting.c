@@ -778,12 +778,13 @@ int bch2_accounting_read(struct bch_fs *c)
 				struct disk_accounting_pos next;
 				memset(&next, 0, sizeof(next));
 				next.type = acc_k.type + 1;
-				bch2_btree_iter_set_pos(trans, &iter, disk_accounting_pos_to_bpos(&next));
+				bch2_btree_iter_set_pos(&iter, disk_accounting_pos_to_bpos(&next));
 				continue;
 			}
 
 			accounting_read_key(trans, k);
 		}));
+	bch2_trans_iter_exit(&iter);
 	if (ret)
 		return ret;
 
@@ -965,7 +966,7 @@ void bch2_verify_accounting_clean(struct bch_fs *c)
 			struct disk_accounting_pos next;
 			memset(&next, 0, sizeof(next));
 			next.type = acc_k.type + 1;
-			bch2_btree_iter_set_pos(trans, &iter, disk_accounting_pos_to_bpos(&next));
+			bch2_btree_iter_set_pos(&iter, disk_accounting_pos_to_bpos(&next));
 			continue;
 		}
 

@@ -258,11 +258,10 @@ static int __bch2_data_update_index_update(struct btree_trans *trans,
 					   struct bch_write_op *op)
 {
 	struct bch_fs *c = op->c;
-	struct btree_iter iter;
 	struct data_update *m = container_of(op, struct data_update, op);
 	int ret = 0;
 
-	bch2_trans_iter_init(trans, &iter, m->btree_id,
+	CLASS(btree_iter, iter)(trans, m->btree_id,
 			     bkey_start_pos(&bch2_keylist_front(&op->insert_keys)->k),
 			     BTREE_ITER_slots|BTREE_ITER_intent);
 
@@ -283,7 +282,7 @@ static int __bch2_data_update_index_update(struct btree_trans *trans,
 
 		bch2_trans_begin(trans);
 
-		k = bch2_btree_iter_peek_slot(trans, &iter);
+		k = bch2_btree_iter_peek_slot(&iter);
 		ret = bkey_err(k);
 		if (ret)
 			goto err;
@@ -456,7 +455,7 @@ restart_drop_extra_replicas:
 		if (ret)
 			goto err;
 
-		bch2_btree_iter_set_pos(trans, &iter, next_pos);
+		bch2_btree_iter_set_pos(&iter, next_pos);
 
 		this_cpu_add(c->counters[BCH_COUNTER_io_move_finish], new->k.size);
 		if (trace_io_move_finish_enabled())
@@ -483,11 +482,10 @@ nowork:
 
 		count_event(c, io_move_fail);
 
-		bch2_btree_iter_advance(trans, &iter);
+		bch2_btree_iter_advance(&iter);
 		goto next;
 	}
 out:
-	bch2_trans_iter_exit(trans, &iter);
 	BUG_ON(bch2_err_matches(ret, BCH_ERR_transaction_restart));
 	return ret;
 }
@@ -553,10 +551,10 @@ int bch2_update_unwritten_extent(struct btree_trans *trans,
 		bch2_trans_iter_init(trans, &iter, update->btree_id, update->op.pos,
 				     BTREE_ITER_slots);
 		ret = lockrestart_do(trans, ({
-			k = bch2_btree_iter_peek_slot(trans, &iter);
+			k = bch2_btree_iter_peek_slot(&iter);
 			bkey_err(k);
 		}));
-		bch2_trans_iter_exit(trans, &iter);
+		bch2_trans_iter_exit(&iter);
 
 		if (ret || !bch2_extents_match(k, bkey_i_to_s_c(update->k.k)))
 			break;

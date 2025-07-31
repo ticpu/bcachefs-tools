@@ -206,7 +206,7 @@ static int bch2_get_inode_journal_seq_trans(struct btree_trans *trans, subvol_in
 		ret = bch2_inode_write(trans, &iter, &u);
 	}
 fsck_err:
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 	return ret;
 }
 
@@ -626,15 +626,14 @@ static noinline int __bchfs_fallocate(struct bch_inode_info *inode, int mode,
 			     u64 start_sector, u64 end_sector)
 {
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
-	CLASS(btree_trans, trans)(c);
-	struct btree_iter iter;
 	struct bpos end_pos = POS(inode->v.i_ino, end_sector);
 	struct bch_io_opts opts;
 	int ret = 0;
 
 	bch2_inode_opts_get(&opts, c, &inode->ei_inode);
 
-	bch2_trans_iter_init(trans, &iter, BTREE_ID_extents,
+	CLASS(btree_trans, trans)(c);
+	CLASS(btree_iter, iter)(trans, BTREE_ID_extents,
 			POS(inode->v.i_ino, start_sector),
 			BTREE_ITER_slots|BTREE_ITER_intent);
 
@@ -657,9 +656,9 @@ static noinline int __bchfs_fallocate(struct bch_inode_info *inode, int mode,
 		if (ret)
 			goto bkey_err;
 
-		bch2_btree_iter_set_snapshot(trans, &iter, snapshot);
+		bch2_btree_iter_set_snapshot(&iter, snapshot);
 
-		k = bch2_btree_iter_peek_slot(trans, &iter);
+		k = bch2_btree_iter_peek_slot(&iter);
 		if ((ret = bkey_err(k)))
 			goto bkey_err;
 
@@ -670,13 +669,13 @@ static noinline int __bchfs_fallocate(struct bch_inode_info *inode, int mode,
 		/* already reserved */
 		if (bkey_extent_is_reservation(k) &&
 		    bch2_bkey_nr_ptrs_fully_allocated(k) >= opts.data_replicas) {
-			bch2_btree_iter_advance(trans, &iter);
+			bch2_btree_iter_advance(&iter);
 			continue;
 		}
 
 		if (bkey_extent_is_data(k.k) &&
 		    !(mode & FALLOC_FL_ZERO_RANGE)) {
-			bch2_btree_iter_advance(trans, &iter);
+			bch2_btree_iter_advance(&iter);
 			continue;
 		}
 
@@ -697,7 +696,7 @@ static noinline int __bchfs_fallocate(struct bch_inode_info *inode, int mode,
 				if (ret)
 					goto bkey_err;
 			}
-			bch2_btree_iter_set_pos(trans, &iter, POS(iter.pos.inode, hole_start));
+			bch2_btree_iter_set_pos(&iter, POS(iter.pos.inode, hole_start));
 
 			if (ret)
 				goto bkey_err;
@@ -747,7 +746,6 @@ bkey_err:
 		bch2_quota_reservation_put(c, inode, &quota_res);
 	}
 
-	bch2_trans_iter_exit(trans, &iter);
 	return ret;
 }
 

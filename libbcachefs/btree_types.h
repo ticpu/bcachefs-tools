@@ -229,6 +229,7 @@ struct btree_node_iter {
 	x(snapshot_field)			\
 	x(all_snapshots)			\
 	x(filter_snapshots)			\
+	x(nofilter_whiteouts)			\
 	x(nopreserve)				\
 	x(cached_nofill)			\
 	x(key_cache_fill)			\
@@ -364,6 +365,7 @@ static inline unsigned long btree_path_ip_allocated(struct btree_path *path)
  * @nodes_intent_locked	- bitmask indicating which locks are intent locks
  */
 struct btree_iter {
+	struct btree_trans	*trans;
 	btree_path_idx_t	path;
 	btree_path_idx_t	update_path;
 	btree_path_idx_t	key_cache_path;
@@ -838,15 +840,15 @@ static inline bool btree_node_type_has_triggers(enum btree_node_type type)
 	return BIT_ULL(type) & BTREE_NODE_TYPE_HAS_TRIGGERS;
 }
 
+static const u64 btree_is_extents_mask = 0
+#define x(name, nr, flags, ...)	|((!!((flags) & BTREE_IS_extents)) << nr)
+BCH_BTREE_IDS()
+#undef x
+;
+
 static inline bool btree_id_is_extents(enum btree_id btree)
 {
-	const u64 mask = 0
-#define x(name, nr, flags, ...)	|((!!((flags) & BTREE_IS_extents)) << nr)
-	BCH_BTREE_IDS()
-#undef x
-	;
-
-	return BIT_ULL(btree) & mask;
+	return BIT_ULL(btree) & btree_is_extents_mask;
 }
 
 static inline bool btree_node_type_is_extents(enum btree_node_type type)
@@ -863,6 +865,11 @@ BCH_BTREE_IDS()
 static inline bool btree_type_has_snapshots(enum btree_id btree)
 {
 	return BIT_ULL(btree) & btree_has_snapshots_mask;
+}
+
+static inline bool btree_id_is_extents_snapshots(enum btree_id btree)
+{
+	return BIT_ULL(btree) & btree_has_snapshots_mask & btree_is_extents_mask;
 }
 
 static inline bool btree_type_has_snapshot_field(enum btree_id btree)

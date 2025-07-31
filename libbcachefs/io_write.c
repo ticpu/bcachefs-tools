@@ -171,9 +171,9 @@ int bch2_sum_sector_overwrites(struct btree_trans *trans,
 	*i_sectors_delta	= 0;
 	*disk_sectors_delta	= 0;
 
-	bch2_trans_copy_iter(trans, &iter, extent_iter);
+	bch2_trans_copy_iter(&iter, extent_iter);
 
-	for_each_btree_key_max_continue_norestart(trans, iter,
+	for_each_btree_key_max_continue_norestart(iter,
 				new->k.p, BTREE_ITER_slots, old, ret) {
 		s64 sectors = min(new->k.p.offset, old.k->p.offset) -
 			max(bkey_start_offset(&new->k),
@@ -198,7 +198,7 @@ int bch2_sum_sector_overwrites(struct btree_trans *trans,
 			break;
 	}
 
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 	return ret;
 }
 
@@ -220,13 +220,13 @@ static inline int bch2_extent_update_i_size_sectors(struct btree_trans *trans,
 	 */
 	unsigned inode_update_flags = BTREE_UPDATE_nojournal;
 
-	struct btree_iter iter;
-	struct bkey_s_c k = bch2_bkey_get_iter(trans, &iter, BTREE_ID_inodes,
-			      SPOS(0,
-				   extent_iter->pos.inode,
-				   extent_iter->snapshot),
-			      BTREE_ITER_intent|
-			      BTREE_ITER_cached);
+	CLASS(btree_iter, iter)(trans, BTREE_ID_inodes,
+				SPOS(0,
+				     extent_iter->pos.inode,
+				     extent_iter->snapshot),
+				BTREE_ITER_intent|
+				BTREE_ITER_cached);
+	struct bkey_s_c k = bch2_btree_iter_peek_slot(&iter);
 	int ret = bkey_err(k);
 	if (unlikely(ret))
 		return ret;
@@ -238,7 +238,7 @@ static inline int bch2_extent_update_i_size_sectors(struct btree_trans *trans,
 	struct bkey_i *k_mut = bch2_trans_kmalloc_nomemzero(trans, bkey_bytes(k.k) + 8);
 	ret = PTR_ERR_OR_ZERO(k_mut);
 	if (unlikely(ret))
-		goto err;
+		return ret;
 
 	bkey_reassemble(k_mut, k);
 
@@ -246,7 +246,7 @@ static inline int bch2_extent_update_i_size_sectors(struct btree_trans *trans,
 		k_mut = bch2_inode_to_v3(trans, k_mut);
 		ret = PTR_ERR_OR_ZERO(k_mut);
 		if (unlikely(ret))
-			goto err;
+			return ret;
 	}
 
 	struct bkey_i_inode_v3 *inode = bkey_i_to_inode_v3(k_mut);
@@ -291,12 +291,9 @@ static inline int bch2_extent_update_i_size_sectors(struct btree_trans *trans,
 		inode_update_flags = 0;
 	}
 
-	ret = bch2_trans_update(trans, &iter, &inode->k_i,
-				BTREE_UPDATE_internal_snapshot_node|
-				inode_update_flags);
-err:
-	bch2_trans_iter_exit(trans, &iter);
-	return ret;
+	return bch2_trans_update(trans, &iter, &inode->k_i,
+				 BTREE_UPDATE_internal_snapshot_node|
+				 inode_update_flags);
 }
 
 int bch2_extent_update(struct btree_trans *trans,
@@ -319,7 +316,7 @@ int bch2_extent_update(struct btree_trans *trans,
 	 * path already traversed at iter->pos because
 	 * bch2_trans_extent_update() will use it to attempt extent merging
 	 */
-	ret = __bch2_btree_iter_traverse(trans, iter);
+	ret = __bch2_btree_iter_traverse(iter);
 	if (ret)
 		return ret;
 
@@ -364,7 +361,7 @@ int bch2_extent_update(struct btree_trans *trans,
 
 	if (i_sectors_delta_total)
 		*i_sectors_delta_total += i_sectors_delta;
-	bch2_btree_iter_set_pos(trans, iter, next_pos);
+	bch2_btree_iter_set_pos(iter, next_pos);
 	return 0;
 }
 
@@ -374,7 +371,6 @@ static int bch2_write_index_default(struct bch_write_op *op)
 	struct bkey_buf sk;
 	struct keylist *keys = &op->insert_keys;
 	struct bkey_i *k = bch2_keylist_front(keys);
-	struct btree_iter iter;
 	subvol_inum inum = {
 		.subvol = op->subvol,
 		.inum	= k->k.p.inode,
@@ -399,15 +395,14 @@ static int bch2_write_index_default(struct bch_write_op *op)
 		if (ret)
 			break;
 
-		bch2_trans_iter_init(trans, &iter, BTREE_ID_extents,
-				     bkey_start_pos(&sk.k->k),
-				     BTREE_ITER_slots|BTREE_ITER_intent);
+		CLASS(btree_iter, iter)(trans, BTREE_ID_extents,
+					bkey_start_pos(&sk.k->k),
+					BTREE_ITER_slots|BTREE_ITER_intent);
 
 		ret =   bch2_extent_update(trans, inum, &iter, sk.k,
 					&op->res,
 					op->new_i_size, &op->i_sectors_delta,
 					op->flags & BCH_WRITE_check_enospc);
-		bch2_trans_iter_exit(trans, &iter);
 
 		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 			continue;
@@ -1345,7 +1340,7 @@ retry:
 		if (ret)
 			break;
 
-		k = bch2_btree_iter_peek_slot(trans, &iter);
+		k = bch2_btree_iter_peek_slot(&iter);
 		ret = bkey_err(k);
 		if (ret)
 			break;
@@ -1430,10 +1425,10 @@ retry:
 		bch2_keylist_push(&op->insert_keys);
 		if (op->flags & BCH_WRITE_submitted)
 			break;
-		bch2_btree_iter_advance(trans, &iter);
+		bch2_btree_iter_advance(&iter);
 	}
 out:
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 err:
 	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 		goto retry;

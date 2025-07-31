@@ -273,7 +273,7 @@ struct posix_acl *bch2_get_acl(struct inode *vinode, int type, bool rcu)
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
 	struct bch_hash_info hash = bch2_hash_info_init(c, &inode->ei_inode);
 	struct xattr_search_key search = X_SEARCH(acl_to_xattr_type(type), "", 0);
-	struct btree_iter iter = {};
+	struct btree_iter iter = { NULL };
 	struct posix_acl *acl = NULL;
 
 	if (rcu)
@@ -303,7 +303,7 @@ err:
 	if (!IS_ERR_OR_NULL(acl))
 		set_cached_acl(&inode->v, type, acl);
 
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 	return acl;
 }
 
@@ -343,7 +343,7 @@ int bch2_set_acl(struct mnt_idmap *idmap,
 {
 	struct bch_inode_info *inode = to_bch_ei(dentry->d_inode);
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
-	struct btree_iter inode_iter = {};
+	struct btree_iter inode_iter = { NULL };
 	struct bch_inode_unpacked inode_u;
 	struct posix_acl *acl;
 	umode_t mode;
@@ -379,7 +379,7 @@ retry:
 	ret =   bch2_inode_write(trans, &inode_iter, &inode_u) ?:
 		bch2_trans_commit(trans, NULL, NULL, 0);
 btree_err:
-	bch2_trans_iter_exit(trans, &inode_iter);
+	bch2_trans_iter_exit(&inode_iter);
 
 	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 		goto retry;
@@ -431,7 +431,7 @@ int bch2_acl_chmod(struct btree_trans *trans, subvol_inum inum,
 	*new_acl = acl;
 	acl = NULL;
 err:
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 	if (!IS_ERR_OR_NULL(acl))
 		kfree(acl);
 	return ret;

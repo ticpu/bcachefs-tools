@@ -47,6 +47,7 @@ fn main() {
         .default_enum_style(bindgen::EnumVariation::Rust {
             non_exhaustive: true,
         })
+        .bitfield_enum("btree_iter_update_trigger_flags")
         .allowlist_function("bcachefs_usage")
         .allowlist_function("raid_init")
         .allowlist_function("cmd_.*")

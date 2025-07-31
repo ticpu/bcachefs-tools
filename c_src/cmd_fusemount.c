@@ -214,7 +214,7 @@ retry:
 		bch2_trans_commit(trans, NULL, NULL,
 				  BCH_TRANS_COMMIT_no_enospc);
 err:
-        bch2_trans_iter_exit(trans, &iter);
+        bch2_trans_iter_exit(&iter);
 	if (ret == -EINTR)
 		goto retry;
 
@@ -554,7 +554,7 @@ retry:
 	ret = bch2_trans_commit(trans, NULL, NULL,
 				BCH_TRANS_COMMIT_no_enospc);
 err:
-        bch2_trans_iter_exit(trans, &iter);
+        bch2_trans_iter_exit(&iter);
 	if (ret == -EINTR)
 		goto retry;
 

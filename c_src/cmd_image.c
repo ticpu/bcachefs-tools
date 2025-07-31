@@ -165,23 +165,19 @@ static void check_gaps(struct bch_fs *c)
 
 static int get_nbuckets_used(struct bch_fs *c, u64 *nbuckets)
 {
-	struct btree_trans *trans = bch2_trans_get(c);
-	struct btree_iter iter;
-	bch2_trans_iter_init(trans, &iter, BTREE_ID_alloc, POS(0, U64_MAX), 0);
+	CLASS(btree_trans, trans)(c);
+	CLASS(btree_iter, iter)(trans, BTREE_ID_alloc, POS(0, U64_MAX), 0);
 	struct bkey_s_c k;
-	int ret = lockrestart_do(trans, bkey_err(k = bch2_btree_iter_peek_prev(trans, &iter)));
+	int ret = lockrestart_do(trans, bkey_err(k = bch2_btree_iter_peek_prev(&iter)));
 	if (!ret && k.k->type != KEY_TYPE_alloc_v4)
 		ret = -ENOENT;
 	if (ret) {
 		fprintf(stderr, "error looking up last alloc key: %s\n", bch2_err_str(ret));
-		goto err;
+		return ret;
 	}
 
 	*nbuckets = (k.k->p.offset + 1);
-err:
-	bch2_trans_iter_exit(trans, &iter);
-	bch2_trans_put(trans);
-	return ret;
+	return 0;
 
 }
 

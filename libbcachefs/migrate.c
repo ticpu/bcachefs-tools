@@ -111,7 +111,7 @@ static int bch2_dev_btree_drop_key(struct btree_trans *trans,
 
 	ret = drop_btree_ptrs(trans, &iter, b, dev_idx, flags);
 
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 	return ret;
 }
 
@@ -163,7 +163,7 @@ static int bch2_dev_metadata_drop(struct bch_fs *c,
 retry:
 		ret = 0;
 		while (bch2_trans_begin(trans),
-		       (b = bch2_btree_iter_peek_node(trans, &iter)) &&
+		       (b = bch2_btree_iter_peek_node(&iter)) &&
 		       !(ret = PTR_ERR_OR_ZERO(b))) {
 			bch2_progress_update_iter(trans, progress, &iter, "dropping metadata");
 
@@ -179,12 +179,12 @@ retry:
 			if (ret)
 				break;
 next:
-			bch2_btree_iter_next_node(trans, &iter);
+			bch2_btree_iter_next_node(&iter);
 		}
 		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 			goto retry;
 
-		bch2_trans_iter_exit(trans, &iter);
+		bch2_trans_iter_exit(&iter);
 
 		if (ret)
 			goto err;
@@ -228,7 +228,7 @@ static int data_drop_bp(struct btree_trans *trans, unsigned dev_idx,
 	else
 		ret = bch2_dev_usrdata_drop_key(trans, &iter, k, dev_idx, flags);
 out:
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 	return ret;
 }
 

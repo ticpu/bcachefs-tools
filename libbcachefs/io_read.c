@@ -534,7 +534,7 @@ static void get_rbio_extent(struct btree_trans *trans,
 			break;
 		}
 
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 }
 
 static noinline int maybe_poison_extent(struct btree_trans *trans, struct bch_read_bio *rbio,
@@ -550,15 +550,14 @@ static noinline int maybe_poison_extent(struct btree_trans *trans, struct bch_re
 	if (flags & BIT_ULL(BCH_EXTENT_FLAG_poisoned))
 		return 0;
 
-	struct btree_iter iter;
-	struct bkey_s_c k = bch2_bkey_get_iter(trans, &iter, btree, bkey_start_pos(read_k.k),
-					       BTREE_ITER_intent);
+	CLASS(btree_iter, iter)(trans, btree, bkey_start_pos(read_k.k), BTREE_ITER_intent);
+	struct bkey_s_c k = bch2_btree_iter_peek_slot(&iter);
 	int ret = bkey_err(k);
 	if (ret)
 		return ret;
 
 	if (!bkey_and_val_eq(k, read_k))
-		goto out;
+		return 0;
 
 	struct bkey_i *new = bch2_trans_kmalloc(trans,
 					bkey_bytes(k.k) + sizeof(struct bch_extent_flags));
@@ -567,17 +566,17 @@ static noinline int maybe_poison_extent(struct btree_trans *trans, struct bch_re
 		bch2_bkey_extent_flags_set(c, new, flags|BIT_ULL(BCH_EXTENT_FLAG_poisoned)) ?:
 		bch2_trans_update(trans, &iter, new, BTREE_UPDATE_internal_snapshot_node) ?:
 		bch2_trans_commit(trans, NULL, NULL, 0);
+	if (ret)
+		return ret;
 
 	/*
 	 * Propagate key change back to data update path, in particular so it
 	 * knows the extent has been poisoned and it's safe to change the
 	 * checksum
 	 */
-	if (u && !ret)
+	if (u)
 		bch2_bkey_buf_copy(&u->k, c, new);
-out:
-	bch2_trans_iter_exit(trans, &iter);
-	return ret;
+	return 0;
 }
 
 static noinline int bch2_read_retry_nodecode(struct btree_trans *trans,
@@ -611,7 +610,7 @@ retry:
 				 bkey_i_to_s_c(u->k.k),
 				 0, failed, flags, -1);
 err:
-	bch2_trans_iter_exit(trans, &iter);
+	bch2_trans_iter_exit(&iter);
 
 	if (bch2_err_matches(ret, BCH_ERR_transaction_restart) ||
 	    bch2_err_matches(ret, BCH_ERR_data_read_retry))
@@ -746,56 +745,48 @@ static int __bch2_rbio_narrow_crcs(struct btree_trans *trans,
 {
 	struct bch_fs *c = rbio->c;
 	u64 data_offset = rbio->data_pos.offset - rbio->pick.crc.offset;
-	struct bch_extent_crc_unpacked new_crc;
-	struct btree_iter iter;
-	struct bkey_i *new;
-	struct bkey_s_c k;
 	int ret = 0;
 
 	if (crc_is_compressed(rbio->pick.crc))
 		return 0;
 
-	k = bch2_bkey_get_iter(trans, &iter, rbio->data_btree, rbio->data_pos,
-			       BTREE_ITER_slots|BTREE_ITER_intent);
+	CLASS(btree_iter, iter)(trans, rbio->data_btree, rbio->data_pos, BTREE_ITER_intent);
+	struct bkey_s_c k = bch2_btree_iter_peek_slot(&iter);
 	if ((ret = bkey_err(k)))
-		goto out;
+		return ret;
 
 	if (bversion_cmp(k.k->bversion, rbio->version) ||
 	    !bch2_bkey_matches_ptr(c, k, rbio->pick.ptr, data_offset))
-		goto out;
+		return 0;
 
 	/* Extent was merged? */
 	if (bkey_start_offset(k.k) < data_offset ||
 	    k.k->p.offset > data_offset + rbio->pick.crc.uncompressed_size)
-		goto out;
+		return 0;
 
+	struct bch_extent_crc_unpacked new_crc;
 	if (bch2_rechecksum_bio(c, &rbio->bio, rbio->version,
 			rbio->pick.crc, NULL, &new_crc,
 			bkey_start_offset(k.k) - data_offset, k.k->size,
 			rbio->pick.crc.csum_type)) {
 		bch_err(c, "error verifying existing checksum while narrowing checksum (memory corruption?)");
-		ret = 0;
-		goto out;
+		return 0;
 	}
 
 	/*
 	 * going to be temporarily appending another checksum entry:
 	 */
-	new = bch2_trans_kmalloc(trans, bkey_bytes(k.k) +
-				 sizeof(struct bch_extent_crc128));
+	struct bkey_i *new = bch2_trans_kmalloc(trans, bkey_bytes(k.k) +
+						sizeof(struct bch_extent_crc128));
 	if ((ret = PTR_ERR_OR_ZERO(new)))
-		goto out;
+		return ret;
 
 	bkey_reassemble(new, k);
 
 	if (!bch2_bkey_narrow_crcs(new, new_crc))
-		goto out;
+		return 0;
 
-	ret = bch2_trans_update(trans, &iter, new,
-				BTREE_UPDATE_internal_snapshot_node);
-out:
-	bch2_trans_iter_exit(trans, &iter);
-	return ret;
+	return bch2_trans_update(trans, &iter, new, BTREE_UPDATE_internal_snapshot_node);
 }
 
 static noinline void bch2_rbio_narrow_crcs(struct bch_read_bio *rbio)
@@ -1021,13 +1012,10 @@ static noinline void read_from_stale_dirty_pointer(struct btree_trans *trans,
 						   struct bch_extent_ptr ptr)
 {
 	struct bch_fs *c = trans->c;
-	struct btree_iter iter;
 	CLASS(printbuf, buf)();
-	int ret;
-
-	bch2_trans_iter_init(trans, &iter, BTREE_ID_alloc,
-			     PTR_BUCKET_POS(ca, &ptr),
-			     BTREE_ITER_cached);
+	CLASS(btree_iter, iter)(trans, BTREE_ID_alloc,
+				PTR_BUCKET_POS(ca, &ptr),
+				BTREE_ITER_cached);
 
 	int gen = bucket_gen_get(ca, iter.pos.offset);
 	if (gen >= 0) {
@@ -1039,7 +1027,7 @@ static noinline void read_from_stale_dirty_pointer(struct btree_trans *trans,
 
 		prt_printf(&buf, "memory gen: %u", gen);
 
-		ret = lockrestart_do(trans, bkey_err(k = bch2_btree_iter_peek_slot(trans, &iter)));
+		int ret = lockrestart_do(trans, bkey_err(k = bch2_btree_iter_peek_slot(&iter)));
 		if (!ret) {
 			prt_newline(&buf);
 			bch2_bkey_val_to_text(&buf, c, k);
@@ -1057,8 +1045,6 @@ static noinline void read_from_stale_dirty_pointer(struct btree_trans *trans,
 	}
 
 	bch2_fs_inconsistent(c, "%s", buf.buf);
-
-	bch2_trans_iter_exit(trans, &iter);
 }
 
 int __bch2_read_extent(struct btree_trans *trans, struct bch_read_bio *orig,
@@ -1406,7 +1392,6 @@ int __bch2_read(struct btree_trans *trans, struct bch_read_bio *rbio,
 		unsigned flags)
 {
 	struct bch_fs *c = trans->c;
-	struct btree_iter iter;
 	struct bkey_buf sk;
 	struct bkey_s_c k;
 	enum btree_id data_btree;
@@ -1415,9 +1400,9 @@ int __bch2_read(struct btree_trans *trans, struct bch_read_bio *rbio,
 	EBUG_ON(rbio->data_update);
 
 	bch2_bkey_buf_init(&sk);
-	bch2_trans_iter_init(trans, &iter, BTREE_ID_extents,
-			     POS(inum.inum, bvec_iter.bi_sector),
-			     BTREE_ITER_slots);
+	CLASS(btree_iter, iter)(trans, BTREE_ID_extents,
+				POS(inum.inum, bvec_iter.bi_sector),
+				BTREE_ITER_slots);
 
 	while (1) {
 		data_btree = BTREE_ID_extents;
@@ -1429,12 +1414,12 @@ int __bch2_read(struct btree_trans *trans, struct bch_read_bio *rbio,
 		if (ret)
 			goto err;
 
-		bch2_btree_iter_set_snapshot(trans, &iter, snapshot);
+		bch2_btree_iter_set_snapshot(&iter, snapshot);
 
-		bch2_btree_iter_set_pos(trans, &iter,
+		bch2_btree_iter_set_pos(&iter,
 				POS(inum.inum, bvec_iter.bi_sector));
 
-		k = bch2_btree_iter_peek_slot(trans, &iter);
+		k = bch2_btree_iter_peek_slot(&iter);
 		ret = bkey_err(k);
 		if (ret)
 			goto err;
@@ -1509,7 +1494,6 @@ err:
 			bch2_rbio_done(rbio);
 	}
 
-	bch2_trans_iter_exit(trans, &iter);
 	bch2_bkey_buf_exit(&sk, c);
 	return ret;
 }

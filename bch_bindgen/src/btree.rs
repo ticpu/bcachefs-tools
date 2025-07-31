@@ -25,35 +25,35 @@ impl<'f> BtreeTrans<'f> {
     }
 }
 
-impl Drop for BtreeTrans<'_> {
+impl<'f> Drop for BtreeTrans<'f> {
     fn drop(&mut self) {
         unsafe { c::bch2_trans_put(&mut *self.raw) }
     }
 }
 
 bitflags! {
-    pub struct BtreeIterFlags: u16 {
-        const SLOTS = c::btree_iter_update_trigger_flags::BTREE_ITER_slots as u16;
-        const INTENT = c::btree_iter_update_trigger_flags::BTREE_ITER_intent as u16;
-        const PREFETCH = c::btree_iter_update_trigger_flags::BTREE_ITER_prefetch as u16;
-        const IS_EXTENTS = c::btree_iter_update_trigger_flags::BTREE_ITER_is_extents as u16;
-        const NOT_EXTENTS = c::btree_iter_update_trigger_flags::BTREE_ITER_not_extents as u16;
-        const CACHED = c::btree_iter_update_trigger_flags::BTREE_ITER_cached as u16;
-        const KEY_CACHED = c::btree_iter_update_trigger_flags::BTREE_ITER_with_key_cache as u16;
-        const WITH_UPDATES = c::btree_iter_update_trigger_flags::BTREE_ITER_with_updates as u16;
-        const WITH_JOURNAL = c::btree_iter_update_trigger_flags::BTREE_ITER_with_journal as u16;
-        const SNAPSHOT_FIELD = c::btree_iter_update_trigger_flags::BTREE_ITER_snapshot_field as u16;
-        const ALL_SNAPSHOTS = c::btree_iter_update_trigger_flags::BTREE_ITER_all_snapshots as u16;
-        const FILTER_SNAPSHOTS = c::btree_iter_update_trigger_flags::BTREE_ITER_filter_snapshots as u16;
-        const NOPRESERVE = c::btree_iter_update_trigger_flags::BTREE_ITER_nopreserve as u16;
-        const CACHED_NOFILL = c::btree_iter_update_trigger_flags::BTREE_ITER_cached_nofill as u16;
-        const KEY_CACHE_FILL = c::btree_iter_update_trigger_flags::BTREE_ITER_key_cache_fill as u16;
+    pub struct BtreeIterFlags: u32 {
+        const SLOTS = c::btree_iter_update_trigger_flags::BTREE_ITER_slots.0;
+        const INTENT = c::btree_iter_update_trigger_flags::BTREE_ITER_intent.0;
+        const PREFETCH = c::btree_iter_update_trigger_flags::BTREE_ITER_prefetch.0;
+        const IS_EXTENTS = c::btree_iter_update_trigger_flags::BTREE_ITER_is_extents.0;
+        const NOT_EXTENTS = c::btree_iter_update_trigger_flags::BTREE_ITER_not_extents.0;
+        const CACHED = c::btree_iter_update_trigger_flags::BTREE_ITER_cached.0;
+        const KEY_CACHED = c::btree_iter_update_trigger_flags::BTREE_ITER_with_key_cache.0;
+        const WITH_UPDATES = c::btree_iter_update_trigger_flags::BTREE_ITER_with_updates.0;
+        const WITH_JOURNAL = c::btree_iter_update_trigger_flags::BTREE_ITER_with_journal.0;
+        const SNAPSHOT_FIELD = c::btree_iter_update_trigger_flags::BTREE_ITER_snapshot_field.0;
+        const ALL_SNAPSHOTS = c::btree_iter_update_trigger_flags::BTREE_ITER_all_snapshots.0;
+        const FILTER_SNAPSHOTS = c::btree_iter_update_trigger_flags::BTREE_ITER_filter_snapshots.0;
+        const NOPRESERVE = c::btree_iter_update_trigger_flags::BTREE_ITER_nopreserve.0;
+        const CACHED_NOFILL = c::btree_iter_update_trigger_flags::BTREE_ITER_cached_nofill.0;
+        const KEY_CACHE_FILL = c::btree_iter_update_trigger_flags::BTREE_ITER_key_cache_fill.0;
     }
 }
 
 pub struct BtreeIter<'t> {
     raw:   c::btree_iter,
-    trans: &'t BtreeTrans<'t>,
+    trans: PhantomData<&'t BtreeTrans<'t>>,
 }
 
 impl<'t> BtreeIter<'t> {
@@ -71,16 +71,20 @@ impl<'t> BtreeIter<'t> {
                 iter.as_mut_ptr(),
                 btree,
                 pos,
-                flags.bits as u32,
+                c::btree_iter_update_trigger_flags(flags.bits),
+                0
             );
 
-            BtreeIter { raw: iter.assume_init(), trans }
+            BtreeIter {
+                raw:   iter.assume_init(),
+                trans: PhantomData,
+            }
         }
     }
 
-    pub fn peek_max(&mut self, end: c::bpos) -> Result<Option<BkeySC<'_>>, bch_errcode> {
+    pub fn peek_max<'i>(&'i mut self, end: c::bpos) -> Result<Option<BkeySC<'i>>, bch_errcode> {
         unsafe {
-            let k = c::bch2_btree_iter_peek_max(self.trans.raw, &mut self.raw, end);
+            let k = c::bch2_btree_iter_peek_max(&mut self.raw, end);
             errptr_to_result_c(k.k).map(|_| {
                 if !k.k.is_null() {
                     Some(BkeySC {
@@ -101,7 +105,7 @@ impl<'t> BtreeIter<'t> {
 
     pub fn peek_and_restart(&mut self) -> Result<Option<BkeySC>, bch_errcode> {
         unsafe {
-            let k = c::bch2_btree_iter_peek_and_restart_outlined(self.trans.raw, &mut self.raw);
+            let k = c::bch2_btree_iter_peek_and_restart_outlined(&mut self.raw);
 
             errptr_to_result_c(k.k).map(|_| {
                 if !k.k.is_null() {
@@ -119,20 +123,20 @@ impl<'t> BtreeIter<'t> {
 
     pub fn advance(&mut self) {
         unsafe {
-            c::bch2_btree_iter_advance(self.trans.raw, &mut self.raw);
+            c::bch2_btree_iter_advance(&mut self.raw);
         }
     }
 }
 
-impl Drop for BtreeIter<'_> {
+impl<'t> Drop for BtreeIter<'t> {
     fn drop(&mut self) {
-        unsafe { c::bch2_trans_iter_exit(self.trans.raw, &mut self.raw) }
+        unsafe { c::bch2_trans_iter_exit(&mut self.raw) }
     }
 }
 
 pub struct BtreeNodeIter<'t> {
     raw:   c::btree_iter,
-    trans: &'t BtreeTrans<'t>,
+    trans: PhantomData<&'t BtreeTrans<'t>>,
 }
 
 impl<'t> BtreeNodeIter<'t> {
@@ -153,55 +157,57 @@ impl<'t> BtreeNodeIter<'t> {
                 pos,
                 locks_want,
                 depth,
-                flags.bits as u32,
+                c::btree_iter_update_trigger_flags(flags.bits),
             );
 
-            BtreeNodeIter { raw: iter.assume_init(), trans }
+            BtreeNodeIter {
+                raw:   iter.assume_init(),
+                trans: PhantomData,
+            }
         }
     }
 
-    pub fn peek(&mut self) -> Result<Option<&c::btree>, bch_errcode> {
+    pub fn peek<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
         unsafe {
-            let b = c::bch2_btree_iter_peek_node(self.trans.raw, &mut self.raw);
+            let b = c::bch2_btree_iter_peek_node(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
         }
     }
 
-    pub fn peek_and_restart(&mut self) -> Result<Option<&c::btree>, bch_errcode> {
+    pub fn peek_and_restart<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
         unsafe {
-            let b = c::bch2_btree_iter_peek_node_and_restart(self.trans.raw, &mut self.raw);
+            let b = c::bch2_btree_iter_peek_node_and_restart(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
         }
     }
 
-    pub fn advance(&mut self) {
+    pub fn advance<'i>(&'i mut self) {
         unsafe {
-            c::bch2_btree_iter_next_node(self.trans.raw, &mut self.raw);
+            c::bch2_btree_iter_next_node(&mut self.raw);
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<&c::btree>, bch_errcode> {
+    pub fn next<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
         unsafe {
-            let b = c::bch2_btree_iter_next_node(self.trans.raw, &mut self.raw);
+            let b = c::bch2_btree_iter_next_node(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
         }
     }
 }
 
-impl Drop for BtreeNodeIter<'_> {
+impl<'t> Drop for BtreeNodeIter<'t> {
     fn drop(&mut self) {
-        unsafe { c::bch2_trans_iter_exit(self.trans.raw, &mut self.raw) }
+        unsafe { c::bch2_trans_iter_exit(&mut self.raw) }
     }
 }
 
 impl<'b, 'f> c::btree {
     pub fn to_text(&'b self, fs: &'f Fs) -> BtreeNodeToText<'b, 'f> {
-        BtreeNodeToText { b: self, fs }
+        BtreeNodeToText { b: &self, fs }
     }
 
     pub fn ondisk_to_text(&'b self, fs: &'f Fs) -> BtreeNodeOndiskToText<'b, 'f> {
-        BtreeNodeOndiskToText { b: self, fs }
+        BtreeNodeOndiskToText { b: &self, fs }
     }
 }
 
@@ -210,7 +216,7 @@ pub struct BtreeNodeToText<'b, 'f> {
     fs: &'f Fs,
 }
 
-impl fmt::Display for BtreeNodeToText<'_, '_> {
+impl<'b, 'f> fmt::Display for BtreeNodeToText<'b, 'f> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         printbuf_to_formatter(f, |buf| unsafe {
             c::bch2_btree_node_to_text(buf, self.fs.raw, self.b)
@@ -223,7 +229,7 @@ pub struct BtreeNodeOndiskToText<'b, 'f> {
     fs: &'f Fs,
 }
 
-impl fmt::Display for BtreeNodeOndiskToText<'_, '_> {
+impl<'b, 'f> fmt::Display for BtreeNodeOndiskToText<'b, 'f> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         printbuf_to_formatter(f, |buf| unsafe {
             c::bch2_btree_node_ondisk_to_text(buf, self.fs.raw, self.b)
