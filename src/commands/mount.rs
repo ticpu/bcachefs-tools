@@ -1,6 +1,4 @@
 use std::{
-    collections::HashMap,
-    env,
     ffi::CString,
     io::{stdout, IsTerminal},
     path::{Path, PathBuf},
@@ -8,11 +6,10 @@ use std::{
 };
 
 use anyhow::{ensure, Result};
-use bch_bindgen::{bcachefs, bcachefs::bch_sb_handle, opt_set, path_to_cstr};
-use bcachefs::bch_opts;
+use bch_bindgen::{bcachefs, bcachefs::bch_sb_handle, path_to_cstr};
 use clap::Parser;
 use log::{debug, error, info};
-use uuid::Uuid;
+use crate::device_scan;
 
 use crate::{
     key::{KeyHandle, Passphrase, UnlockPolicy},
@@ -121,141 +118,6 @@ fn parse_mountflag_options(options: impl AsRef<str>) -> (Option<String>, libc::c
     )
 }
 
-fn read_super_silent(path: impl AsRef<Path>, mut opts: bch_opts) -> anyhow::Result<bch_sb_handle> {
-    opt_set!(opts, noexcl, 1);
-
-    bch_bindgen::sb_io::read_super_silent(path.as_ref(), opts)
-}
-
-fn device_property_map(dev: &udev::Device) -> HashMap<String, String> {
-    let rc: HashMap<_, _> = dev
-        .properties()
-        .map(|i| {
-            (
-                String::from(i.name().to_string_lossy()),
-                String::from(i.value().to_string_lossy()),
-            )
-        })
-        .collect();
-    rc
-}
-
-fn udev_bcachefs_info() -> anyhow::Result<HashMap<String, Vec<String>>> {
-    let mut info = HashMap::new();
-
-    if env::var("BCACHEFS_BLOCK_SCAN").is_ok() {
-        debug!("Checking all block devices for bcachefs super block!");
-        return Ok(info);
-    }
-
-    let mut udev = udev::Enumerator::new()?;
-
-    debug!("Walking udev db!");
-
-    udev.match_subsystem("block")?;
-    udev.match_property("ID_FS_TYPE", "bcachefs")?;
-
-    for m in udev
-        .scan_devices()?
-        .filter(udev::Device::is_initialized)
-        .map(|dev| device_property_map(&dev))
-        .filter(|m| m.contains_key("ID_FS_UUID") && m.contains_key("DEVNAME"))
-    {
-        let fs_uuid = m["ID_FS_UUID"].clone();
-        let dev_node = m["DEVNAME"].clone();
-        info.insert(dev_node.clone(), vec![fs_uuid.clone()]);
-        info.entry(fs_uuid).or_insert(vec![]).push(dev_node.clone());
-    }
-
-    Ok(info)
-}
-
-fn get_super_blocks(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Vec<(PathBuf, bch_sb_handle)> {
-    devices
-        .iter()
-        .filter_map(|dev| {
-            read_super_silent(PathBuf::from(dev), *opts)
-                .ok()
-                .map(|sb| (PathBuf::from(dev), sb))
-        })
-        .filter(|(_, sb)| sb.sb().uuid() == uuid)
-        .collect::<Vec<_>>()
-}
-
-fn get_all_block_devnodes() -> anyhow::Result<Vec<String>> {
-    let mut udev = udev::Enumerator::new()?;
-    udev.match_subsystem("block")?;
-
-    let devices = udev
-        .scan_devices()?
-        .filter_map(|dev| {
-            if dev.is_initialized() {
-                dev.devnode().map(|dn| dn.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    Ok(devices)
-}
-
-fn get_devices_by_uuid(
-    udev_bcachefs: &HashMap<String, Vec<String>>,
-    uuid: Uuid,
-    opts: &bch_opts
-) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
-    let devices = {
-        if !udev_bcachefs.is_empty() {
-            let uuid_string = uuid.hyphenated().to_string();
-            if let Some(devices) = udev_bcachefs.get(&uuid_string) {
-                devices.clone()
-            } else {
-                Vec::new()
-            }
-        } else {
-            get_all_block_devnodes()?
-        }
-    };
-
-    Ok(get_super_blocks(uuid, &devices, opts))
-}
-
-fn devs_str_sbs_from_uuid(
-    udev_info: &HashMap<String, Vec<String>>,
-    uuid: &str,
-    opts: &bch_opts
-) -> anyhow::Result<(String, Vec<bch_sb_handle>)> {
-    debug!("enumerating devices with UUID {}", uuid);
-
-    let devs_sbs = Uuid::parse_str(uuid).map(|uuid| get_devices_by_uuid(udev_info, uuid, opts))??;
-
-    let devs_str = devs_sbs
-        .iter()
-        .map(|(dev, _)| dev.to_str().unwrap())
-        .collect::<Vec<_>>()
-        .join(":");
-
-    let sbs: Vec<bch_sb_handle> = devs_sbs.iter().map(|(_, sb)| *sb).collect();
-
-    Ok((devs_str, sbs))
-}
-
-fn devs_str_sbs_from_device(
-    udev_info: &HashMap<String, Vec<String>>,
-    device: &Path,
-    opts: &bch_opts
-) -> anyhow::Result<(String, Vec<bch_sb_handle>)> {
-    let dev_sb = read_super_silent(device, *opts)?;
-
-    if dev_sb.sb().number_of_devices() == 1 {
-        Ok((device.as_os_str().to_str().unwrap().to_string(), vec![dev_sb]))
-    } else {
-        let uuid = dev_sb.sb().uuid();
-
-        devs_str_sbs_from_uuid(udev_info, &uuid.to_string(), opts)
-    }
-}
-
 /// If a user explicitly specifies `unlock_policy` or `passphrase_file` then use
 /// that without falling back to other mechanisms. If these options are not
 /// used, then search for the key or ask for it.
@@ -278,40 +140,20 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
     let opts = bch_bindgen::opts::parse_mount_opts(None, optstr.as_deref(), true)
         .unwrap_or_default();
 
-    // Grab the udev information once
-    let udev_info = udev_bcachefs_info()?;
-
-    let (devices, mut sbs) =
-        if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = cli.dev.split_once('=') {
-            devs_str_sbs_from_uuid(&udev_info, uuid, &opts)?
-        } else if cli.dev.contains(':') {
-            // If the device string contains ":" we will assume the user knows the
-            // entire list. If they supply a single device it could be either the FS
-            // only has 1 device or it's only 1 of a number of devices which are
-            // part of the FS. This appears to be the case when we get called during
-            // fstab mount processing and the fstab specifies a UUID.
-
-            let sbs = cli
-                .dev
-                .split(':')
-                .map(|path| read_super_silent(path, opts))
-                .collect::<Result<Vec<_>>>()?;
-
-            (cli.dev.clone(), sbs)
-        } else {
-            devs_str_sbs_from_device(&udev_info, Path::new(&cli.dev), &opts)?
-        };
+    let mut sbs = device_scan::scan_sbs(&cli.dev, &opts)?;
 
     ensure!(!sbs.is_empty(), "No device(s) to mount specified");
 
-    let first_sb = &sbs[0];
+    let devices = device_scan::joined_device_str(&sbs);
+
+    let first_sb = &sbs[0].1;
     if unsafe { bcachefs::bch2_sb_is_encrypted(first_sb.sb) } {
         handle_unlock(cli, first_sb)?;
     }
 
     for sb in &mut sbs {
         unsafe {
-            bch_bindgen::sb_io::bch2_free_super(sb);
+            bch_bindgen::sb_io::bch2_free_super(&mut sb.1);
         }
     }
     drop(sbs);

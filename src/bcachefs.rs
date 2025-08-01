@@ -3,6 +3,7 @@ mod key;
 mod dump_stack;
 mod logging;
 mod wrappers;
+mod device_scan;
 
 use std::{
     ffi::{c_char, CString},
