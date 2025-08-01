@@ -22,6 +22,7 @@
 #include "linux/sort.h"
 #include "tools-util.h"
 #include "libbcachefs/util.h"
+#include "src/rust_to_c.h"
 
 void die(const char *fmt, ...)
 {
@@ -777,7 +778,9 @@ darray_const_str get_or_split_cmdline_devs(int argc, char *argv[])
 	darray_const_str ret = {};
 
 	if (argc == 1) {
-		bch2_split_devs(argv[0], &ret);
+		char *dev = bch2_scan_devices(argv[0]);
+
+		bch2_split_devs(dev, &ret);
 	} else {
 		for (unsigned i = 0; i < argc; i++)
 			darray_push(&ret, strdup(argv[i]));

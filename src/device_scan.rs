@@ -1,4 +1,5 @@
 use std::{
+    ffi::{CStr, CString, c_char},
     collections::HashMap,
     env,
     path::{Path, PathBuf},
@@ -170,4 +171,27 @@ pub fn joined_device_str(sbs: &Vec<(PathBuf, bch_sb_handle)>) -> String {
         .map(|sb| sb.0.clone().into_os_string().into_string().unwrap())
         .collect::<Vec<_>>()
         .join(":")
+}
+
+pub fn scan_devices(device: &String, opts: &bch_opts) -> Result<String> {
+    let mut sbs = scan_sbs(device, opts)?;
+
+    for sb in &mut sbs {
+        unsafe {
+            bch_bindgen::sb_io::bch2_free_super(&mut sb.1);
+        }
+    }
+
+    Ok(joined_device_str(&sbs))
+}
+
+#[no_mangle]
+pub extern "C" fn bch2_scan_devices(device: *const c_char) -> *mut c_char {
+    let device = unsafe { CStr::from_ptr(device) };
+    let device = device.to_str().unwrap().to_string();
+
+    let opts = bch_bindgen::opts::parse_mount_opts(None, None, true)
+        .unwrap_or_default();
+
+    CString::new(scan_devices(&device, &opts).unwrap()).unwrap().into_raw()
 }
