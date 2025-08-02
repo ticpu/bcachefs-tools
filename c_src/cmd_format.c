@@ -21,6 +21,7 @@
 #include <uuid/uuid.h>
 
 #include "cmds.h"
+#include "cmd_super.h"
 #include "tools-util.h"
 #include "posix_to_bcachefs.h"
 #include "libbcachefs.h"
@@ -293,7 +294,7 @@ int cmd_format(int argc, char *argv[])
 		struct printbuf buf = PRINTBUF;
 		buf.human_readable_units = true;
 
-		bch2_sb_to_text(&buf, sb, false, 1 << BCH_SB_FIELD_members_v2);
+		bch2_sb_to_text_with_names(&buf, sb, false, 1 << BCH_SB_FIELD_members_v2, -1);
 		printf("%s", buf.buf);
 		printbuf_exit(&buf);
 	}

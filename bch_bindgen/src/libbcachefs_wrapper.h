@@ -13,6 +13,7 @@
 #include "include/linux/blkdev.h"
 #include "cmds.h"
 #include "raid/raid.h"
+#include "src/rust_to_c.h"
 
 /* Fix753 is a workaround for https://github.com/rust-lang/rust-bindgen/issues/753
  * Functional macro are not expanded with bindgen, e.g. ioctl are automatically ignored

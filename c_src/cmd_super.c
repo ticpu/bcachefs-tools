@@ -21,12 +21,15 @@
 #include <uuid/uuid.h>
 
 #include "cmds.h"
+#include "cmd_super.h"
 #include "libbcachefs.h"
 #include "libbcachefs/opts.h"
 #include "libbcachefs/super-io.h"
 #include "libbcachefs/util.h"
 
 #include "libbcachefs/darray.h"
+
+#include "src/rust_to_c.h"
 
 static void show_super_usage(void)
 {
@@ -40,6 +43,72 @@ static void show_super_usage(void)
 	     "  -h, --help                  display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
+}
+
+static struct sb_name *sb_dev_to_name(sb_names sb_names, unsigned idx)
+{
+	darray_for_each(sb_names, i)
+		if (i->sb.sb->dev_idx == idx)
+			return i;
+	return NULL;
+}
+
+static void print_one_member(struct printbuf *out, sb_names sb_names,
+			     struct bch_sb *sb,
+			     struct bch_sb_field_disk_groups *gi,
+			     struct bch_member m, unsigned idx)
+{
+	struct sb_name *name = sb_dev_to_name(sb_names, idx);
+	prt_printf(out, "Device %u:\t%s\t", idx, name ? name->name : "(not found)");
+
+	if (name) {
+		char *model = fd_to_dev_model(name->sb.bdev->bd_fd);
+		prt_str(out, model);
+		free(model);
+	}
+	prt_newline(out);
+
+	printbuf_indent_add(out, 2);
+	bch2_member_to_text(out, &m, gi, sb, idx);
+	printbuf_indent_sub(out, 2);
+}
+
+void bch2_sb_to_text_with_names(struct printbuf *out, struct bch_sb *sb,
+				bool print_layout, unsigned fields, int field_only)
+{
+	CLASS(printbuf, uuid_buf)();
+	prt_str(&uuid_buf, "UUID=");
+	pr_uuid(&uuid_buf, sb->user_uuid.b);
+
+	sb_names sb_names = {};
+	bch2_scan_device_sbs(uuid_buf.buf, &sb_names);
+
+	if (field_only >= 0) {
+		struct bch_sb_field *f = bch2_sb_field_get_id(sb, field_only);
+
+		if (f)
+			__bch2_sb_field_to_text(out, sb, f);
+	} else {
+		printbuf_tabstop_push(out, 44);
+
+		bch2_sb_to_text(out, sb, print_layout,
+				fields & ~(BIT(BCH_SB_FIELD_members_v1)|
+					   BIT(BCH_SB_FIELD_members_v2)));
+
+		struct bch_sb_field_disk_groups *gi = bch2_sb_field_get(sb, disk_groups);
+
+		struct bch_sb_field_members_v1 *mi1;
+		if ((fields & BIT(BCH_SB_FIELD_members_v1)) &&
+		    (mi1 = bch2_sb_field_get(sb, members_v1)))
+			for (unsigned i = 0; i < sb->nr_devices; i++)
+				print_one_member(out, sb_names, sb, gi, bch2_members_v1_get(mi1, i), i);
+
+		struct bch_sb_field_members_v2 *mi2;
+		if ((fields & BIT(BCH_SB_FIELD_members_v2)) &&
+		    (mi2 = bch2_sb_field_get(sb, members_v2)))
+			for (unsigned i = 0; i < sb->nr_devices; i++)
+				print_one_member(out, sb_names, sb, gi, bch2_members_v2_get(mi2, i), i);
+	}
 }
 
 int cmd_show_super(int argc, char *argv[])
@@ -98,32 +167,16 @@ int cmd_show_super(int argc, char *argv[])
 
 	if (print_default_fields) {
 		fields |= bch2_sb_field_get(sb.sb, members_v2)
-			? 1 << BCH_SB_FIELD_members_v2
-			: 1 << BCH_SB_FIELD_members_v1;
-		fields |= 1 << BCH_SB_FIELD_errors;
+			? BIT(BCH_SB_FIELD_members_v2)
+			: BIT(BCH_SB_FIELD_members_v1);
+		fields |= BIT(BCH_SB_FIELD_errors);
 	}
 
 	struct printbuf buf = PRINTBUF;
 
 	buf.human_readable_units = true;
 
-	if (field_only >= 0) {
-		struct bch_sb_field *f = bch2_sb_field_get_id(sb.sb, field_only);
-
-		if (f)
-			__bch2_sb_field_to_text(&buf, sb.sb, f);
-	} else {
-		printbuf_tabstop_push(&buf, 44);
-
-		char *model = fd_to_dev_model(sb.bdev->bd_fd);
-		prt_str(&buf, "Device:");
-		prt_tab(&buf);
-		prt_str(&buf, model);
-		prt_newline(&buf);
-		free(model);
-
-		bch2_sb_to_text(&buf, sb.sb, print_layout, fields);
-	}
+	bch2_sb_to_text_with_names(&buf, sb.sb, print_layout, fields, field_only);
 	printf("%s", buf.buf);
 
 	bch2_free_super(&sb);

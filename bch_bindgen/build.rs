@@ -85,6 +85,7 @@ fn main() {
         .opaque_type("gc_stripe")
         .opaque_type("open_bucket.*")
         .opaque_type("replicas_delta_list")
+        .allowlist_type("sb_names")
         .no_copy("btree_trans")
         .no_copy("printbuf")
         .no_partialeq("bkey")

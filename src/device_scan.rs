@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CStr, CString, c_char},
+    ffi::{CStr, CString, c_char, c_int},
     collections::HashMap,
     env,
     path::{Path, PathBuf},
@@ -7,7 +7,12 @@ use std::{
 };
 
 use anyhow::Result;
-use bch_bindgen::{bcachefs, bcachefs::bch_sb_handle, opt_set};
+use bch_bindgen::{bcachefs, opt_set};
+use bcachefs::{
+    bch_sb_handle,
+    sb_name,
+    sb_names,
+};
 use bcachefs::bch_opts;
 use uuid::Uuid;
 use log::debug;
@@ -186,12 +191,38 @@ pub fn scan_devices(device: &String, opts: &bch_opts) -> Result<String> {
 }
 
 #[no_mangle]
+pub extern "C" fn bch2_scan_device_sbs(device: *const c_char, ret: *mut sb_names) -> c_int {
+    let device = unsafe { CStr::from_ptr(device) };
+    let device = device.to_str().unwrap().to_string();
+
+    // how to initialize to default/empty?
+    let opts = bch_bindgen::opts::parse_mount_opts(None, None, true).unwrap_or_default();
+
+    let sbs = scan_sbs(&device, &opts).unwrap();
+
+    let mut sbs = sbs.iter()
+        .map(|(name, sb)| sb_name {
+            name: CString::new(name.clone().into_os_string().into_string().unwrap()).unwrap().into_raw(),
+            sb: *sb } )
+        .collect::<Vec<sb_name>>();
+
+    unsafe {
+        (*ret).data   = sbs.as_mut_ptr();
+        (*ret).nr     = sbs.len();
+        (*ret).size   = sbs.capacity();
+
+        std::mem::forget(sbs);
+    }
+    0
+}
+
+#[no_mangle]
 pub extern "C" fn bch2_scan_devices(device: *const c_char) -> *mut c_char {
     let device = unsafe { CStr::from_ptr(device) };
     let device = device.to_str().unwrap().to_string();
 
-    let opts = bch_bindgen::opts::parse_mount_opts(None, None, true)
-        .unwrap_or_default();
+    // how to initialize to default/empty?
+    let opts = bch_bindgen::opts::parse_mount_opts(None, None, true).unwrap_or_default();
 
     CString::new(scan_devices(&device, &opts).unwrap()).unwrap().into_raw()
 }
