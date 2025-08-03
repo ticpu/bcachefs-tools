@@ -18,96 +18,48 @@
 
 #include "libbcachefs/darray.h"
 
-static void __dev_usage_type_to_text(struct printbuf *out,
-				     enum bch_data_type type,
-				     unsigned bucket_size,
-				     u64 buckets, u64 sectors, u64 frag)
-{
-	bch2_prt_data_type(out, type);
-	prt_char(out, ':');
-	prt_tab(out);
-
-	prt_units_u64(out, sectors << 9);
-	prt_tab_rjust(out);
-
-	prt_printf(out, "%llu", buckets);
-	prt_tab_rjust(out);
-
-	if (frag) {
-		prt_units_u64(out, frag << 9);
-		prt_tab_rjust(out);
-	}
-	prt_newline(out);
-}
-
-static void dev_usage_type_to_text(struct printbuf *out,
-				   struct bch_ioctl_dev_usage_v2 *u,
-				   enum bch_data_type type)
-{
-	u64 sectors = 0;
-	switch (type) {
-	case BCH_DATA_free:
-	case BCH_DATA_need_discard:
-	case BCH_DATA_need_gc_gens:
-		/* sectors are 0 for these types so calculate sectors for them */
-		sectors = u->d[type].buckets * u->bucket_size;
-		break;
-	default:
-		sectors = u->d[type].sectors;
-	}
-
-	__dev_usage_type_to_text(out, type,
-			u->bucket_size,
-			u->d[type].buckets,
-			sectors,
-			u->d[type].fragmented);
-}
-
 static void dev_usage_to_text(struct printbuf *out,
 			      struct bchfs_handle fs,
 			      struct dev_name *d)
 {
 	struct bch_ioctl_dev_usage_v2 *u = bchu_dev_usage(fs, d->idx);
 
-	prt_newline(out);
-	prt_printf(out, "%s (device %u):", d->label ?: "(no label)", d->idx);
-	prt_tab(out);
-	prt_str(out, d->dev ?: "(device not found)");
-	prt_tab_rjust(out);
-
-	prt_str(out, bch2_member_states[u->state]);
-	prt_tab_rjust(out);
-
-	prt_newline(out);
+	prt_printf(out, "\n%s (device %u):\t%s\r%s\r\n",
+		   d->label ?: "(no label)", d->idx,
+		   d->dev ?: "(device not found)",
+		   bch2_member_states[u->state]);
 
 	printbuf_indent_add(out, 2);
-	prt_tab(out);
+	prt_printf(out, "\tdata\rbuckets\rfragmented\r\n");
 
-	prt_str(out, "data");
-	prt_tab_rjust(out);
+	for (unsigned type = 0; type < u->nr_data_types; type++) {
+		bch2_prt_data_type(out, type);
+		prt_printf(out, ":\t");
 
-	prt_str(out, "buckets");
-	prt_tab_rjust(out);
+		/* sectors are 0 for empty bucket data types, so calculate sectors for them */
+		u64 sectors = data_type_is_empty(type)
+			? u->d[type].buckets * u->bucket_size
+			: u->d[type].sectors;
+		prt_units_u64(out, sectors << 9);
 
-	prt_str(out, "fragmented");
-	prt_tab_rjust(out);
+		prt_printf(out, "\r%llu\r", u->d[type].buckets);
 
-	prt_newline(out);
+		u64 fragmented = u->d[type].buckets * u->bucket_size - sectors;
+		if (fragmented)
+			prt_units_u64(out, fragmented << 9);
+		prt_printf(out, "\r\n");
+	}
 
-	for (unsigned i = 0; i < u->nr_data_types; i++)
-		dev_usage_type_to_text(out, u, i);
-
-	prt_str(out, "capacity:");
-	prt_tab(out);
-
+	prt_printf(out, "capacity:\t");
 	prt_units_u64(out, (u->nr_buckets * u->bucket_size) << 9);
-	prt_tab_rjust(out);
-	prt_printf(out, "%llu", u->nr_buckets);
-	prt_tab_rjust(out);
+	prt_printf(out, "\r%llu\r\n", u->nr_buckets);
+
+	prt_printf(out, "bucket size:\t");
+	prt_units_u64(out, u->bucket_size << 9);
+	prt_printf(out, "\r\n");
 
 	printbuf_indent_sub(out, 2);
 
-	prt_newline(out);
 	free(u);
 }
 
@@ -150,14 +102,9 @@ static void persistent_reserved_to_text(struct printbuf *out,
 	if (!sectors)
 		return;
 
-	prt_str(out, "reserved:");
-	prt_tab(out);
-	prt_printf(out, "%u/%u ", 1, nr_replicas);
-	prt_tab(out);
-	prt_str(out, "[] ");
+	prt_printf(out, "reserved:\t%u/%u\t[] ", 1, nr_replicas);
 	prt_units_u64(out, sectors << 9);
-	prt_tab_rjust(out);
-	prt_newline(out);
+	prt_printf(out, "\r\n");
 }
 
 static void replicas_usage_to_text(struct printbuf *out,
@@ -190,21 +137,12 @@ static void replicas_usage_to_text(struct printbuf *out,
 	*d++ = '\0';
 
 	bch2_prt_data_type(out, r->data_type);
-	prt_char(out, ':');
-	prt_tab(out);
-
-	prt_printf(out, "%u/%u ", r->nr_required, r->nr_devs);
-	prt_tab(out);
-
-	prt_printf(out, "%u ", durability);
-	prt_tab(out);
-
-	prt_printf(out, "%s ", devs);
-	prt_tab(out);
+	prt_printf(out, ":\t%u/%u\t%u\t%s\t",
+		   r->nr_required, r->nr_devs,
+		   durability, devs);
 
 	prt_units_u64(out, sectors << 9);
-	prt_tab_rjust(out);
-	prt_newline(out);
+	prt_printf(out, "\r\n");
 }
 
 #define for_each_usage_replica(_u, _r)					\
@@ -277,45 +215,29 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 	printbuf_tabstop_push(out, 20);
 	printbuf_tabstop_push(out, 16);
 
-	prt_str(out, "Size:");
-	prt_tab(out);
+	prt_printf(out, "Size:\t");
 	prt_units_u64(out, a->capacity << 9);
-	prt_tab_rjust(out);
-	prt_newline(out);
+	prt_printf(out, "\r\n");
 
-	prt_str(out, "Used:");
-	prt_tab(out);
+	prt_printf(out, "Used:\t");
 	prt_units_u64(out, a->used << 9);
-	prt_tab_rjust(out);
-	prt_newline(out);
+	prt_printf(out, "\r\n");
 
-	prt_str(out, "Online reserved:");
-	prt_tab(out);
+	prt_printf(out, "Online reserved:\t");
 	prt_units_u64(out, a->online_reserved << 9);
-	prt_tab_rjust(out);
-	prt_newline(out);
+	prt_printf(out, "\r\n");
 
 	prt_newline(out);
 
 	printbuf_tabstops_reset(out);
 
 	printbuf_tabstop_push(out, 16);
-	prt_str(out, "Data type");
-	prt_tab(out);
-
 	printbuf_tabstop_push(out, 16);
-	prt_str(out, "Required/total");
-	prt_tab(out);
-
 	printbuf_tabstop_push(out, 14);
-	prt_str(out, "Durability");
-	prt_tab(out);
-
 	printbuf_tabstop_push(out, 14);
-	prt_str(out, "Devices");
-	prt_newline(out);
-
 	printbuf_tabstop_push(out, 14);
+
+	prt_printf(out, "Data type\tRequired/total\tDurability\tDevices\n");
 
 	unsigned prev_type = 0;
 
@@ -364,8 +286,7 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 			prt_units_u64(out, nr_extents
 					       ? div_u64(sectors_uncompressed << 9, nr_extents)
 					       : 0);
-			prt_tab_rjust(out);
-			prt_newline(out);
+			prt_printf(out, "\r\n");
 			break;
 		case BCH_DISK_ACCOUNTING_btree:
 			if (new_type) {
@@ -376,8 +297,7 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 			}
 			prt_printf(out, "%s:\t", bch2_btree_id_str(acc_k.btree.id));
 			prt_units_u64(out, a->v.d[0] << 9);
-			prt_tab_rjust(out);
-			prt_newline(out);
+			prt_printf(out, "\r\n");
 			break;
 		case BCH_DISK_ACCOUNTING_rebalance_work:
 			if (new_type)
@@ -410,20 +330,17 @@ static void fs_usage_v0_to_text(struct printbuf *out,
 	prt_str(out, "Size:");
 	prt_tab(out);
 	prt_units_u64(out, u->capacity << 9);
-	prt_tab_rjust(out);
-	prt_newline(out);
+	prt_printf(out, "\r\n");
 
 	prt_str(out, "Used:");
 	prt_tab(out);
 	prt_units_u64(out, u->used << 9);
-	prt_tab_rjust(out);
-	prt_newline(out);
+	prt_printf(out, "\r\n");
 
 	prt_str(out, "Online reserved:");
 	prt_tab(out);
 	prt_units_u64(out, u->online_reserved << 9);
-	prt_tab_rjust(out);
-	prt_newline(out);
+	prt_printf(out, "\r\n");
 
 	prt_newline(out);
 
