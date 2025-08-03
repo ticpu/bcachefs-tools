@@ -1054,16 +1054,19 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 
 	bch2_print_str(c, KERN_INFO, p.buf);
 
-	if (!(c->sb.features & (1ULL << BCH_FEATURE_new_extent_overwrite))) {
-		bch_err(c, "feature new_extent_overwrite not set, filesystem no longer supported");
-		return -EINVAL;
+	if (BCH_SB_INITIALIZED(c->disk_sb.sb)) {
+		if (!(c->sb.features & (1ULL << BCH_FEATURE_new_extent_overwrite))) {
+			bch_err(c, "feature new_extent_overwrite not set, filesystem no longer supported");
+			return -EINVAL;
+		}
+
+		if (!c->sb.clean &&
+		    !(c->sb.features & (1ULL << BCH_FEATURE_extents_above_btree_updates))) {
+			bch_err(c, "filesystem needs recovery from older version; run fsck from older bcachefs-tools to fix");
+			return -EINVAL;
+		}
 	}
 
-	if (!c->sb.clean &&
-	    !(c->sb.features & (1ULL << BCH_FEATURE_extents_above_btree_updates))) {
-		bch_err(c, "filesystem needs recovery from older version; run fsck from older bcachefs-tools to fix");
-		return -EINVAL;
-	}
 	return 0;
 }
 

@@ -51,6 +51,7 @@ pub enum BkeyValC<'a> {
     logged_op_finsert(&'a c::bch_logged_op_finsert),
     accounting(&'a c::bch_accounting),
     inode_alloc_cursor(&'a c::bch_inode_alloc_cursor),
+    extent_whiteout,
 }
 
 impl<'a, 'b> BkeySC<'a> {
@@ -109,6 +110,7 @@ impl<'a, 'b> BkeySC<'a> {
                 KEY_TYPE_logged_op_finsert => logged_op_finsert(transmute(self.v)),
                 KEY_TYPE_accounting => accounting(transmute(self.v)),
                 KEY_TYPE_inode_alloc_cursor => inode_alloc_cursor(transmute(self.v)),
+                KEY_TYPE_extent_whiteout => extent_whiteout,
                 KEY_TYPE_MAX => unreachable!(),
             }
         }
