@@ -268,7 +268,7 @@ restart:
 		rht_for_each_entry_rcu_from(inode, he, rht_ptr_rcu(bkt), tbl, hash, hash) {
 			if (inode->ei_inum.inum == inum) {
 				ret = darray_push_gfp(&subvols, inode->ei_inum.subvol,
-						      GFP_NOWAIT|__GFP_NOWARN);
+						      GFP_NOWAIT);
 				if (ret) {
 					rcu_read_unlock();
 					ret = darray_make_room(&subvols, 1);
@@ -825,14 +825,6 @@ int __bch2_unlink(struct inode *vdir, struct dentry *dentry,
 				      ATTR_MTIME|ATTR_CTIME|ATTR_SIZE);
 	bch2_inode_update_after_write(trans, inode, &inode_u,
 				      ATTR_MTIME);
-
-	if (inode_u.bi_subvol) {
-		/*
-		 * Subvolume deletion is asynchronous, but we still want to tell
-		 * the VFS that it's been deleted here:
-		 */
-		set_nlink(&inode->v, 0);
-	}
 
 	if (IS_CASEFOLDED(vdir))
 		d_invalidate(dentry);
