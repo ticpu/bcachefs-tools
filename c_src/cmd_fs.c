@@ -18,47 +18,84 @@
 
 #include "libbcachefs/darray.h"
 
+#define FS_USAGE_FIELDS()		\
+	x(replicas)			\
+	x(btree)			\
+	x(compression)			\
+	x(rebalance_work)		\
+	x(devices)
+
+enum __fs_usage_fields {
+#define x(n)		__FS_USAGE_##n,
+	FS_USAGE_FIELDS()
+#undef x
+};
+
+enum fs_usage_fields {
+#define x(n)		FS_USAGE_##n = BIT(__FS_USAGE_##n),
+	FS_USAGE_FIELDS()
+#undef x
+};
+
+const char * const fs_usage_field_strs[] = {
+#define x(n)		[__FS_USAGE_##n] = #n,
+	FS_USAGE_FIELDS()
+#undef x
+	NULL
+};
+
 static void dev_usage_to_text(struct printbuf *out,
 			      struct bchfs_handle fs,
-			      struct dev_name *d)
+			      struct dev_name *d,
+			      bool full)
 {
 	struct bch_ioctl_dev_usage_v2 *u = bchu_dev_usage(fs, d->idx);
 
-	prt_printf(out, "\n%s (device %u):\t%s\r%s\r\n",
-		   d->label ?: "(no label)", d->idx,
-		   d->dev ?: "(device not found)",
-		   bch2_member_states[u->state]);
-
-	printbuf_indent_add(out, 2);
-	prt_printf(out, "\tdata\rbuckets\rfragmented\r\n");
-
+	u64 used = 0, capacity = u->nr_buckets * u->bucket_size;
 	for (unsigned type = 0; type < u->nr_data_types; type++) {
-		bch2_prt_data_type(out, type);
-		prt_printf(out, ":\t");
-
-		/* sectors are 0 for empty bucket data types, so calculate sectors for them */
-		u64 sectors = data_type_is_empty(type)
-			? u->d[type].buckets * u->bucket_size
-			: u->d[type].sectors;
-		prt_units_u64(out, sectors << 9);
-
-		prt_printf(out, "\r%llu\r", u->d[type].buckets);
-
-		u64 fragmented = u->d[type].buckets * u->bucket_size - sectors;
-		if (fragmented)
-			prt_units_u64(out, fragmented << 9);
-		prt_printf(out, "\r\n");
+		if (!data_type_is_empty(type))
+			used += u->d[type].sectors;
 	}
 
-	prt_printf(out, "capacity:\t");
-	prt_units_u64(out, (u->nr_buckets * u->bucket_size) << 9);
-	prt_printf(out, "\r%llu\r\n", u->nr_buckets);
+	prt_printf(out, "%s (device %u):\t%s\r%s\r    %02u%%\n",
+		   d->label ?: "(no label)", d->idx,
+		   d->dev ?: "(device not found)",
+		   bch2_member_states[u->state],
+		   (unsigned) (used * 100 / capacity));
 
-	prt_printf(out, "bucket size:\t");
-	prt_units_u64(out, u->bucket_size << 9);
-	prt_printf(out, "\r\n");
+	if (full) {
+		printbuf_indent_add(out, 2);
+		prt_printf(out, "\tdata\rbuckets\rfragmented\r\n");
 
-	printbuf_indent_sub(out, 2);
+		for (unsigned type = 0; type < u->nr_data_types; type++) {
+			bch2_prt_data_type(out, type);
+			prt_printf(out, ":\t");
+
+			/* sectors are 0 for empty bucket data types, so calculate sectors for them */
+			u64 sectors = data_type_is_empty(type)
+				? u->d[type].buckets * u->bucket_size
+				: u->d[type].sectors;
+			prt_units_u64(out, sectors << 9);
+
+			prt_printf(out, "\r%llu\r", u->d[type].buckets);
+
+			u64 fragmented = u->d[type].buckets * u->bucket_size - sectors;
+			if (fragmented)
+				prt_units_u64(out, fragmented << 9);
+			prt_printf(out, "\r\n");
+		}
+
+		prt_printf(out, "capacity:\t");
+		prt_units_u64(out, (u->nr_buckets * u->bucket_size) << 9);
+		prt_printf(out, "\r%llu\r\n", u->nr_buckets);
+
+		prt_printf(out, "bucket size:\t");
+		prt_units_u64(out, u->bucket_size << 9);
+		prt_printf(out, "\r\n");
+
+		printbuf_indent_sub(out, 2);
+		prt_newline(out);
+	}
 
 	free(u);
 }
@@ -76,19 +113,21 @@ static int dev_by_label_cmp(const void *_l, const void *_r)
 
 static void devs_usage_to_text(struct printbuf *out,
 			       struct bchfs_handle fs,
-			       dev_names dev_names)
+			       dev_names dev_names,
+			       bool full)
 {
 	sort(dev_names.data, dev_names.nr,
 	     sizeof(dev_names.data[0]), dev_by_label_cmp, NULL);
 
 	printbuf_tabstops_reset(out);
+	prt_newline(out);
 	printbuf_tabstop_push(out, 16);
 	printbuf_tabstop_push(out, 20);
 	printbuf_tabstop_push(out, 16);
 	printbuf_tabstop_push(out, 14);
 
 	darray_for_each(dev_names, dev)
-		dev_usage_to_text(out, fs, dev);
+		dev_usage_to_text(out, fs, dev, full);
 
 	darray_for_each(dev_names, dev) {
 		free(dev->dev);
@@ -189,15 +228,27 @@ static void accounting_swab_if_old(struct bch_ioctl_query_accounting *in)
 
 static int fs_usage_v1_to_text(struct printbuf *out,
 			       struct bchfs_handle fs,
-			       dev_names dev_names)
+			       dev_names dev_names,
+			       enum fs_usage_fields fields)
 {
-	struct bch_ioctl_query_accounting *a =
-		bchu_fs_accounting(fs,
-			BIT(BCH_DISK_ACCOUNTING_persistent_reserved)|
+	unsigned accounting_types = 0;
+
+	if (fields & FS_USAGE_replicas)
+		accounting_types |=
 			BIT(BCH_DISK_ACCOUNTING_replicas)|
-			BIT(BCH_DISK_ACCOUNTING_compression)|
-			BIT(BCH_DISK_ACCOUNTING_btree)|
-			BIT(BCH_DISK_ACCOUNTING_rebalance_work));
+			BIT(BCH_DISK_ACCOUNTING_persistent_reserved);
+
+	if (fields & FS_USAGE_compression)
+		accounting_types |= BIT(BCH_DISK_ACCOUNTING_compression);
+
+	if (fields & FS_USAGE_btree)
+		accounting_types |= BIT(BCH_DISK_ACCOUNTING_btree);
+
+	if (fields & FS_USAGE_rebalance_work)
+		accounting_types |= BIT(BCH_DISK_ACCOUNTING_rebalance_work);
+
+	struct bch_ioctl_query_accounting *a =
+		bchu_fs_accounting(fs, accounting_types);
 	if (!a)
 		return -1;
 
@@ -227,17 +278,15 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 	prt_units_u64(out, a->online_reserved << 9);
 	prt_printf(out, "\r\n");
 
-	prt_newline(out);
-
-	printbuf_tabstops_reset(out);
-
-	printbuf_tabstop_push(out, 16);
-	printbuf_tabstop_push(out, 16);
-	printbuf_tabstop_push(out, 14);
-	printbuf_tabstop_push(out, 14);
-	printbuf_tabstop_push(out, 14);
-
-	prt_printf(out, "Data type\tRequired/total\tDurability\tDevices\n");
+	if (fields & FS_USAGE_replicas) {
+		printbuf_tabstops_reset(out);
+		printbuf_tabstop_push(out, 16);
+		printbuf_tabstop_push(out, 16);
+		printbuf_tabstop_push(out, 14);
+		printbuf_tabstop_push(out, 14);
+		printbuf_tabstop_push(out, 14);
+		prt_printf(out, "\nData type\tRequired/total\tDurability\tDevices\n");
+	}
 
 	unsigned prev_type = 0;
 
@@ -315,7 +364,8 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 
 static void fs_usage_v0_to_text(struct printbuf *out,
 				struct bchfs_handle fs,
-				dev_names dev_names)
+				dev_names dev_names,
+				enum fs_usage_fields fields)
 {
 	struct bch_ioctl_fs_usage *u = bchu_fs_usage(fs);
 
@@ -390,35 +440,23 @@ static void fs_usage_v0_to_text(struct printbuf *out,
 	free(u);
 }
 
-static void fs_usage_to_text(struct printbuf *out, const char *path)
+static void fs_usage_to_text(struct printbuf *out, const char *path,
+			     enum fs_usage_fields fields)
 {
 	struct bchfs_handle fs = bcache_fs_open(path);
 
 	dev_names dev_names = bchu_fs_get_devices(fs);
 
-	if (!fs_usage_v1_to_text(out, fs, dev_names))
+	if (!fs_usage_v1_to_text(out, fs, dev_names, fields))
 		goto devs;
 
-	fs_usage_v0_to_text(out, fs, dev_names);
+	fs_usage_v0_to_text(out, fs, dev_names, fields);
 devs:
-	devs_usage_to_text(out, fs, dev_names);
+	devs_usage_to_text(out, fs, dev_names, fields & FS_USAGE_devices);
 
 	darray_exit(&dev_names);
 
 	bcache_fs_close(fs);
-}
-
-int fs_usage(void)
-{
-	puts("bcachefs fs - manage a running filesystem\n"
-	     "Usage: bcachefs fs <CMD> [OPTIONS]\n"
-	     "\n"
-	     "Commands:\n"
-	     "  usage                   Display detailed filesystem usage\n"
-	     "  top                     Show runtime performance information\n"
-	     "\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	return 0;
 }
 
 static void fs_usage_usage(void)
@@ -427,6 +465,9 @@ static void fs_usage_usage(void)
 	     "Usage: bcachefs fs usage [OPTION]... <mountpoint>\n"
 	     "\n"
 	     "Options:\n"
+	     "  -f, --fields=FIELDS               List of accounting sections to print\n"
+	     "                                    replicas,btree,compression,rebalance_work,devices"
+	     "  -a                                Print all accounting fields\n"
 	     "  -h, --human-readable              Human readable units\n"
 	     "  -H, --help                        Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
@@ -435,18 +476,26 @@ static void fs_usage_usage(void)
 int cmd_fs_usage(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",		no_argument,		NULL, 'H' },
+		{ "fields",		required_argument,	NULL, 'f' },
+		{ "all",		no_argument,		NULL, 'a' },
 		{ "human-readable",     no_argument,            NULL, 'h' },
+		{ "help",		no_argument,		NULL, 'H' },
 		{ NULL }
 	};
 	bool human_readable = false;
+	unsigned fields = 0;
 	struct printbuf buf = PRINTBUF;
 	char *fs;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "h",
+	while ((opt = getopt_long(argc, argv, "f:ahH",
 				  longopts, NULL)) != -1)
 		switch (opt) {
+		case 'f':
+			fields |= read_flag_list_or_die(optarg, fs_usage_field_strs, "fields");
+			break;
+		case 'a':
+			fields = ~0;
 		case 'h':
 			human_readable = true;
 			break;
@@ -462,18 +511,31 @@ int cmd_fs_usage(int argc, char *argv[])
 	if (!argc) {
 		printbuf_reset(&buf);
 		buf.human_readable_units = human_readable;
-		fs_usage_to_text(&buf, ".");
+		fs_usage_to_text(&buf, ".", fields);
 		printf("%s", buf.buf);
 	} else {
 		while ((fs = arg_pop())) {
 			printbuf_reset(&buf);
 			buf.human_readable_units = human_readable;
-			fs_usage_to_text(&buf, fs);
+			fs_usage_to_text(&buf, fs, fields);
 			printf("%s", buf.buf);
 		}
 	}
 
 	printbuf_exit(&buf);
+	return 0;
+}
+
+int fs_usage(void)
+{
+	puts("bcachefs fs - manage a running filesystem\n"
+	     "Usage: bcachefs fs <CMD> [OPTIONS]\n"
+	     "\n"
+	     "Commands:\n"
+	     "  usage                   Display detailed filesystem usage\n"
+	     "  top                     Show runtime performance information\n"
+	     "\n"
+	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	return 0;
 }
 
