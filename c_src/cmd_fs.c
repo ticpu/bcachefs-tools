@@ -52,10 +52,9 @@ static void dev_usage_to_text(struct printbuf *out,
 	struct bch_ioctl_dev_usage_v2 *u = bchu_dev_usage(fs, d->idx);
 
 	u64 used = 0, capacity = u->nr_buckets * u->bucket_size;
-	for (unsigned type = 0; type < u->nr_data_types; type++) {
-		if (!data_type_is_empty(type))
+	for (unsigned type = 0; type < u->nr_data_types; type++)
+		if (type != BCH_DATA_unstriped)
 			used += u->d[type].sectors;
-	}
 
 	prt_printf(out, "%s (device %u):\t%s\r%s\r    %02u%%\n",
 		   d->label ?: "(no label)", d->idx,
