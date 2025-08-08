@@ -159,6 +159,7 @@ int cmd_show_super(int argc, char *argv[])
 
 	opt_set(opts, noexcl,	true);
 	opt_set(opts, nochanges, true);
+	opt_set(opts, no_version_check, true);
 
 	struct bch_sb_handle sb;
 	int ret = bch2_read_super(dev, &opts, &sb);

@@ -19,6 +19,7 @@ use log::debug;
 
 fn read_super_silent(path: impl AsRef<Path>, mut opts: bch_opts) -> anyhow::Result<bch_sb_handle> {
     opt_set!(opts, noexcl, 1);
+    opt_set!(opts, no_version_check, 1);
 
     bch_bindgen::sb_io::read_super_silent(path.as_ref(), opts)
 }
