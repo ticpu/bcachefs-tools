@@ -212,7 +212,8 @@ static void probe_one_super(int dev_fd, unsigned sb_size, u64 offset,
 	xpread(dev_fd, sb_buf.data, sb_buf.size, offset);
 
 	struct printbuf err = PRINTBUF;
-	int ret = bch2_sb_validate((void *) sb_buf.data, offset >> 9, 0, &err);
+	struct bch_opts opts = bch2_opts_empty();
+	int ret = bch2_sb_validate((void *) sb_buf.data, &opts, offset >> 9, 0, &err);
 	printbuf_exit(&err);
 
 	if (!ret) {
@@ -254,7 +255,8 @@ static void probe_sb_range(int dev_fd, u64 start_offset, u64 end_offset,
 			continue;
 		}
 		struct printbuf err = PRINTBUF;
-		int ret = bch2_sb_validate(sb, (start_offset + offset) >> 9, 0, &err);
+		struct bch_opts opts = bch2_opts_empty();
+		int ret = bch2_sb_validate(sb, &opts, (start_offset + offset) >> 9, 0, &err);
 		if (ret)
 			fprintf(stderr, "found sb %llu that failed to validate: %s\n",
 				start_offset + offset, err.buf);

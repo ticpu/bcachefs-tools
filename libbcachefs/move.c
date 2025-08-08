@@ -150,7 +150,7 @@ static void move_write_done(struct bch_write_op *op)
 			bch2_write_op_to_text(&buf, op);
 			trace_io_move_write_fail(c, buf.buf);
 		}
-		this_cpu_inc(c->counters[BCH_COUNTER_io_move_write_fail]);
+		count_event(c, io_move_write_fail);
 
 		ctxt->write_error = true;
 	}
@@ -819,7 +819,9 @@ static int bch2_move_data(struct bch_fs *c,
 
 		unsigned min_depth_this_btree = min_depth;
 
-		if (!btree_type_has_ptrs(id))
+		/* Stripe keys have pointers, but are handled separately */
+		if (!btree_type_has_ptrs(id) ||
+		    id == BTREE_ID_stripes)
 			min_depth_this_btree = max(min_depth_this_btree, 1);
 
 		for (unsigned level = min_depth_this_btree;

@@ -444,8 +444,9 @@ static int do_rebalance_extent(struct moving_context *ctxt,
 
 	bch2_bkey_buf_init(&sk);
 
-	ret = bkey_err(k = next_rebalance_extent(trans, work_pos,
-				extent_iter, &io_opts, &data_opts));
+	ret = lockrestart_do(trans,
+		bkey_err(k = next_rebalance_extent(trans, work_pos,
+				extent_iter, &io_opts, &data_opts)));
 	if (ret || !k.k)
 		goto out;
 
@@ -587,7 +588,7 @@ static int do_rebalance(struct moving_context *ctxt)
 		ret = k->k.type == KEY_TYPE_cookie
 			? do_rebalance_scan(ctxt, k->k.p.inode,
 					    le64_to_cpu(bkey_i_to_cookie(k)->v.cookie))
-			: lockrestart_do(trans, do_rebalance_extent(ctxt, k->k.p, &extent_iter));
+			: do_rebalance_extent(ctxt, k->k.p, &extent_iter);
 		if (ret)
 			break;
 	}

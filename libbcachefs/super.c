@@ -1021,6 +1021,12 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 			prt_bitflags(&p, bch2_recovery_passes, sb_passes);
 		}
 
+		u64 btrees_lost_data = le64_to_cpu(ext->btrees_lost_data);
+		if (btrees_lost_data) {
+			prt_str(&p, "\nsuperblock indicates damage to following btrees:\n  ");
+			prt_bitflags(&p, __bch2_btree_ids, btrees_lost_data);
+		}
+
 		if (bch2_check_version_downgrade(c)) {
 			prt_str(&p, "\nVersion downgrade required:");
 
@@ -2540,11 +2546,6 @@ struct bch_fs *bch2_fs_open(darray_const_str *devices,
 			goto err;
 
 		BUG_ON(darray_push(&sbs, sb));
-	}
-
-	if (opts->nochanges && !opts->read_only) {
-		ret = bch_err_throw(c, erofs_nochanges);
-		goto err_print;
 	}
 
 	darray_for_each(sbs, sb)

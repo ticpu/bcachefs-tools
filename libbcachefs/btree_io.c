@@ -131,10 +131,10 @@ static void *btree_bounce_alloc(struct bch_fs *c, size_t size,
 	BUG_ON(size > c->opts.btree_node_size);
 
 	*used_mempool = false;
-	p = kvmalloc(size, GFP_NOWAIT);
+	p = kvmalloc(size, GFP_NOWAIT|__GFP_ACCOUNT|__GFP_RECLAIMABLE);
 	if (!p) {
 		*used_mempool = true;
-		p = mempool_alloc(&c->btree_bounce_pool, GFP_NOFS);
+		p = mempool_alloc(&c->btree_bounce_pool, GFP_NOFS|__GFP_ACCOUNT|__GFP_RECLAIMABLE);
 	}
 	memalloc_nofs_restore(flags);
 	return p;
@@ -1470,7 +1470,7 @@ start:
 	}
 	prt_newline(&buf);
 
-	if (failed.nr)
+	if (ret || failed.nr)
 		bch2_print_str_ratelimited(c, KERN_ERR, buf.buf);
 
 	async_object_list_del(c, btree_read_bio, rb->list_idx);

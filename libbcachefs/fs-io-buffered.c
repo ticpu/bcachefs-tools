@@ -42,6 +42,14 @@ struct readpages_iter {
 	folios			folios;
 };
 
+static inline void readpages_iter_folio_revert(struct readahead_control *ractl,
+					       struct folio *folio)
+{
+	bch2_folio_release(folio);
+	ractl->_nr_pages += folio_nr_pages(folio);
+	ractl->_index -= folio_nr_pages(folio);
+}
+
 static int readpages_iter_init(struct readpages_iter *iter,
 			       struct readahead_control *ractl)
 {
@@ -52,9 +60,7 @@ static int readpages_iter_init(struct readpages_iter *iter,
 	while ((folio = __readahead_folio(ractl))) {
 		if (!bch2_folio_create(folio, GFP_KERNEL) ||
 		    darray_push(&iter->folios, folio)) {
-			bch2_folio_release(folio);
-			ractl->_nr_pages += folio_nr_pages(folio);
-			ractl->_index -= folio_nr_pages(folio);
+			readpages_iter_folio_revert(ractl, folio);
 			return iter->folios.nr ? 0 : -ENOMEM;
 		}
 
@@ -62,6 +68,15 @@ static int readpages_iter_init(struct readpages_iter *iter,
 	}
 
 	return 0;
+}
+
+static void readpages_iter_exit(struct readpages_iter *iter,
+			        struct readahead_control *ractl)
+{
+	darray_for_each_reverse(iter->folios, folio) {
+		readpages_iter_folio_revert(ractl, *folio);
+		folio_get(*folio);
+	}
 }
 
 static inline struct folio *readpage_iter_peek(struct readpages_iter *iter)
@@ -290,7 +305,10 @@ void bch2_readahead(struct readahead_control *ractl)
 	 * scheduling.
 	 */
 	blk_start_plug(&plug);
-	bch2_pagecache_add_get(inode);
+	if (!bch2_pagecache_add_tryget(inode)) {
+		readpages_iter_exit(&readpages_iter, ractl);
+		goto out;
+	}
 
 	struct btree_trans *trans = bch2_trans_get(c);
 	while ((folio = readpage_iter_peek(&readpages_iter))) {
@@ -317,6 +335,7 @@ void bch2_readahead(struct readahead_control *ractl)
 	bch2_trans_put(trans);
 
 	bch2_pagecache_add_put(inode);
+out:
 	blk_finish_plug(&plug);
 	darray_exit(&readpages_iter.folios);
 }
@@ -759,7 +778,6 @@ int bch2_write_end(struct file *file, struct address_space *mapping,
 	struct bch2_folio_reservation *res = fsdata;
 	unsigned offset = pos - folio_pos(folio);
 
-	lockdep_assert_held(&inode->v.i_rwsem);
 	BUG_ON(offset + copied > folio_size(folio));
 
 	if (unlikely(copied < len && !folio_test_uptodate(folio))) {

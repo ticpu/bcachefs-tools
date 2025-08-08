@@ -22,7 +22,7 @@ enum counters_flags {
 	x(io_read_split,				33,	TYPE_COUNTER)	\
 	x(io_read_reuse_race,				34,	TYPE_COUNTER)	\
 	x(io_read_retry,				32,	TYPE_COUNTER)	\
-	x(io_read_fail_and_poison,			82,	TYPE_COUNTER)	\
+	x(io_read_fail_and_poison,			95,	TYPE_COUNTER)	\
 	x(io_write,					1,	TYPE_SECTORS)	\
 	x(io_move,					2,	TYPE_SECTORS)	\
 	x(io_move_read,					35,	TYPE_SECTORS)	\
@@ -102,6 +102,7 @@ enum counters_flags {
 	x(trans_restart_split_race,			76,	TYPE_COUNTER)	\
 	x(write_buffer_flush_slowpath,			77,	TYPE_COUNTER)	\
 	x(write_buffer_flush_sync,			78,	TYPE_COUNTER)	\
+	x(accounting_key_to_wb_slowpath,		94,	TYPE_COUNTER)	\
 	x(error_throw,					93,	TYPE_COUNTER)
 
 enum bch_persistent_counters {
@@ -122,5 +123,13 @@ struct bch_sb_field_counters {
 	struct bch_sb_field	field;
 	__le64			d[];
 };
+
+static inline void __maybe_unused check_bch_counter_ids_unique(void) {
+	switch(0){
+#define x(t, n, ...) case (n):
+        BCH_PERSISTENT_COUNTERS()
+#undef x
+	}
+}
 
 #endif /* _BCACHEFS_SB_COUNTERS_FORMAT_H */
