@@ -504,6 +504,7 @@ static void image_create_usage(void)
 	     "      --superblock_size=size\n"
 	     "      --bucket_size=size\n"
 	     "      --fs_size=size          Expected size of device image will be used on, hint for bucket size\n"
+	     "      --version=version       Create filesystem with specified on disk format version instead of the latest\n"
 	     "  -f, --force\n"
 	     "  -q, --quiet                 Only print errors\n"
 	     "  -v, --verbose               Verbose filesystem initialization\n"
@@ -521,6 +522,7 @@ static int cmd_image_create(int argc, char *argv[])
 		{ "fs_label",		required_argument,	NULL, 'L' },
 		{ "uuid",		required_argument,	NULL, 'U' },
 		{ "superblock_size",	required_argument,	NULL, 'S' },
+		{ "version",		required_argument,	NULL, 'V' },
 		{ "force",		no_argument,		NULL, 'f' },
 		{ "quiet",		no_argument,		NULL, 'q' },
 		{ "verbose",		no_argument,		NULL, 'v' },
@@ -595,6 +597,9 @@ static int cmd_image_create(int argc, char *argv[])
 			break;
 		case 'v':
 			verbosity++;
+			break;
+		case 'V':
+			opts.version = version_parse(optarg);
 			break;
 		case 'h':
 			image_create_usage();
