@@ -67,6 +67,7 @@ static void format_usage(void)
 	     "  -L, --fs_label=label\n"
 	     "  -U, --uuid=uuid\n"
 	     "      --superblock_size=size\n"
+	     "      --version=version       Create filesystem with specified on disk format version instead of the latest\n"
 	     "      --source=path           Initialize the bcachefs filesystem from this root directory\n"
 	     "\n"
 	     "Device specific options:");
