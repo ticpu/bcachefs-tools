@@ -910,6 +910,8 @@ dev_names bchu_fs_get_devices(struct bchfs_handle fs)
 	struct dirent *d;
 	dev_names devs;
 
+	struct bch_sb *sb = bchu_read_super(fs, -1);
+
 	darray_init(&devs);
 
 	while ((errno = 0), (d = readdir(dir))) {
@@ -940,9 +942,13 @@ dev_names bchu_fs_get_devices(struct bchfs_handle fs)
 		n.durability = read_file_u64(fs.sysfs_fd, durability_attr);
 		free(durability_attr);
 
+		struct bch_member m = bch2_sb_member_get(sb, n.idx);
+		n.state = BCH_MEMBER_STATE(&m);
+
 		darray_push(&devs, n);
 	}
 
+	free(sb);
 	closedir(dir);
 
 	return devs;

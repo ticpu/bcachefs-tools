@@ -313,11 +313,12 @@ static inline void bchu_disk_resize_journal(struct bchfs_handle fs,
 int bchu_data(struct bchfs_handle, struct bch_ioctl_data);
 
 struct dev_name {
-	unsigned	idx;
-	char		*dev;
-	char		*label;
-	uuid_t		uuid;
-	unsigned	durability;
+	unsigned		idx;
+	char			*dev;
+	char			*label;
+	uuid_t			uuid;
+	unsigned		durability;
+	enum bch_member_state	state;
 };
 typedef DARRAY(struct dev_name) dev_names;
 
