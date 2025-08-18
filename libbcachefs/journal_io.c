@@ -222,6 +222,8 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 	 */
 	dup = *_i;
 	if (dup) {
+		BUG_ON(dup->j.seq != j->seq);
+
 		bool identical = bytes == vstruct_bytes(&dup->j) &&
 			!memcmp(j, &dup->j, bytes);
 		bool not_identical = !identical &&
@@ -252,6 +254,7 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 		if (entry_ptr.csum_good && !identical)
 			goto replace;
 
+		BUG_ON(dup->j.seq != j->seq);
 		return ret;
 	}
 replace:

@@ -551,9 +551,10 @@ static int cmd_device_resize(int argc, char *argv[])
 			die("Shrinking not supported yet");
 
 		printf("resizing %s to %llu buckets\n", dev, nbuckets);
-		int ret = bch2_dev_resize(c, resize, nbuckets);
+		CLASS(printbuf, err)();
+		int ret = bch2_dev_resize(c, resize, nbuckets, &err);
 		if (ret)
-			fprintf(stderr, "resize error: %s\n", bch2_err_str(ret));
+			fprintf(stderr, "resize error: %s\n%s", bch2_err_str(ret), err.buf);
 
 		enumerated_ref_put(&resize->io_ref[READ], 0);
 		bch2_fs_stop(c);

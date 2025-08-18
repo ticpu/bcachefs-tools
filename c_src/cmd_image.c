@@ -681,10 +681,13 @@ static int image_update(const char *src_path, const char *dst_image,
 		if (ret)
 			goto err;
 
-		ret = bch2_dev_add(c, dev_opts.path);
-		bch_err_msg(c, ret, "adding metadata device");
-		if (ret)
+		CLASS(printbuf, err)();
+		ret = bch2_dev_add(c, dev_opts.path, &err);
+		if (ret) {
+			bch_err(c, "error adding metadata device: %s\n%s",
+				bch2_err_str(ret), err.buf);
 			goto err;
+		}
 	}
 
 	set_data_allowed_for_image_update(c);

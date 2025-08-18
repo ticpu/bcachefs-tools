@@ -187,6 +187,18 @@ static long bch2_ioctl_stop(struct bch_fs *c)
 }
 #endif
 
+static int copy_ioctl_err_msg(struct bch_ioctl_err_msg *dst, struct printbuf *src, int ret)
+{
+	if (ret) {
+		prt_printf(src, "error=%s", bch2_err_str(ret));
+		ret = copy_to_user_errcode((void __user *)(ulong)dst->msg_ptr,
+					   src->buf,
+					   min(src->pos, dst->msg_len)) ?: ret;
+	}
+
+	return ret;
+}
+
 static long bch2_ioctl_disk_add(struct bch_fs *c, struct bch_ioctl_disk arg)
 {
 	char *path;
@@ -203,11 +215,35 @@ static long bch2_ioctl_disk_add(struct bch_fs *c, struct bch_ioctl_disk arg)
 	if (ret)
 		return ret;
 
-	ret = bch2_dev_add(c, path);
-	if (!IS_ERR(path))
-		kfree(path);
+	CLASS(printbuf, err)();
+	ret = bch2_dev_add(c, path, &err);
+	if (ret)
+		bch_err(c, "%s", err.buf);
 
+	kfree(path);
 	return ret;
+}
+
+static long bch2_ioctl_disk_add_v2(struct bch_fs *c, struct bch_ioctl_disk_v2 arg)
+{
+	char *path = NULL;
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (arg.flags || arg.pad)
+		return -EINVAL;
+
+	path = strndup_user((const char __user *)(unsigned long) arg.dev, PATH_MAX);
+	ret = PTR_ERR_OR_ZERO(path);
+	if (ret)
+		return ret;
+
+	CLASS(printbuf, err)();
+	ret = bch2_dev_add(c, path, &err);
+	kfree(path);
+	return copy_ioctl_err_msg(&arg.err, &err, ret);
 }
 
 static long bch2_ioctl_disk_remove(struct bch_fs *c, struct bch_ioctl_disk arg)
@@ -226,7 +262,32 @@ static long bch2_ioctl_disk_remove(struct bch_fs *c, struct bch_ioctl_disk arg)
 	if (IS_ERR(ca))
 		return PTR_ERR(ca);
 
-	return bch2_dev_remove(c, ca, arg.flags);
+	CLASS(printbuf, err)();
+	int ret = bch2_dev_remove(c, ca, arg.flags, &err);
+	if (ret)
+		bch_err(ca, "%s", err.buf);
+	return ret;
+}
+
+static long bch2_ioctl_disk_remove_v2(struct bch_fs *c, struct bch_ioctl_disk_v2 arg)
+{
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if ((arg.flags & ~(BCH_FORCE_IF_DATA_LOST|
+			   BCH_FORCE_IF_METADATA_LOST|
+			   BCH_FORCE_IF_DEGRADED|
+			   BCH_BY_INDEX)) ||
+	    arg.pad)
+		return -EINVAL;
+
+	struct bch_dev *ca = bch2_device_lookup(c, arg.dev, arg.flags);
+	if (IS_ERR(ca))
+		return PTR_ERR(ca);
+
+	CLASS(printbuf, err)();
+	int ret = bch2_dev_remove(c, ca, arg.flags, &err);
+	return copy_ioctl_err_msg(&arg.err, &err, ret);
 }
 
 static long bch2_ioctl_disk_online(struct bch_fs *c, struct bch_ioctl_disk arg)
@@ -245,9 +306,34 @@ static long bch2_ioctl_disk_online(struct bch_fs *c, struct bch_ioctl_disk arg)
 	if (ret)
 		return ret;
 
-	ret = bch2_dev_online(c, path);
+	CLASS(printbuf, err)();
+	ret = bch2_dev_online(c, path, &err);
+	if (ret)
+		bch_err(c, "%s", err.buf);
 	kfree(path);
 	return ret;
+}
+
+static long bch2_ioctl_disk_online_v2(struct bch_fs *c, struct bch_ioctl_disk_v2 arg)
+{
+	char *path;
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (arg.flags || arg.pad)
+		return -EINVAL;
+
+	path = strndup_user((const char __user *)(unsigned long) arg.dev, PATH_MAX);
+	ret = PTR_ERR_OR_ZERO(path);
+	if (ret)
+		return ret;
+
+	CLASS(printbuf, err)();
+	ret = bch2_dev_online(c, path, &err);
+	kfree(path);
+	return copy_ioctl_err_msg(&arg.err, &err, ret);
 }
 
 static long bch2_ioctl_disk_offline(struct bch_fs *c, struct bch_ioctl_disk arg)
@@ -266,7 +352,32 @@ static long bch2_ioctl_disk_offline(struct bch_fs *c, struct bch_ioctl_disk arg)
 	if (IS_ERR(ca))
 		return PTR_ERR(ca);
 
-	return bch2_dev_offline(c, ca, arg.flags);
+	CLASS(printbuf, err)();
+	int ret = bch2_dev_offline(c, ca, arg.flags, &err);
+	if (ret)
+		bch_err(ca, "%s", err.buf);
+	return ret;
+}
+
+static long bch2_ioctl_disk_offline_v2(struct bch_fs *c, struct bch_ioctl_disk_v2 arg)
+{
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if ((arg.flags & ~(BCH_FORCE_IF_DATA_LOST|
+			   BCH_FORCE_IF_METADATA_LOST|
+			   BCH_FORCE_IF_DEGRADED|
+			   BCH_BY_INDEX)) ||
+	    arg.pad)
+		return -EINVAL;
+
+	CLASS(bch2_device_lookup, ca)(c, arg.dev, arg.flags);
+	if (IS_ERR(ca))
+		return PTR_ERR(ca);
+
+	CLASS(printbuf, err)();
+	int ret = bch2_dev_offline(c, ca, arg.flags, &err);
+	return copy_ioctl_err_msg(&arg.err, &err, ret);
 }
 
 static long bch2_ioctl_disk_set_state(struct bch_fs *c,
@@ -296,6 +407,8 @@ static long bch2_ioctl_disk_set_state(struct bch_fs *c,
 static long bch2_ioctl_disk_set_state_v2(struct bch_fs *c,
 			struct bch_ioctl_disk_set_state_v2 arg)
 {
+	CLASS(printbuf, err)();
+
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
@@ -308,21 +421,15 @@ static long bch2_ioctl_disk_set_state_v2(struct bch_fs *c,
 		return -EINVAL;
 
 	CLASS(bch2_device_lookup, ca)(c, arg.dev, arg.flags);
-	if (IS_ERR(ca))
-		return PTR_ERR(ca);
-
-	CLASS(printbuf, err)();
-	int ret = bch2_dev_set_state(c, ca, arg.new_state, arg.flags, &err);
+	int ret = PTR_ERR_OR_ZERO(ca);
 	if (ret) {
-		if (err.pos > arg.err.msg_len)
-			return -ERANGE;
-
-		prt_printf(&err, "\nerror=%s", bch2_err_str(ret));
-		ret = copy_to_user_errcode((void __user *)(ulong)arg.err.msg_ptr,
-					   err.buf,
-					   err.pos) ?: ret;
+		prt_printf(&err, "device %llu not found\n", arg.dev);
+		goto err;
 	}
-	return ret;
+
+	ret = bch2_dev_set_state(c, ca, arg.new_state, arg.flags, &err);
+err:
+	return copy_ioctl_err_msg(&arg.err, &err, ret);
 }
 
 struct bch_data_ctx {
@@ -653,7 +760,11 @@ static long bch2_ioctl_disk_resize(struct bch_fs *c,
 	if (IS_ERR(ca))
 		return PTR_ERR(ca);
 
-	return bch2_dev_resize(c, ca, arg.nbuckets);
+	CLASS(printbuf, err)();
+	int ret = bch2_dev_resize(c, ca, arg.nbuckets, &err);
+	if (ret)
+		bch_err(ca, "%s", err.buf);
+	return ret;
 }
 
 static long bch2_ioctl_disk_resize_journal(struct bch_fs *c,
@@ -717,12 +828,20 @@ long bch2_fs_ioctl(struct bch_fs *c, unsigned cmd, void __user *arg)
 	switch (cmd) {
 	case BCH_IOCTL_DISK_ADD:
 		BCH_IOCTL(disk_add, struct bch_ioctl_disk);
+	case BCH_IOCTL_DISK_ADD_v2:
+		BCH_IOCTL(disk_add_v2, struct bch_ioctl_disk_v2);
 	case BCH_IOCTL_DISK_REMOVE:
 		BCH_IOCTL(disk_remove, struct bch_ioctl_disk);
+	case BCH_IOCTL_DISK_REMOVE_v2:
+		BCH_IOCTL(disk_remove_v2, struct bch_ioctl_disk_v2);
 	case BCH_IOCTL_DISK_ONLINE:
 		BCH_IOCTL(disk_online, struct bch_ioctl_disk);
+	case BCH_IOCTL_DISK_ONLINE_v2:
+		BCH_IOCTL(disk_online_v2, struct bch_ioctl_disk_v2);
 	case BCH_IOCTL_DISK_OFFLINE:
 		BCH_IOCTL(disk_offline, struct bch_ioctl_disk);
+	case BCH_IOCTL_DISK_OFFLINE_v2:
+		BCH_IOCTL(disk_offline_v2, struct bch_ioctl_disk_v2);
 	case BCH_IOCTL_DISK_SET_STATE:
 		BCH_IOCTL(disk_set_state, struct bch_ioctl_disk_set_state);
 	case BCH_IOCTL_DISK_SET_STATE_v2:
