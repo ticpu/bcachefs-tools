@@ -130,57 +130,56 @@ struct bchfs_handle bchu_fs_open_by_dev(const char *, int *);
 
 int bchu_dev_path_to_idx(struct bchfs_handle, const char *);
 
+#define errmsg_ioctl(_ioctl_fd, _ioctl_nr, _ioctl_arg)			\
+do {									\
+	char err[8192];							\
+	(_ioctl_arg)->err.msg_ptr = (ulong) err;			\
+	(_ioctl_arg)->err.msg_len = sizeof(err);			\
+	int ret = ioctl(_ioctl_fd, _ioctl_nr, _ioctl_arg);		\
+	if (ret < 0)							\
+		die(#_ioctl_nr " error:\n%s", err);			\
+} while (0)
+
 static inline void bchu_disk_add(struct bchfs_handle fs, const char *dev)
 {
-	struct bch_ioctl_disk i = { .dev = (unsigned long) dev, };
+	struct bch_ioctl_disk_v2 i = { .dev = (unsigned long) dev, };
 
-	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_ADD, &i);
+	errmsg_ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_ADD_v2, &i);
 }
 
 static inline void bchu_disk_remove(struct bchfs_handle fs, unsigned dev_idx,
 				    unsigned flags)
 {
-	struct bch_ioctl_disk i = {
-		.flags	= flags|BCH_BY_INDEX,
-		.dev	= dev_idx,
-	};
+	struct bch_ioctl_disk_v2 i = { .flags = flags|BCH_BY_INDEX, .dev = dev_idx, };
 
-	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_REMOVE, &i);
+	errmsg_ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_REMOVE_v2, &i);
 }
 
 static inline void bchu_disk_online(struct bchfs_handle fs, char *dev)
 {
-	struct bch_ioctl_disk i = { .dev = (unsigned long) dev, };
+	struct bch_ioctl_disk_v2 i = { .dev = (unsigned long) dev, };
 
-	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_ONLINE, &i);
+	errmsg_ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_ONLINE_v2, &i);
 }
 
 static inline void bchu_disk_offline(struct bchfs_handle fs, unsigned dev_idx,
 				     unsigned flags)
 {
-	struct bch_ioctl_disk i = {
-		.flags	= flags|BCH_BY_INDEX,
-		.dev	= dev_idx,
-	};
+	struct bch_ioctl_disk_v2 i = { .flags = flags|BCH_BY_INDEX, .dev = dev_idx, };
 
-	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_OFFLINE, &i);
+	errmsg_ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_OFFLINE_v2, &i);
 }
 
 static inline void bchu_disk_set_state(struct bchfs_handle fs, unsigned dev,
 				       unsigned new_state, unsigned flags)
 {
-	char err[8192];
 	struct bch_ioctl_disk_set_state_v2 i = {
 		.flags		= flags|BCH_BY_INDEX,
 		.new_state	= new_state,
 		.dev		= dev,
-		.err.msg_ptr	= (unsigned long)err,
-		.err.msg_len	= sizeof(err),
 	};
 
-	int ret = ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_SET_STATE_v2, &i);
-	if (ret < 0)
-		die("disk_set_state error:\n%s", err);
+	errmsg_ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_SET_STATE_v2, &i);
 }
 
 static inline struct bch_ioctl_fs_usage *bchu_fs_usage(struct bchfs_handle fs)
