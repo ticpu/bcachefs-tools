@@ -181,9 +181,12 @@ void bch2_reconstruct_alloc(struct bch_fs *c)
  */
 static void zero_out_btree_mem_ptr(struct journal_keys *keys)
 {
-	darray_for_each(*keys, i)
-		if (i->k->k.type == KEY_TYPE_btree_ptr_v2)
-			bkey_i_to_btree_ptr_v2(i->k)->v.mem_ptr = 0;
+	struct bch_fs *c = container_of(keys, struct bch_fs, journal_keys);
+	darray_for_each(*keys, i) {
+		struct bkey_i *k = journal_key_k(c, i);
+		if (k->k.type == KEY_TYPE_btree_ptr_v2)
+			bkey_i_to_btree_ptr_v2(k)->v.mem_ptr = 0;
+	}
 }
 
 /* journal replay: */
@@ -201,8 +204,10 @@ static void replay_now_at(struct journal *j, u64 seq)
 static int bch2_journal_replay_accounting_key(struct btree_trans *trans,
 					      struct journal_key *k)
 {
+	struct bch_fs *c = trans->c;
+	struct bkey_i *bk = journal_key_k(c, k);
 	struct btree_iter iter;
-	bch2_trans_node_iter_init(trans, &iter, k->btree_id, k->k->k.p,
+	bch2_trans_node_iter_init(trans, &iter, k->btree_id, bk->k.p,
 				  BTREE_MAX_DEPTH, k->level,
 				  BTREE_ITER_intent);
 	int ret = bch2_btree_iter_traverse(&iter);
@@ -213,14 +218,14 @@ static int bch2_journal_replay_accounting_key(struct btree_trans *trans,
 	struct bkey_s_c old = bch2_btree_path_peek_slot(btree_iter_path(trans, &iter), &u);
 
 	/* Has this delta already been applied to the btree? */
-	if (bversion_cmp(old.k->bversion, k->k->k.bversion) >= 0) {
+	if (bversion_cmp(old.k->bversion, bk->k.bversion) >= 0) {
 		ret = 0;
 		goto out;
 	}
 
-	struct bkey_i *new = k->k;
+	struct bkey_i *new = bk;
 	if (old.k->type == KEY_TYPE_accounting) {
-		new = bch2_bkey_make_mut_noupdate(trans, bkey_i_to_s_c(k->k));
+		new = bch2_bkey_make_mut_noupdate(trans, bkey_i_to_s_c(bk));
 		ret = PTR_ERR_OR_ZERO(new);
 		if (ret)
 			goto out;
@@ -229,7 +234,8 @@ static int bch2_journal_replay_accounting_key(struct btree_trans *trans,
 					   bkey_s_c_to_accounting(old));
 	}
 
-	trans->journal_res.seq = k->journal_seq;
+	if (!k->allocated)
+		trans->journal_res.seq = c->journal_entries_base_seq + k->journal_seq_offset;
 
 	ret = bch2_trans_update(trans, &iter, new, BTREE_TRIGGER_norun);
 out:
@@ -240,6 +246,7 @@ out:
 static int bch2_journal_replay_key(struct btree_trans *trans,
 				   struct journal_key *k)
 {
+	struct bch_fs *c = trans->c;
 	struct btree_iter iter;
 	unsigned iter_flags =
 		BTREE_ITER_intent|
@@ -250,7 +257,8 @@ static int bch2_journal_replay_key(struct btree_trans *trans,
 	if (k->overwritten)
 		return 0;
 
-	trans->journal_res.seq = k->journal_seq;
+	if (!k->allocated)
+		trans->journal_res.seq = c->journal_entries_base_seq + k->journal_seq_offset;
 
 	/*
 	 * BTREE_UPDATE_key_cache_reclaim disables key cache lookup/update to
@@ -265,7 +273,8 @@ static int bch2_journal_replay_key(struct btree_trans *trans,
 	else
 		update_flags |= BTREE_UPDATE_key_cache_reclaim;
 
-	bch2_trans_node_iter_init(trans, &iter, k->btree_id, k->k->k.p,
+	struct bkey_i *bk = journal_key_k(c, k);
+	bch2_trans_node_iter_init(trans, &iter, k->btree_id, bk->k.p,
 				  BTREE_MAX_DEPTH, k->level,
 				  iter_flags);
 	ret = bch2_btree_iter_traverse(&iter);
@@ -274,13 +283,11 @@ static int bch2_journal_replay_key(struct btree_trans *trans,
 
 	struct btree_path *path = btree_iter_path(trans, &iter);
 	if (unlikely(!btree_path_node(path, k->level))) {
-		struct bch_fs *c = trans->c;
-
 		CLASS(printbuf, buf)();
 		prt_str(&buf, "btree=");
 		bch2_btree_id_to_text(&buf, k->btree_id);
 		prt_printf(&buf, " level=%u ", k->level);
-		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(k->k));
+		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(bk));
 
 		if (!(c->recovery.passes_complete & (BIT_ULL(BCH_RECOVERY_PASS_scan_for_btree_nodes)|
 						     BIT_ULL(BCH_RECOVERY_PASS_check_topology)))) {
@@ -297,7 +304,7 @@ static int bch2_journal_replay_key(struct btree_trans *trans,
 		}
 
 		bch2_trans_iter_exit(&iter);
-		bch2_trans_node_iter_init(trans, &iter, k->btree_id, k->k->k.p,
+		bch2_trans_node_iter_init(trans, &iter, k->btree_id, bk->k.p,
 					  BTREE_MAX_DEPTH, 0, iter_flags);
 		ret =   bch2_btree_iter_traverse(&iter) ?:
 			bch2_btree_increase_depth(trans, iter.path, 0) ?:
@@ -309,17 +316,17 @@ static int bch2_journal_replay_key(struct btree_trans *trans,
 	if (k->overwritten)
 		goto out;
 
-	if (k->k->k.type == KEY_TYPE_accounting) {
-		struct bkey_i *n = bch2_trans_subbuf_alloc(trans, &trans->accounting, k->k->k.u64s);
+	if (bk->k.type == KEY_TYPE_accounting) {
+		struct bkey_i *n = bch2_trans_subbuf_alloc(trans, &trans->accounting, bk->k.u64s);
 		ret = PTR_ERR_OR_ZERO(n);
 		if (ret)
 			goto out;
 
-		bkey_copy(n, k->k);
+		bkey_copy(n, bk);
 		goto out;
 	}
 
-	ret = bch2_trans_update(trans, &iter, k->k, update_flags);
+	ret = bch2_trans_update(trans, &iter, bk, update_flags);
 out:
 	bch2_trans_iter_exit(&iter);
 	return ret;
@@ -330,13 +337,9 @@ static int journal_sort_seq_cmp(const void *_l, const void *_r)
 	const struct journal_key *l = *((const struct journal_key **)_l);
 	const struct journal_key *r = *((const struct journal_key **)_r);
 
-	/*
-	 * Map 0 to U64_MAX, so that keys with journal_seq === 0 come last
-	 *
-	 * journal_seq == 0 means that the key comes from early repair, and
-	 * should be inserted last so as to avoid overflowing the journal
-	 */
-	return cmp_int(l->journal_seq - 1, r->journal_seq - 1);
+	return !l->allocated && !r->allocated
+		? cmp_int(l->journal_seq_offset, r->journal_seq_offset)
+		: cmp_int(l->allocated, r->allocated);
 }
 
 DEFINE_DARRAY_NAMED(darray_journal_keys, struct journal_key *)
@@ -368,7 +371,9 @@ int bch2_journal_replay(struct bch_fs *c)
 	 * flush accounting keys until we're done
 	 */
 	darray_for_each(*keys, k) {
-		if (!(k->k->k.type == KEY_TYPE_accounting && !k->allocated))
+		struct bkey_i *bk = journal_key_k(trans->c, k);
+
+		if (!(bk->k.type == KEY_TYPE_accounting && !k->allocated))
 			continue;
 
 		cond_resched();
@@ -411,7 +416,6 @@ int bch2_journal_replay(struct bch_fs *c)
 				  BCH_TRANS_COMMIT_skip_accounting_apply|
 				  (!k->allocated ? BCH_TRANS_COMMIT_no_journal_res : 0),
 			     bch2_journal_replay_key(trans, k));
-		BUG_ON(!ret && !k->overwritten && k->k->k.type != KEY_TYPE_accounting);
 		if (ret) {
 			ret = darray_push(&keys_sorted, k);
 			if (ret)
@@ -433,8 +437,8 @@ int bch2_journal_replay(struct bch_fs *c)
 
 		struct journal_key *k = *kp;
 
-		if (k->journal_seq)
-			replay_now_at(j, k->journal_seq);
+		if (!k->allocated)
+			replay_now_at(j, c->journal_entries_base_seq + k->journal_seq_offset);
 		else
 			replay_now_at(j, j->replay_journal_seq_end);
 

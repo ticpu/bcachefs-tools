@@ -90,7 +90,7 @@ int bch2_set_version_incompat(struct bch_fs *c, enum bcachefs_metadata_version v
 			bch2_version_to_text(&buf, version);
 			prt_str(&buf, " currently not enabled, allowed up to ");
 			bch2_version_to_text(&buf, c->sb.version_incompat_allowed);
-			prt_printf(&buf, "\n  set version_upgrade=incompatible to enable");
+			prt_printf(&buf, "\n  set version_upgrade=incompat to enable");
 
 			bch_notice(c, "%s", buf.buf);
 		}
@@ -1189,13 +1189,13 @@ int bch2_write_super(struct bch_fs *c)
 	nr_wrote = dev_mask_nr(&sb_written);
 
 	can_mount_with_written =
-		bch2_have_enough_devs(c, sb_written, degraded_flags, false);
+		bch2_have_enough_devs(c, sb_written, degraded_flags, NULL);
 
 	for (unsigned i = 0; i < ARRAY_SIZE(sb_written.d); i++)
 		sb_written.d[i] = ~sb_written.d[i];
 
 	can_mount_without_written =
-		bch2_have_enough_devs(c, sb_written, degraded_flags, false);
+		bch2_have_enough_devs(c, sb_written, degraded_flags, NULL);
 
 	/*
 	 * If we would be able to mount _without_ the devices we successfully

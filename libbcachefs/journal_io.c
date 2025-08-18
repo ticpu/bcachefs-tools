@@ -3,6 +3,7 @@
 #include "alloc_background.h"
 #include "alloc_foreground.h"
 #include "btree_io.h"
+#include "btree_journal_iter.h"
 #include "btree_update_interior.h"
 #include "btree_write_buffer.h"
 #include "buckets.h"
@@ -106,11 +107,6 @@ static bool jset_csum_good(struct bch_fs *c, struct jset *j, struct bch_csum *cs
 	return !bch2_crc_cmp(j->csum, *csum);
 }
 
-static inline u32 journal_entry_radix_idx(struct bch_fs *c, u64 seq)
-{
-	return (seq - c->journal_entries_base_seq) & (~0U >> 1);
-}
-
 static void __journal_replay_free(struct bch_fs *c,
 				  struct journal_replay *i)
 {
@@ -193,6 +189,23 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 
 			journal_replay_free(c, i, false);
 		}
+	}
+
+	/* Drop overwrites, log entries if we don't need them: */
+	if (!c->opts.retain_recovery_info &&
+	    !c->opts.journal_rewind) {
+		struct jset_entry *dst = j->start;
+		vstruct_for_each_safe(j, src) {
+			if (src->type == BCH_JSET_ENTRY_log ||
+			    src->type == BCH_JSET_ENTRY_overwrite)
+				continue;
+
+			memcpy(dst, src, vstruct_bytes(src));
+			dst = vstruct_next(dst);
+		}
+
+		j->u64s = cpu_to_le32((u64 *) dst - j->_data);
+		bytes = vstruct_bytes(j);
 	}
 
 	jlist->last_seq = max(jlist->last_seq, last_seq);

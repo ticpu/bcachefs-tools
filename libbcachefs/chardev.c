@@ -287,8 +287,41 @@ static long bch2_ioctl_disk_set_state(struct bch_fs *c,
 	if (IS_ERR(ca))
 		return PTR_ERR(ca);
 
-	int ret = bch2_dev_set_state(c, ca, arg.new_state, arg.flags);
+	CLASS(printbuf, err)();
+	int ret = bch2_dev_set_state(c, ca, arg.new_state, arg.flags, &err);
 	bch_err_msg(ca, ret, "setting device state");
+	return ret;
+}
+
+static long bch2_ioctl_disk_set_state_v2(struct bch_fs *c,
+			struct bch_ioctl_disk_set_state_v2 arg)
+{
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if ((arg.flags & ~(BCH_FORCE_IF_DATA_LOST|
+			   BCH_FORCE_IF_METADATA_LOST|
+			   BCH_FORCE_IF_DEGRADED|
+			   BCH_BY_INDEX)) ||
+	    arg.pad[0] || arg.pad[1] || arg.pad[2] ||
+	    arg.new_state >= BCH_MEMBER_STATE_NR)
+		return -EINVAL;
+
+	CLASS(bch2_device_lookup, ca)(c, arg.dev, arg.flags);
+	if (IS_ERR(ca))
+		return PTR_ERR(ca);
+
+	CLASS(printbuf, err)();
+	int ret = bch2_dev_set_state(c, ca, arg.new_state, arg.flags, &err);
+	if (ret) {
+		if (err.pos > arg.err.msg_len)
+			return -ERANGE;
+
+		prt_printf(&err, "\nerror=%s", bch2_err_str(ret));
+		ret = copy_to_user_errcode((void __user *)(ulong)arg.err.msg_ptr,
+					   err.buf,
+					   err.pos) ?: ret;
+	}
 	return ret;
 }
 
@@ -692,6 +725,8 @@ long bch2_fs_ioctl(struct bch_fs *c, unsigned cmd, void __user *arg)
 		BCH_IOCTL(disk_offline, struct bch_ioctl_disk);
 	case BCH_IOCTL_DISK_SET_STATE:
 		BCH_IOCTL(disk_set_state, struct bch_ioctl_disk_set_state);
+	case BCH_IOCTL_DISK_SET_STATE_v2:
+		BCH_IOCTL(disk_set_state_v2, struct bch_ioctl_disk_set_state_v2);
 	case BCH_IOCTL_DATA:
 		BCH_IOCTL(data, struct bch_ioctl_data);
 	case BCH_IOCTL_DISK_RESIZE:

@@ -532,10 +532,6 @@ static int check_bp_exists(struct btree_trans *trans,
 	struct btree_iter other_extent_iter = {};
 	CLASS(printbuf, buf)();
 
-	if (bpos_lt(bp->k.p, s->bp_start) ||
-	    bpos_gt(bp->k.p, s->bp_end))
-		return 0;
-
 	CLASS(btree_iter, bp_iter)(trans, BTREE_ID_backpointers, bp->k.p, 0);
 	struct bkey_s_c bp_k = bch2_btree_iter_peek_slot(&bp_iter);
 	int ret = bkey_err(bp_k);
@@ -690,6 +686,10 @@ static int check_extent_to_backpointers(struct btree_trans *trans,
 		struct bkey_i_backpointer bp;
 		bch2_extent_ptr_to_bp(c, btree, level, k, p, entry, &bp);
 
+		if (bpos_lt(bp.k.p, s->bp_start) ||
+		    bpos_gt(bp.k.p, s->bp_end))
+			continue;
+
 		int ret = !empty
 			? check_bp_exists(trans, s, &bp, k)
 			: bch2_bucket_backpointer_mod(trans, k, &bp, true);
@@ -809,8 +809,6 @@ static int bch2_check_extents_to_backpointers_pass(struct btree_trans *trans,
 	for (enum btree_id btree_id = 0;
 	     btree_id < btree_id_nr_alive(c);
 	     btree_id++) {
-		/* btree_type_has_ptrs should probably include BTREE_ID_stripes,
-		 * definitely her... */
 		int level, depth = btree_type_has_ptrs(btree_id) ? 0 : 1;
 
 		ret = commit_do(trans, NULL, NULL,
@@ -899,7 +897,7 @@ static int check_bucket_backpointer_mismatch(struct btree_trans *trans, struct b
 
 		struct bkey_s_c_backpointer bp = bkey_s_c_to_backpointer(bp_k);
 
-		if (c->sb.version_upgrade_complete >= bcachefs_metadata_version_backpointer_bucket_gen &&
+		if (c->sb.version_upgrade_complete < bcachefs_metadata_version_backpointer_bucket_gen &&
 		    (bp.v->bucket_gen != a->gen ||
 		     bp.v->pad)) {
 			ret = bch2_backpointer_del(trans, bp_k.k->p);
@@ -931,6 +929,14 @@ static int check_bucket_backpointer_mismatch(struct btree_trans *trans, struct b
 	if (sectors[ALLOC_dirty]  != a->dirty_sectors ||
 	    sectors[ALLOC_cached] != a->cached_sectors ||
 	    sectors[ALLOC_stripe] != a->stripe_sectors) {
+		/*
+		 * Post 1.14 upgrade, we assume that backpointers are mostly
+		 * correct and a sector count mismatch is probably due to a
+		 * write buffer race
+		 *
+		 * Pre upgrade, we expect all the buckets to be wrong, a write
+		 * buffer flush is pointless:
+		 */
 		if (c->sb.version_upgrade_complete >= bcachefs_metadata_version_backpointer_bucket_gen) {
 			ret = bch2_backpointers_maybe_flush(trans, alloc_k, last_flushed);
 			if (ret)
@@ -978,12 +984,22 @@ static bool backpointer_node_has_missing(struct bch_fs *c, struct bkey_s_c k)
 				goto next;
 
 			struct bpos bucket = bp_pos_to_bucket(ca, pos);
-			u64 next = ca->mi.nbuckets;
+			u64 next = min(bucket.offset, ca->mi.nbuckets);
 
-			unsigned long *bitmap = READ_ONCE(ca->bucket_backpointer_mismatch.buckets);
-			if (bitmap)
-				next = min_t(u64, next,
-					     find_next_bit(bitmap, ca->mi.nbuckets, bucket.offset));
+			unsigned long *mismatch = READ_ONCE(ca->bucket_backpointer_mismatch.buckets);
+			unsigned long *empty = READ_ONCE(ca->bucket_backpointer_empty.buckets);
+			/*
+			 * Find the first bucket with mismatches - but
+			 * not empty buckets; we don't need to pin those
+			 * because we just recreate all backpointers in
+			 * those buckets
+			 */
+			if (mismatch && empty)
+				next = find_next_andnot_bit(mismatch, empty, ca->mi.nbuckets, next);
+			else if (mismatch)
+				next = find_next_bit(mismatch, ca->mi.nbuckets, next);
+			else
+				next = ca->mi.nbuckets;
 
 			bucket.offset = next;
 			if (bucket.offset == ca->mi.nbuckets)
@@ -1110,17 +1126,18 @@ int bch2_check_extents_to_backpointers(struct bch_fs *c)
 	if (ret)
 		goto err;
 
-	u64 nr_buckets = 0, nr_mismatches = 0;
+	u64 nr_buckets = 0, nr_mismatches = 0, nr_empty = 0;
 	for_each_member_device(c, ca) {
 		nr_buckets	+= ca->mi.nbuckets;
 		nr_mismatches	+= ca->bucket_backpointer_mismatch.nr;
+		nr_empty	+= ca->bucket_backpointer_empty.nr;
 	}
 
 	if (!nr_mismatches)
 		goto err;
 
-	bch_info(c, "scanning for missing backpointers in %llu/%llu buckets",
-		 nr_mismatches, nr_buckets);
+	bch_info(c, "scanning for missing backpointers in %llu/%llu buckets, %llu buckets with no backpointers",
+		 nr_mismatches - nr_empty, nr_buckets, nr_empty);
 
 	while (1) {
 		ret = bch2_pin_backpointer_nodes_with_missing(trans, s.bp_start, &s.bp_end);

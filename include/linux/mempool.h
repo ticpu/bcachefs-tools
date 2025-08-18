@@ -9,6 +9,8 @@
 #include <linux/compiler.h>
 #include <linux/slab.h>
 
+#define alloc_hooks(_do, ...)		_do
+
 struct kmem_cache;
 
 typedef void * (mempool_alloc_t)(gfp_t gfp_mask, void *pool_data);
@@ -46,7 +48,10 @@ extern mempool_t *mempool_create_node(int min_nr, mempool_alloc_t *alloc_fn,
 
 extern int mempool_resize(mempool_t *pool, int new_min_nr);
 extern void mempool_destroy(mempool_t *pool);
-extern void *mempool_alloc(mempool_t *pool, gfp_t gfp_mask) __malloc;
+extern void *mempool_alloc_noprof(mempool_t *pool, gfp_t gfp_mask) __malloc;
+#define mempool_alloc(...)						\
+	alloc_hooks(mempool_alloc_noprof(__VA_ARGS__))
+
 extern void mempool_free(void *element, mempool_t *pool);
 
 /*

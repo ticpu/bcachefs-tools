@@ -116,10 +116,15 @@ static int shrinker_thread(void *arg)
 }
 
 struct task_struct *shrinker_task;
+unsigned long _totalram_pages;
 
 __attribute__((constructor(103)))
 static void shrinker_thread_init(void)
 {
+	struct sysinfo info;
+	si_meminfo(&info);
+	_totalram_pages = info.totalram >> PAGE_SHIFT;
+
 	shrinker_task = kthread_run(shrinker_thread, NULL, "shrinkers");
 	BUG_ON(IS_ERR(shrinker_task));
 }

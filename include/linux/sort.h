@@ -27,5 +27,6 @@ static inline void sort(void *base, size_t num, size_t size,
 }
 
 #define sort_nonatomic(...)	sort(__VA_ARGS__)
+#define sort_r_nonatomic(...)	sort_r(__VA_ARGS__)
 
 #endif

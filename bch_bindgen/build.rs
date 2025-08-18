@@ -79,6 +79,7 @@ fn main() {
         .rustified_enum("fsck_err_opts")
         .allowlist_type("nonce")
         .no_debug("bch_replicas_padded")
+        .no_debug("jset")
         .newtype_enum("bch_kdf_types")
         .rustified_enum("bch_key_types")
         .opaque_type("gendisk")

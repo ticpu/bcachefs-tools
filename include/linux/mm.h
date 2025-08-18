@@ -23,11 +23,15 @@ struct sysinfo {
 	__u32 mem_unit;			/* Memory unit size in bytes */
 };
 
-
-
 static inline void si_meminfo(struct sysinfo *val)
 {
 	BUG_ON(syscall(SYS_sysinfo, val));
+}
+
+extern unsigned long _totalram_pages;
+static inline unsigned long totalram_pages(void)
+{
+	return _totalram_pages;
 }
 
 #endif /* _TOOLS_LINUX_MM_H */

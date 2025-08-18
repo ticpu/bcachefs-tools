@@ -2,6 +2,7 @@
 #define _PERF_BITOPS_H
 
 #include <string.h>
+#include <linux/bits.h>
 #include <linux/bitops.h>
 #include <linux/kernel.h>
 #include <stdlib.h>
@@ -34,7 +35,7 @@ static inline int __bitmap_weight(const unsigned long *bitmap, int bits)
 		w += hweight_long(bitmap[k] & BITMAP_LAST_WORD_MASK(bits));
 
 	return w;
-} 
+}
 
 static inline int __bitmap_and(unsigned long *dst, const unsigned long *bitmap1,
 		 const unsigned long *bitmap2, unsigned int bits)
@@ -154,6 +155,49 @@ static inline unsigned long find_next_zero_bit(const unsigned long *addr, unsign
 				 unsigned long offset)
 {
 	return _find_next_bit(addr, size, offset, ~0UL);
+}
+
+#define FIND_NEXT_BIT(FETCH, MUNGE, size, start)				\
+({										\
+	unsigned long mask, idx, tmp, sz = (size), __start = (start);		\
+										\
+	if (unlikely(__start >= sz))						\
+		goto out;							\
+										\
+	mask = MUNGE(BITMAP_FIRST_WORD_MASK(__start));				\
+	idx = __start / BITS_PER_LONG;						\
+										\
+	for (tmp = (FETCH) & mask; !tmp; tmp = (FETCH)) {			\
+		if ((idx + 1) * BITS_PER_LONG >= sz)				\
+			goto out;						\
+		idx++;								\
+	}									\
+										\
+	sz = min(idx * BITS_PER_LONG + __ffs(MUNGE(tmp)), sz);			\
+out:										\
+	sz;									\
+})
+static inline unsigned long _find_next_andnot_bit(const unsigned long *addr1, const unsigned long *addr2,
+					unsigned long nbits, unsigned long start)
+{
+	return FIND_NEXT_BIT(addr1[idx] & ~addr2[idx], /* nop */, nbits, start);
+}
+
+static inline unsigned long find_next_andnot_bit(const unsigned long *addr1,
+		const unsigned long *addr2, unsigned long size,
+		unsigned long offset)
+{
+	if (small_const_nbits(size)) {
+		unsigned long val;
+
+		if (unlikely(offset >= size))
+			return size;
+
+		val = *addr1 & ~*addr2 & __GENMASK(size - 1, offset);
+		return val ? __ffs(val) : size;
+	}
+
+	return _find_next_andnot_bit(addr1, addr2, size, offset);
 }
 
 #define find_first_bit(addr, size) find_next_bit((addr), (size), 0)
