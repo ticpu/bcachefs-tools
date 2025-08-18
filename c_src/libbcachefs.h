@@ -292,26 +292,26 @@ static inline void bchu_disk_resize(struct bchfs_handle fs,
 				    unsigned idx,
 				    u64 nbuckets)
 {
-	struct bch_ioctl_disk_resize i = {
+	struct bch_ioctl_disk_resize_v2 i = {
 		.flags	= BCH_BY_INDEX,
 		.dev	= idx,
 		.nbuckets = nbuckets,
 	};
 
-	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_RESIZE, &i);
+	errmsg_ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_RESIZE_v2, &i);
 }
 
 static inline void bchu_disk_resize_journal(struct bchfs_handle fs,
 					    unsigned idx,
 					    u64 nbuckets)
 {
-	struct bch_ioctl_disk_resize i = {
+	struct bch_ioctl_disk_resize_v2 i = {
 		.flags	= BCH_BY_INDEX,
 		.dev	= idx,
 		.nbuckets = nbuckets,
 	};
 
-	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_RESIZE_JOURNAL, &i);
+	errmsg_ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_RESIZE_JOURNAL_v2, &i);
 }
 
 int bchu_data(struct bchfs_handle, struct bch_ioctl_data);
