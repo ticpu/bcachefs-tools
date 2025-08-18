@@ -62,6 +62,8 @@ static void fs_top(const char *path, bool human_readable)
 			       bch2_counter_names[i],
 			       v1, v2);
 		}
+
+		/* XXX: include btree cache size, key cache size, total ram size */
 	}
 
 	bcache_fs_close(fs);

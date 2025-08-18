@@ -195,6 +195,7 @@ fn cmd_list_inner(opt: &Cli) -> anyhow::Result<()> {
         opt_set!(fs_opts, verbose, 1);
     }
 
+    // scan for member devices
     let fs = Fs::open(&opt.devices, fs_opts)?;
 
     match opt.mode {
