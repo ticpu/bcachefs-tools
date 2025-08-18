@@ -82,7 +82,9 @@ struct bch_ioctl_incremental {
 #define BCH_IOCTL_READ_SUPER		_IOW(0xbc,	12, struct bch_ioctl_read_super)
 #define BCH_IOCTL_DISK_GET_IDX		_IOW(0xbc,	13, struct bch_ioctl_disk_get_idx)
 #define BCH_IOCTL_DISK_RESIZE		_IOW(0xbc,	14, struct bch_ioctl_disk_resize)
+#define BCH_IOCTL_DISK_RESIZE_v2	_IOW(0xbc,	27, struct bch_ioctl_disk_resize_v2)
 #define BCH_IOCTL_DISK_RESIZE_JOURNAL	_IOW(0xbc,	15, struct bch_ioctl_disk_resize_journal)
+#define BCH_IOCTL_DISK_RESIZE_JOURNAL_v2 _IOW(0xbc,	28, struct bch_ioctl_disk_resize_journal_v2)
 
 #define BCH_IOCTL_SUBVOLUME_CREATE	_IOW(0xbc,	16, struct bch_ioctl_subvolume)
 #define BCH_IOCTL_SUBVOLUME_DESTROY	_IOW(0xbc,	17, struct bch_ioctl_subvolume)
@@ -411,6 +413,14 @@ struct bch_ioctl_disk_resize {
 	__u64			nbuckets;
 };
 
+struct bch_ioctl_disk_resize_v2 {
+	__u32				flags;
+	__u32				pad;
+	__u64				dev;
+	__u64				nbuckets;
+	struct bch_ioctl_err_msg	err;
+};
+
 /*
  * BCH_IOCTL_DISK_RESIZE_JOURNAL: resize journal on a device
  *
@@ -422,6 +432,14 @@ struct bch_ioctl_disk_resize_journal {
 	__u32			pad;
 	__u64			dev;
 	__u64			nbuckets;
+};
+
+struct bch_ioctl_disk_resize_journal_v2 {
+	__u32				flags;
+	__u32				pad;
+	__u64				dev;
+	__u64				nbuckets;
+	struct bch_ioctl_err_msg	err;
 };
 
 struct bch_ioctl_subvolume {

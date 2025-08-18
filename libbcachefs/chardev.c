@@ -767,6 +767,25 @@ static long bch2_ioctl_disk_resize(struct bch_fs *c,
 	return ret;
 }
 
+static long bch2_ioctl_disk_resize_v2(struct bch_fs *c,
+				      struct bch_ioctl_disk_resize_v2 arg)
+{
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if ((arg.flags & ~BCH_BY_INDEX) ||
+	    arg.pad)
+		return -EINVAL;
+
+	CLASS(bch2_device_lookup, ca)(c, arg.dev, arg.flags);
+	if (IS_ERR(ca))
+		return PTR_ERR(ca);
+
+	CLASS(printbuf, err)();
+	int ret = bch2_dev_resize(c, ca, arg.nbuckets, &err);
+	return copy_ioctl_err_msg(&arg.err, &err, ret);
+}
+
 static long bch2_ioctl_disk_resize_journal(struct bch_fs *c,
 				   struct bch_ioctl_disk_resize_journal arg)
 {
@@ -785,6 +804,28 @@ static long bch2_ioctl_disk_resize_journal(struct bch_fs *c,
 		return PTR_ERR(ca);
 
 	return bch2_set_nr_journal_buckets(c, ca, arg.nbuckets);
+}
+
+static long bch2_ioctl_disk_resize_journal_v2(struct bch_fs *c,
+				   struct bch_ioctl_disk_resize_journal_v2 arg)
+{
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if ((arg.flags & ~BCH_BY_INDEX) ||
+	    arg.pad)
+		return -EINVAL;
+
+	if (arg.nbuckets > U32_MAX)
+		return -EINVAL;
+
+	CLASS(bch2_device_lookup, ca)(c, arg.dev, arg.flags);
+	if (IS_ERR(ca))
+		return PTR_ERR(ca);
+
+	CLASS(printbuf, err)();
+	int ret = bch2_set_nr_journal_buckets(c, ca, arg.nbuckets);
+	return copy_ioctl_err_msg(&arg.err, &err, ret);
 }
 
 #define BCH_IOCTL(_name, _argtype)					\
@@ -850,8 +891,12 @@ long bch2_fs_ioctl(struct bch_fs *c, unsigned cmd, void __user *arg)
 		BCH_IOCTL(data, struct bch_ioctl_data);
 	case BCH_IOCTL_DISK_RESIZE:
 		BCH_IOCTL(disk_resize, struct bch_ioctl_disk_resize);
+	case BCH_IOCTL_DISK_RESIZE_v2:
+		BCH_IOCTL(disk_resize_v2, struct bch_ioctl_disk_resize_v2);
 	case BCH_IOCTL_DISK_RESIZE_JOURNAL:
 		BCH_IOCTL(disk_resize_journal, struct bch_ioctl_disk_resize_journal);
+	case BCH_IOCTL_DISK_RESIZE_JOURNAL_v2:
+		BCH_IOCTL(disk_resize_journal_v2, struct bch_ioctl_disk_resize_journal_v2);
 	case BCH_IOCTL_FSCK_ONLINE:
 		BCH_IOCTL(fsck_online, struct bch_ioctl_fsck_online);
 	case BCH_IOCTL_QUERY_ACCOUNTING:
