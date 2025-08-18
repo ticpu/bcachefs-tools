@@ -56,46 +56,43 @@ static void dev_usage_to_text(struct printbuf *out,
 		if (type != BCH_DATA_unstriped)
 			used += u->d[type].sectors;
 
-	/* Include sizes in short summary */
 	prt_printf(out, "%s (device %u):\t%s\r%s\r    %02u%%\n",
 		   d->label ?: "(no label)", d->idx,
 		   d->dev ?: "(device not found)",
 		   bch2_member_states[u->state],
 		   (unsigned) (used * 100 / capacity));
 
-	if (full) {
-		printbuf_indent_add(out, 2);
-		prt_printf(out, "\tdata\rbuckets\rfragmented\r\n");
+	printbuf_indent_add(out, 2);
+	prt_printf(out, "\tdata\rbuckets\rfragmented\r\n");
 
-		for (unsigned type = 0; type < u->nr_data_types; type++) {
-			bch2_prt_data_type(out, type);
-			prt_printf(out, ":\t");
+	for (unsigned type = 0; type < u->nr_data_types; type++) {
+		bch2_prt_data_type(out, type);
+		prt_printf(out, ":\t");
 
-			/* sectors are 0 for empty bucket data types, so calculate sectors for them */
-			u64 sectors = data_type_is_empty(type)
-				? u->d[type].buckets * u->bucket_size
-				: u->d[type].sectors;
-			prt_units_u64(out, sectors << 9);
+		/* sectors are 0 for empty bucket data types, so calculate sectors for them */
+		u64 sectors = data_type_is_empty(type)
+			? u->d[type].buckets * u->bucket_size
+			: u->d[type].sectors;
+		prt_units_u64(out, sectors << 9);
 
-			prt_printf(out, "\r%llu\r", u->d[type].buckets);
+		prt_printf(out, "\r%llu\r", u->d[type].buckets);
 
-			u64 fragmented = u->d[type].buckets * u->bucket_size - sectors;
-			if (fragmented)
-				prt_units_u64(out, fragmented << 9);
-			prt_printf(out, "\r\n");
-		}
-
-		prt_printf(out, "capacity:\t");
-		prt_units_u64(out, (u->nr_buckets * u->bucket_size) << 9);
-		prt_printf(out, "\r%llu\r\n", u->nr_buckets);
-
-		prt_printf(out, "bucket size:\t");
-		prt_units_u64(out, u->bucket_size << 9);
+		u64 fragmented = u->d[type].buckets * u->bucket_size - sectors;
+		if (fragmented)
+			prt_units_u64(out, fragmented << 9);
 		prt_printf(out, "\r\n");
-
-		printbuf_indent_sub(out, 2);
-		prt_newline(out);
 	}
+
+	prt_printf(out, "capacity:\t");
+	prt_units_u64(out, (u->nr_buckets * u->bucket_size) << 9);
+	prt_printf(out, "\r%llu\r\n", u->nr_buckets);
+
+	prt_printf(out, "bucket size:\t");
+	prt_units_u64(out, u->bucket_size << 9);
+	prt_printf(out, "\r\n");
+
+	printbuf_indent_sub(out, 2);
+	prt_newline(out);
 
 	free(u);
 }
@@ -121,13 +118,45 @@ static void devs_usage_to_text(struct printbuf *out,
 
 	printbuf_tabstops_reset(out);
 	prt_newline(out);
-	printbuf_tabstop_push(out, 16);
-	printbuf_tabstop_push(out, 20);
-	printbuf_tabstop_push(out, 16);
-	printbuf_tabstop_push(out, 14);
 
-	darray_for_each(dev_names, dev)
-		dev_usage_to_text(out, fs, dev, full);
+	if (full) {
+		printbuf_tabstop_push(out, 16);
+		printbuf_tabstop_push(out, 20);
+		printbuf_tabstop_push(out, 16);
+		printbuf_tabstop_push(out, 14);
+
+		darray_for_each(dev_names, dev)
+			dev_usage_to_text(out, fs, dev, full);
+	} else {
+		printbuf_tabstop_push(out, 32);
+		printbuf_tabstop_push(out, 12);
+		printbuf_tabstop_push(out, 8);
+		printbuf_tabstop_push(out, 10);
+		printbuf_tabstop_push(out, 10);
+		printbuf_tabstop_push(out, 6);
+
+		prt_printf(out, "Device label\tDevice\tState\tSize\rUsed\rUse%%\r\n");
+
+		darray_for_each(dev_names, d) {
+			struct bch_ioctl_dev_usage_v2 *u = bchu_dev_usage(fs, d->idx);
+
+			u64 used = 0, capacity = u->nr_buckets * u->bucket_size;
+			for (unsigned type = 0; type < u->nr_data_types; type++)
+				if (type != BCH_DATA_unstriped)
+					used += u->d[type].sectors;
+
+			prt_printf(out, "%s (device %u):\t%s\t%s\t",
+				   d->label ?: "(no label)", d->idx,
+				   d->dev ?: "(device not found)",
+				   bch2_member_states[u->state]);
+
+			prt_units_u64(out, (u->nr_buckets * u->bucket_size) << 9);
+			prt_tab_rjust(out);
+			prt_units_u64(out, used << 9);
+
+			prt_printf(out, "\r%02u%%\r\n", (unsigned) (used * 100 / capacity));
+		}
+	}
 
 	darray_for_each(dev_names, dev) {
 		free(dev->dev);
@@ -283,6 +312,8 @@ static void replicas_summary_to_text(struct printbuf *out,
 
 		replicas_x_degraded.data[d.durability].data[degraded] += a->v.d[0];
 	}
+
+	prt_printf(out, "\nData by durability desired and amount degraded:\n");
 
 	unsigned max_degraded = 0;
 	darray_for_each(replicas_x_degraded, i)
