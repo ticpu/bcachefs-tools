@@ -169,13 +169,18 @@ static inline void bchu_disk_offline(struct bchfs_handle fs, unsigned dev_idx,
 static inline void bchu_disk_set_state(struct bchfs_handle fs, unsigned dev,
 				       unsigned new_state, unsigned flags)
 {
-	struct bch_ioctl_disk_set_state i = {
+	char err[8192];
+	struct bch_ioctl_disk_set_state_v2 i = {
 		.flags		= flags|BCH_BY_INDEX,
 		.new_state	= new_state,
 		.dev		= dev,
+		.err.msg_ptr	= (unsigned long)err,
+		.err.msg_len	= sizeof(err),
 	};
 
-	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_SET_STATE, &i);
+	int ret = ioctl(fs.ioctl_fd, BCH_IOCTL_DISK_SET_STATE_v2, &i);
+	if (ret < 0)
+		die("disk_set_state error:\n%s", err);
 }
 
 static inline struct bch_ioctl_fs_usage *bchu_fs_usage(struct bchfs_handle fs)
