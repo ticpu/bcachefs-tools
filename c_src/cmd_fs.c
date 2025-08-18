@@ -145,6 +145,29 @@ static void persistent_reserved_to_text(struct printbuf *out,
 	prt_printf(out, "\r\n");
 }
 
+struct durability_x_degraded {
+	unsigned	durability;
+	unsigned	minus_degraded;
+};
+
+static struct durability_x_degraded replicas_durability(const struct bch_replicas_entry_v1 *r,
+							dev_names *dev_names)
+{
+	struct durability_x_degraded ret = {};
+
+	for (unsigned i = 0; i < r->nr_devs; i++) {
+		unsigned dev_idx = r->devs[i];
+		struct dev_name *dev = dev_idx_to_name(dev_names, dev_idx);
+
+		unsigned durability = dev ? dev->durability : 0;
+
+		if (dev->dev && dev->state != BCH_MEMBER_STATE_failed)
+			ret.minus_degraded += durability;
+		ret.durability += durability;
+	}
+	return ret;
+}
+
 static void replicas_usage_to_text(struct printbuf *out,
 				   const struct bch_replicas_entry_v1 *r,
 				   s64 sectors,
@@ -153,31 +176,25 @@ static void replicas_usage_to_text(struct printbuf *out,
 	if (!sectors)
 		return;
 
-	char devs[4096], *d = devs;
-	*d++ = '[';
+	struct durability_x_degraded durability = replicas_durability(r, dev_names);
 
-	unsigned durability = 0;
+	bch2_prt_data_type(out, r->data_type);
+	prt_printf(out, ":\t%u/%u\t%u\t[",
+		   r->nr_required, r->nr_devs,
+		   durability.durability);
 
 	for (unsigned i = 0; i < r->nr_devs; i++) {
 		unsigned dev_idx = r->devs[i];
 		struct dev_name *dev = dev_idx_to_name(dev_names, dev_idx);
 
-		durability += dev ? dev->durability : 0;
-
 		if (i)
-			*d++ = ' ';
-
-		d += dev && dev->dev
-			? sprintf(d, "%s", dev->dev)
-			: sprintf(d, "%u", dev_idx);
+			prt_char(out, ' ');
+		if (dev && dev->dev)
+			prt_str(out, dev->dev);
+		else
+			prt_printf(out, "%u", dev_idx);
 	}
-	*d++ = ']';
-	*d++ = '\0';
-
-	bch2_prt_data_type(out, r->data_type);
-	prt_printf(out, ":\t%u/%u\t%u\t%s\t",
-		   r->nr_required, r->nr_devs,
-		   durability, devs);
+	prt_printf(out, "]\t");
 
 	prt_units_u64(out, sectors << 9);
 	prt_printf(out, "\r\n");
@@ -230,11 +247,10 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 			       dev_names dev_names,
 			       enum fs_usage_fields fields)
 {
-	unsigned accounting_types = 0;
+	unsigned accounting_types = BIT(BCH_DISK_ACCOUNTING_replicas);
 
 	if (fields & FS_USAGE_replicas)
 		accounting_types |=
-			BIT(BCH_DISK_ACCOUNTING_replicas)|
 			BIT(BCH_DISK_ACCOUNTING_persistent_reserved);
 
 	if (fields & FS_USAGE_compression)
@@ -277,6 +293,58 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 	prt_units_u64(out, a->online_reserved << 9);
 	prt_printf(out, "\r\n");
 
+	DARRAY(darray_u64) replicas_x_degraded = {};
+
+	/* summarize replicas - 1x replicated, 2x replicated, degraded... */
+	darray_for_each(a_sorted, i) {
+		struct bkey_i_accounting *a = *i;
+
+		struct disk_accounting_pos acc_k;
+		bpos_to_disk_accounting_pos(&acc_k, a->k.p);
+
+		if (acc_k.type == BCH_DISK_ACCOUNTING_replicas) {
+			struct durability_x_degraded d = replicas_durability(&acc_k.replicas, &dev_names);
+			unsigned degraded = d.durability - d.minus_degraded;
+
+			while (replicas_x_degraded.nr <= d.durability)
+				darray_push(&replicas_x_degraded, (darray_u64) {});
+
+			while (replicas_x_degraded.data[d.durability].nr <= degraded)
+				darray_push(&replicas_x_degraded.data[d.durability], 0);
+
+			replicas_x_degraded.data[d.durability].data[degraded] += a->v.d[0];
+		}
+	}
+
+	prt_printf(out, "\nData by durability desired and amount degraded:\n");
+
+	unsigned max_degraded = 0;
+	darray_for_each(replicas_x_degraded, i)
+		max_degraded = max(max_degraded, i->nr);
+
+	printbuf_tabstops_reset(out);
+	printbuf_tabstop_push(out, 8);
+	prt_tab(out);
+	for (unsigned i = 0; i < max_degraded; i++) {
+		printbuf_tabstop_push(out, 12);
+		prt_printf(out, "-%ux\r", i);
+	}
+	prt_newline(out);
+
+	darray_for_each(replicas_x_degraded, i) {
+		if (!i->nr)
+			continue;
+
+		prt_printf(out, "%zux:\t", i - replicas_x_degraded.data);
+
+		darray_for_each(*i, j) {
+			if (*j)
+				prt_units_u64(out, *j << 9);
+			prt_tab_rjust(out);
+		}
+		prt_newline(out);
+	}
+
 	if (fields & FS_USAGE_replicas) {
 		printbuf_tabstops_reset(out);
 		printbuf_tabstop_push(out, 16);
@@ -305,7 +373,8 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 				a->v.d[0]);
 			break;
 		case BCH_DISK_ACCOUNTING_replicas:
-			replicas_usage_to_text(out, &acc_k.replicas, a->v.d[0], &dev_names);
+			if (fields & FS_USAGE_replicas)
+				replicas_usage_to_text(out, &acc_k.replicas, a->v.d[0], &dev_names);
 			break;
 		case BCH_DISK_ACCOUNTING_compression:
 			if (new_type) {
