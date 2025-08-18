@@ -590,6 +590,8 @@ struct bchfs_handle bchu_fs_open_by_dev(const char *path, int *idx)
 		if (len <= 0)
 			goto read_super;
 
+		buf[len] = '\0';
+
 		fs_str = strstr(buf, "bcachefs/");
 		if (!fs_str)
 			die("error parsing sysfs");
