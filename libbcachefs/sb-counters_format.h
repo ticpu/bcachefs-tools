@@ -35,6 +35,7 @@ enum counters_flags {
 	x(io_move_noop,					92,	TYPE_COUNTER)	\
 	x(io_move_created_rebalance,			83,	TYPE_COUNTER)	\
 	x(io_move_evacuate_bucket,			84,	TYPE_COUNTER)	\
+	x(rebalance_extent,				96,	TYPE_COUNTER)	\
 	x(bucket_invalidate,				3,	TYPE_COUNTER)	\
 	x(bucket_discard,				4,	TYPE_COUNTER)	\
 	x(bucket_discard_fast,				79,	TYPE_COUNTER)	\
@@ -127,7 +128,7 @@ struct bch_sb_field_counters {
 static inline void __maybe_unused check_bch_counter_ids_unique(void) {
 	switch(0){
 #define x(t, n, ...) case (n):
-        BCH_PERSISTENT_COUNTERS()
+        BCH_PERSISTENT_COUNTERS();
 #undef x
 		;
 	}

@@ -152,6 +152,7 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 	struct journal_replay **_i, *i, *dup;
 	size_t bytes = vstruct_bytes(j);
 	u64 last_seq = !JSET_NO_FLUSH(j) ? le64_to_cpu(j->last_seq) : 0;
+	u64 seq = le64_to_cpu(j->seq);
 	CLASS(printbuf, buf)();
 	int ret = JOURNAL_ENTRY_ADD_OK;
 
@@ -159,12 +160,11 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 		last_seq = min(last_seq, c->opts.journal_rewind);
 
 	if (!c->journal.oldest_seq_found_ondisk ||
-	    le64_to_cpu(j->seq) < c->journal.oldest_seq_found_ondisk)
-		c->journal.oldest_seq_found_ondisk = le64_to_cpu(j->seq);
+	    seq < c->journal.oldest_seq_found_ondisk)
+		c->journal.oldest_seq_found_ondisk = seq;
 
 	/* Is this entry older than the range we need? */
-	if (!c->opts.read_entire_journal &&
-	    le64_to_cpu(j->seq) < jlist->last_seq)
+	if (!c->opts.read_entire_journal && seq < jlist->last_seq)
 		return JOURNAL_ENTRY_ADD_OUT_OF_RANGE;
 
 	/*
@@ -173,7 +173,7 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 	 * within the range of +-2billion of the filrst one we find.
 	 */
 	if (!c->journal_entries_base_seq)
-		c->journal_entries_base_seq = max_t(s64, 1, le64_to_cpu(j->seq) - S32_MAX);
+		c->journal_entries_base_seq = max_t(s64, 1, seq - S32_MAX);
 
 	/* Drop entries we don't need anymore */
 	if (last_seq > jlist->last_seq && !c->opts.read_entire_journal) {
@@ -194,25 +194,33 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 	/* Drop overwrites, log entries if we don't need them: */
 	if (!c->opts.retain_recovery_info &&
 	    !c->opts.journal_rewind) {
+		vstruct_for_each_safe(j, src)
+			if (vstruct_end(src) > vstruct_end(j))
+				goto nocompact;
+
 		struct jset_entry *dst = j->start;
 		vstruct_for_each_safe(j, src) {
 			if (src->type == BCH_JSET_ENTRY_log ||
 			    src->type == BCH_JSET_ENTRY_overwrite)
 				continue;
 
-			memcpy(dst, src, vstruct_bytes(src));
+			memmove_u64s_down(dst, src, vstruct_u64s(src));
 			dst = vstruct_next(dst);
 		}
 
 		j->u64s = cpu_to_le32((u64 *) dst - j->_data);
 		bytes = vstruct_bytes(j);
 	}
-
+nocompact:
 	jlist->last_seq = max(jlist->last_seq, last_seq);
 
-	_i = genradix_ptr_alloc(&c->journal_entries,
-				journal_entry_radix_idx(c, le64_to_cpu(j->seq)),
-				GFP_KERNEL);
+	if (seq <  c->journal_entries_base_seq ||
+	    seq >= c->journal_entries_base_seq + U32_MAX) {
+		bch_err(c, "journal entry sequence numbers span too large a range: cannot reply, contact developers");
+		return bch_err_throw(c, ENOMEM_journal_entry_add);
+	}
+
+	_i = genradix_ptr_alloc(&c->journal_entries, journal_entry_radix_idx(c, seq), GFP_KERNEL);
 	if (!_i)
 		return bch_err_throw(c, ENOMEM_journal_entry_add);
 
@@ -222,8 +230,6 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 	 */
 	dup = *_i;
 	if (dup) {
-		BUG_ON(dup->j.seq != j->seq);
-
 		bool identical = bytes == vstruct_bytes(&dup->j) &&
 			!memcmp(j, &dup->j, bytes);
 		bool not_identical = !identical &&
@@ -254,7 +260,6 @@ static int journal_entry_add(struct bch_fs *c, struct bch_dev *ca,
 		if (entry_ptr.csum_good && !identical)
 			goto replace;
 
-		BUG_ON(dup->j.seq != j->seq);
 		return ret;
 	}
 replace:

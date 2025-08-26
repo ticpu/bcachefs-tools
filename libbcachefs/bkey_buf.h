@@ -29,7 +29,7 @@ static inline int bch2_bkey_buf_reassemble_noprof(struct bkey_buf *s,
 						  struct bch_fs *c,
 						  struct bkey_s_c k)
 {
-	bch2_bkey_buf_realloc(s, c, k.k->u64s);
+	bch2_bkey_buf_realloc_noprof(s, c, k.k->u64s);
 	bkey_reassemble(s->k, k);
 	return 0;
 }
@@ -39,7 +39,7 @@ static inline int bch2_bkey_buf_copy_noprof(struct bkey_buf *s,
 					    struct bch_fs *c,
 					    struct bkey_i *src)
 {
-	bch2_bkey_buf_realloc(s, c, src->k.u64s);
+	bch2_bkey_buf_realloc_noprof(s, c, src->k.u64s);
 	bkey_copy(s->k, src);
 	return 0;
 }
@@ -50,7 +50,7 @@ static inline int bch2_bkey_buf_unpack_noprof(struct bkey_buf *s,
 					      struct btree *b,
 					      struct bkey_packed *src)
 {
-	bch2_bkey_buf_realloc(s, c, BKEY_U64s + bkeyp_val_u64s(&b->format, src));
+	bch2_bkey_buf_realloc_noprof(s, c, BKEY_U64s + bkeyp_val_u64s(&b->format, src));
 	bch2_bkey_unpack(b, s->k, src);
 	return 0;
 }

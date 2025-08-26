@@ -3271,9 +3271,10 @@ void *__bch2_trans_kmalloc(struct btree_trans *trans, size_t size, unsigned long
 	EBUG_ON(trans->mem_bytes);
 	EBUG_ON(trans->mem_top);
 	EBUG_ON(new_bytes > BTREE_TRANS_MEM_MAX);
-	
+
 	bool lock_dropped = false;
-	new_mem = allocate_dropping_locks_norelock(trans, lock_dropped, kmalloc(new_bytes, _gfp));
+	new_mem = allocate_dropping_locks_norelock(trans, lock_dropped,
+					kmalloc(new_bytes, _gfp|__GFP_NOWARN));
 	if (!new_mem) {
 		new_mem = mempool_alloc(&c->btree_trans_mem_pool, GFP_KERNEL);
 		new_bytes = BTREE_TRANS_MEM_MAX;
@@ -3525,7 +3526,7 @@ got_trans:
 		if (s->max_mem) {
 			unsigned expected_mem_bytes = roundup_pow_of_two(s->max_mem);
 
-			trans->mem = kmalloc(expected_mem_bytes, GFP_KERNEL);
+			trans->mem = kmalloc(expected_mem_bytes, GFP_KERNEL|__GFP_NOWARN);
 			if (likely(trans->mem))
 				trans->mem_bytes = expected_mem_bytes;
 		}
@@ -3695,6 +3696,9 @@ void bch2_btree_trans_to_text(struct printbuf *out, struct btree_trans *trans)
 	}
 
 	prt_printf(out, "%i %s\n", task ? task->pid : 0, trans->fn);
+
+	if (trans->journal_replay_not_finished)
+		prt_printf(out, "has journal_keys ref\n");
 
 	/* trans->paths is rcu protected vs. freeing */
 	guard(rcu)();

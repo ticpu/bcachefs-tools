@@ -237,6 +237,7 @@ static int bch2_dev_alloc(struct bch_fs *, unsigned);
 static int bch2_dev_sysfs_online(struct bch_fs *, struct bch_dev *);
 static void bch2_dev_io_ref_stop(struct bch_dev *, int);
 static void __bch2_dev_read_only(struct bch_fs *, struct bch_dev *);
+static int bch2_dev_attach_bdev(struct bch_fs *, struct bch_sb_handle *, struct printbuf *);
 
 struct bch_fs *bch2_dev_to_fs(dev_t dev)
 {
@@ -988,11 +989,7 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 		}
 	}
 
-	if (c->cf_encoding)
-		prt_printf(&p, "\nUsing encoding defined by superblock: utf8-%u.%u.%u",
-			   unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
-			   unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
-			   unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
+	/* cf_encoding log message should be here, but it breaks xfstests - sigh */
 
 	if (c->opts.journal_rewind)
 		prt_printf(&p, "\nrewinding journal, fsck required");
@@ -1008,8 +1005,9 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 			return ret;
 
 		__le64 now = cpu_to_le64(ktime_get_real_seconds());
-		for_each_online_member_rcu(c, ca)
-			bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx)->last_mount = now;
+		scoped_guard(rcu)
+			for_each_online_member_rcu(c, ca)
+				bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx)->last_mount = now;
 
 		if (BCH_SB_HAS_TOPOLOGY_ERRORS(c->disk_sb.sb))
 			ext->recovery_passes_required[0] |=
@@ -1059,6 +1057,14 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 	set_bit(BCH_FS_in_recovery, &c->flags);
 
 	bch2_print_str(c, KERN_INFO, p.buf);
+
+	/* this really should be part of our one multi line mount message, but -
+	 * xfstests... */
+	if (c->cf_encoding)
+		bch_info(c, "Using encoding defined by superblock: utf8-%u.%u.%u",
+			   unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
+			   unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
+			   unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
 
 	if (BCH_SB_INITIALIZED(c->disk_sb.sb)) {
 		if (!(c->sb.features & (1ULL << BCH_FEATURE_new_extent_overwrite))) {
@@ -1312,6 +1318,16 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 	bch2_journal_entry_res_resize(&c->journal,
 			&c->clock_journal_res,
 			(sizeof(struct jset_entry_clock) / sizeof(u64)) * 2);
+
+	scoped_guard(rwsem_write, &c->state_lock)
+		darray_for_each(*sbs, sb) {
+			CLASS(printbuf, err)();
+			ret = bch2_dev_attach_bdev(c, sb, &err);
+			if (ret) {
+				bch_err(bch2_dev_locked(c, sb->sb->dev_idx), "%s", err.buf);
+				goto err;
+			}
+		}
 
 	ret = bch2_fs_opt_version_init(c);
 	if (ret)
@@ -2603,16 +2619,6 @@ struct bch_fs *bch2_fs_open(darray_const_str *devices,
 	ret = PTR_ERR_OR_ZERO(c);
 	if (ret)
 		goto err;
-
-	scoped_guard(rwsem_write, &c->state_lock)
-		darray_for_each(sbs, sb) {
-			CLASS(printbuf, err)();
-			ret = bch2_dev_attach_bdev(c, sb, &err);
-			if (ret) {
-				bch_err(bch2_dev_locked(c, sb->sb->dev_idx), "%s", err.buf);
-				goto err;
-			}
-		}
 
 	if (!c->opts.nostart) {
 		ret = bch2_fs_start(c);
