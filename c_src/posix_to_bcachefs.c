@@ -14,6 +14,18 @@
 #include "libbcachefs/str_hash.h"
 #include "libbcachefs/xattr.h"
 
+struct hardlink {
+	struct rhash_head	hash;
+	u64			src, dst;
+};
+
+static const struct rhashtable_params hardlink_params = {
+	.head_offset		= offsetof(struct hardlink, hash),
+	.key_offset		= offsetof(struct hardlink, src),
+	.key_len		= sizeof(u64),
+	.automatic_shrinking	= true,
+};
+
 static int unlink_and_rm(struct bch_fs *c,
 			 subvol_inum dir_inum,
 			 struct bch_inode_unpacked *dir,
@@ -747,15 +759,24 @@ static int copy_dir(struct bch_fs *c,
 		if (s->type == BCH_MIGRATE_migrate && stat.st_dev != s->dev)
 			die("%s does not have correct st_dev!", child_path);
 
-		u64 *dst_inum_p = S_ISREG(stat.st_mode)
-			? genradix_ptr_alloc(&s->hardlinks, stat.st_ino, GFP_KERNEL)
-			: NULL;
+		struct hardlink *h = NULL;
+		if (S_ISREG(stat.st_mode) && stat.st_nlink > 1) {
+			u64 ino = stat.st_ino;
+			h = rhashtable_lookup_fast(&s->hardlinks, &ino, hardlink_params);
+			if (!h) {
+				h = kzalloc(sizeof(*h), GFP_KERNEL);
+				h->src = ino;
+				int ret = rhashtable_lookup_insert_fast(&s->hardlinks, &h->hash,
+									hardlink_params);
+				BUG_ON(ret);
+			}
+		}
 
 		subvol_inum dst_dir_inum = { 1, dst->bi_inum };
 
-		if (dst_inum_p && *dst_inum_p) {
+		if (h && h->dst) {
 			ret = create_or_update_link(c, dst_dir_inum, dst, d->d_name,
-						    (subvol_inum) { 1, *dst_inum_p }, S_IFREG);
+						    (subvol_inum) { 1, h->dst}, S_IFREG);
 			if (ret)
 				goto err;
 			goto next;
@@ -767,8 +788,8 @@ static int copy_dir(struct bch_fs *c,
 
 		subvol_inum dst_child_inum = { 1, inode.bi_inum };
 
-		if (dst_inum_p)
-			*dst_inum_p = inode.bi_inum;
+		if (h)
+			h->dst = inode.bi_inum;
 
 		copy_xattrs(c, &inode, d->d_name);
 
@@ -857,6 +878,8 @@ int copy_fs(struct bch_fs *c, struct copy_fs_state *s,
 	if (s->type == BCH_MIGRATE_migrate)
 		syncfs(src_fd);
 
+	BUG_ON(rhashtable_init(&s->hardlinks, &hardlink_params));
+
 	struct bch_inode_unpacked root_inode;
 	int ret = bch2_inode_find_by_inum(c, (subvol_inum) { 1, BCACHEFS_ROOT_INO },
 					  &root_inode);
@@ -883,7 +906,12 @@ int copy_fs(struct bch_fs *c, struct copy_fs_state *s,
 	update_inode(c, &root_inode);
 
 	darray_exit(&s->extents);
-	genradix_free(&s->hardlinks);
+	/*
+	 * We're currently leaking s->hardlinks: we want to convert this back to
+	 * a radix tree, when we have a radix tree that supports real 64 bit
+	 * integer keys
+	 */
+	//genradix_free(&s->hardlinks);
 
 	CLASS(printbuf, buf)();
 	printbuf_tabstop_push(&buf, 24);

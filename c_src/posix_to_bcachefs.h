@@ -33,7 +33,7 @@ struct copy_fs_state {
 	u64			bcachefs_inum;
 	dev_t			dev;
 
-	GENRADIX(u64)		hardlinks;
+	struct rhashtable	hardlinks;
 	ranges			extents;
 	enum bch_migrate_type	type;
 	unsigned		verbosity;
