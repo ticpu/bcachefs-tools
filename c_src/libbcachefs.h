@@ -130,16 +130,21 @@ struct bchfs_handle bchu_fs_open_by_dev(const char *, int *);
 
 int bchu_dev_path_to_idx(struct bchfs_handle, const char *);
 
-#define errmsg_ioctl(_ioctl_fd, _ioctl_nr, _ioctl_arg)			\
-({									\
-	char err[8192];							\
-	(_ioctl_arg)->err.msg_ptr = (ulong) err;			\
-	(_ioctl_arg)->err.msg_len = sizeof(err);			\
-	int ret = ioctl(_ioctl_fd, _ioctl_nr, _ioctl_arg);		\
-	if (ret < 0 && errno != ENOTTY)					\
-		die(#_ioctl_nr " error: %s\n%s", bch2_err_str(-errno), err);\
-	ret >= 0;							\
-})
+static inline bool __errmsg_ioctl(int fd, int nr, void *arg,
+				  struct bch_ioctl_err_msg *errmsg,
+				  const char *nr_str)
+{
+	char err[8192];
+	errmsg->msg_ptr = (ulong) err;
+	errmsg->msg_len = sizeof(err);
+	int ret = ioctl(fd, nr, arg);
+	if (ret < 0 && errno != ENOTTY)
+		die("%s error: %s\n%s", nr_str, bch2_err_str(-errno), err);
+	return ret >= 0;
+}
+
+#define errmsg_ioctl(_fd, _nr, _arg)			\
+	__errmsg_ioctl(_fd, _nr, _arg, &(_arg)->err, #_nr)
 
 static inline void bchu_disk_add(struct bchfs_handle fs, const char *dev)
 {
