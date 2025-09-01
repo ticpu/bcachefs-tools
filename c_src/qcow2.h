@@ -4,6 +4,8 @@
 #include <linux/types.h>
 #include "tools-util.h"
 
+#define QCOW2_L1_MAX		(4ULL << 20)
+
 struct qcow2_image {
 	int			infd;
 	int			outfd;
@@ -24,5 +26,7 @@ void qcow2_image_init(struct qcow2_image *, int, int, unsigned);
 void qcow2_image_finish(struct qcow2_image *);
 
 void qcow2_write_image(int, int, ranges *, unsigned);
+
+void qcow2_to_raw(int, int);
 
 #endif /* _QCOW2_H */

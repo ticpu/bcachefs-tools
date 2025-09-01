@@ -48,6 +48,7 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "data" => c::data_cmds(argc, argv),
             "device" => c::device_cmds(argc, argv),
             "dump" => c::cmd_dump(argc, argv),
+            "undump" => c::cmd_undump(argc, argv),
             "format" => c::cmd_format(argc, argv),
             "fs" => c::fs_cmds(argc, argv),
             "fsck" => c::cmd_fsck(argc, argv),

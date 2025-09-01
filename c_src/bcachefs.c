@@ -96,6 +96,7 @@ void bcachefs_usage(void)
 	     "Debug:\n"
 	     "These commands work on offline, unmounted filesystems\n"
 	     "  dump                     Dump filesystem metadata to a qcow2 image\n"
+	     "  undump                   Convert qcow2 metadata dumps to sparse raw files\n"
 	     "  list                     List filesystem metadata in textual form\n"
 	     "  list_journal             List contents of journal\n"
 	     "\n"

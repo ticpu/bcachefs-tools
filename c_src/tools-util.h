@@ -28,8 +28,13 @@ void die(const char *, ...)
 	__attribute__ ((format (printf, 1, 2))) noreturn;
 char *mprintf(const char *, ...)
 	__attribute__ ((format (printf, 1, 2)));
-void xpread(int, void *, size_t, off_t);
+
+void __xpread(int, void *, size_t, off_t, const char *, unsigned);
+#define xpread(_fd, _buf, _count, _offset)				\
+	__xpread(_fd, _buf, _count, _offset, __FILE__, __LINE__)
+
 void xpwrite(int, const void *, size_t, off_t, const char *);
+
 struct stat xfstatat(int, const char *, int);
 struct stat xfstat(int);
 struct stat xstat(const char *);

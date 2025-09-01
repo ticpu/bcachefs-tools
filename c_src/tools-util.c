@@ -52,15 +52,15 @@ char *mprintf(const char *fmt, ...)
 	return str;
 }
 
-void xpread(int fd, void *buf, size_t count, off_t offset)
+void __xpread(int fd, void *buf, size_t count, off_t offset, const char *file, unsigned line)
 {
 	while (count) {
 		ssize_t r = pread(fd, buf, count, offset);
 
 		if (r < 0)
-			die("read error: %m");
+			die("read error: %m at %s:%u", file, line);
 		if (!r)
-			die("pread error: unexpected eof");
+			die("pread error: unexpected eof at %s:%u", file, line);
 		count	-= r;
 		offset	+= r;
 	}

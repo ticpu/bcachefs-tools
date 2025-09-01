@@ -34,6 +34,8 @@ int cmd_fsck(int argc, char *argv[]);
 int cmd_recovery_pass(int argc, char *argv[]);
 
 int cmd_dump(int argc, char *argv[]);
+int cmd_undump(int argc, char *argv[]);
+
 int cmd_list_journal(int argc, char *argv[]);
 int cmd_kill_btree_node(int argc, char *argv[]);
 

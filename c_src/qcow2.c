@@ -143,8 +143,7 @@ void qcow2_image_finish(struct qcow2_image *img)
 
 	memset(buf, 0, img->block_size);
 	memcpy(buf, &hdr, sizeof(hdr));
-	xpwrite(img->outfd, buf, img->block_size, 0,
-		"qcow2 header");
+	xpwrite(img->outfd, buf, img->block_size, 0, "qcow2 header");
 
 	free(img->l2_table);
 	free(img->l1_table);
@@ -159,4 +158,52 @@ void qcow2_write_image(int infd, int outfd, ranges *data,
 	qcow2_image_init(&img, infd, outfd, block_size);
 	qcow2_write_ranges(&img, data);
 	qcow2_image_finish(&img);
+}
+
+void qcow2_to_raw(int infd, int outfd)
+{
+	struct qcow2_hdr hdr;
+
+	xpread(infd, &hdr, sizeof(hdr), 0);
+
+	if (hdr.magic != cpu_to_be32(QCOW_MAGIC))
+		die("not a qcow2 image");
+
+	if (hdr.version != cpu_to_be32(QCOW_VERSION))
+		die("incorrect qcow2 version");
+
+	ftruncate(outfd, be64_to_cpu(hdr.size));
+
+	unsigned block_size = 1U << be32_to_cpu(hdr.block_bits);
+
+	unsigned l1_size = be32_to_cpu(hdr.l1_size);
+	unsigned l2_size = block_size / sizeof(u64);
+
+	__be64 *l1_table	= xcalloc(l1_size, sizeof(u64));
+	__be64 *l2_table	= xmalloc(block_size);
+	void *data_buf		= xmalloc(block_size);
+
+	xpread(infd, l1_table, l1_size * sizeof(u64), be64_to_cpu(hdr.l1_table_offset));
+
+	for (u64 i = 0; i < l1_size; i++) {
+		if (!l1_table[i])
+			continue;
+
+		xpread(infd, l2_table, block_size, be64_to_cpu(l1_table[i]) & ~QCOW_OFLAG_COPIED);
+
+		for (unsigned j = 0; j < l2_size; j++) {
+			u64 src_offset = be64_to_cpu(l2_table[j]) & ~QCOW_OFLAG_COPIED;
+			if (!src_offset)
+				continue;
+
+			u64 dst_offset = (i * l2_size + j) * block_size;
+
+			xpread(infd,	data_buf, block_size, src_offset);
+			xpwrite(outfd,	data_buf, block_size, dst_offset, "qcow2 data");
+		}
+	}
+
+	free(data_buf);
+	free(l2_table);
+	free(l1_table);
 }
