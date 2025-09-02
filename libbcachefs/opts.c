@@ -518,7 +518,7 @@ void bch2_opts_to_text(struct printbuf *out,
 	}
 }
 
-int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, enum bch_opt_id id, u64 v)
+int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, u64 inum, enum bch_opt_id id, u64 v)
 {
 	int ret = 0;
 
@@ -531,6 +531,8 @@ int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, enum bch_opt_id 
 	case Opt_compression:
 	case Opt_background_compression:
 		ret = bch2_check_set_has_compressed_data(c, v);
+		if (ret)
+			return ret;
 		break;
 	case Opt_erasure_code:
 		if (v)
@@ -546,7 +548,7 @@ int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, enum bch_opt_id 
 int bch2_opts_hooks_pre_set(struct bch_fs *c)
 {
 	for (unsigned i = 0; i < bch2_opts_nr; i++) {
-		int ret = bch2_opt_hook_pre_set(c, NULL, i, bch2_opt_get_by_id(&c->opts, i));
+		int ret = bch2_opt_hook_pre_set(c, NULL, 0, i, bch2_opt_get_by_id(&c->opts, i));
 		if (ret)
 			return ret;
 	}
@@ -555,26 +557,15 @@ int bch2_opts_hooks_pre_set(struct bch_fs *c)
 }
 
 void bch2_opt_hook_post_set(struct bch_fs *c, struct bch_dev *ca, u64 inum,
-			    struct bch_opts *new_opts, enum bch_opt_id id)
+			    enum bch_opt_id id, u64 v)
 {
 	switch (id) {
 	case Opt_foreground_target:
-		if (new_opts->foreground_target &&
-		    !new_opts->background_target)
-			bch2_set_rebalance_needs_scan(c, inum);
-		break;
 	case Opt_compression:
-		if (new_opts->compression &&
-		    !new_opts->background_compression)
-			bch2_set_rebalance_needs_scan(c, inum);
-		break;
 	case Opt_background_target:
-		if (new_opts->background_target)
-			bch2_set_rebalance_needs_scan(c, inum);
-		break;
 	case Opt_background_compression:
-		if (new_opts->background_compression)
-			bch2_set_rebalance_needs_scan(c, inum);
+		bch2_set_rebalance_needs_scan(c, inum);
+		bch2_rebalance_wakeup(c);
 		break;
 	case Opt_rebalance_enabled:
 		bch2_rebalance_wakeup(c);
@@ -600,12 +591,14 @@ void bch2_opt_hook_post_set(struct bch_fs *c, struct bch_dev *ca, u64 inum,
 		 * upgrades at runtime as well, but right now there's nothing
 		 * that does that:
 		 */
-		if (new_opts->version_upgrade == BCH_VERSION_UPGRADE_incompatible)
+		if (v == BCH_VERSION_UPGRADE_incompatible)
 			bch2_sb_upgrade_incompat(c);
 		break;
 	default:
 		break;
 	}
+
+	atomic_inc(&c->opt_change_cookie);
 }
 
 int bch2_parse_one_mount_opt(struct bch_fs *c, struct bch_opts *opts,
@@ -802,16 +795,17 @@ bool bch2_opt_set_sb(struct bch_fs *c, struct bch_dev *ca,
 
 /* io opts: */
 
-struct bch_io_opts bch2_opts_to_inode_opts(struct bch_opts src)
+void bch2_inode_opts_get(struct bch_fs *c, struct bch_inode_opts *ret)
 {
-	struct bch_io_opts opts = {
-#define x(_name, _bits)	._name = src._name,
+	memset(ret, 0, sizeof(*ret));
+
+#define x(_name, _bits)	ret->_name = c->opts._name,
 	BCH_INODE_OPTS()
 #undef x
-	};
 
-	bch2_io_opts_fixups(&opts);
-	return opts;
+	ret->change_cookie = atomic_read(&c->opt_change_cookie);
+
+	bch2_io_opts_fixups(ret);
 }
 
 bool bch2_opt_is_inode_opt(enum bch_opt_id id)

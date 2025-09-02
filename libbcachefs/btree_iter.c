@@ -137,18 +137,8 @@ static void __bch2_btree_path_verify_cached(struct btree_trans *trans,
 static void __bch2_btree_path_verify_level(struct btree_trans *trans,
 				struct btree_path *path, unsigned level)
 {
-	struct btree_path_level *l;
-	struct btree_node_iter tmp;
-	bool locked;
-	struct bkey_packed *p, *k;
-	struct printbuf buf1 = PRINTBUF;
-	struct printbuf buf2 = PRINTBUF;
-	struct printbuf buf3 = PRINTBUF;
-	const char *msg;
-
-	l	= &path->l[level];
-	tmp	= l->iter;
-	locked	= btree_node_locked(path, level);
+	struct btree_path_level *l = &path->l[level];
+	bool locked = btree_node_locked(path, level);
 
 	if (path->cached) {
 		if (!level)
@@ -166,51 +156,68 @@ static void __bch2_btree_path_verify_level(struct btree_trans *trans,
 
 	bch2_btree_node_iter_verify(&l->iter, l->b);
 
-	/*
-	 * For interior nodes, the iterator will have skipped past deleted keys:
-	 */
-	p = level
+	/* For interior nodes, the iterator may have skipped past deleted keys: */
+	struct btree_node_iter tmp = l->iter;
+	const struct bkey_packed *p = level
 		? bch2_btree_node_iter_prev(&tmp, l->b)
 		: bch2_btree_node_iter_prev_all(&tmp, l->b);
-	k = bch2_btree_node_iter_peek_all(&l->iter, l->b);
+	tmp = l->iter;
+	const struct bkey_packed *k = level
+		? bch2_btree_node_iter_peek(&tmp, l->b)
+		: bch2_btree_node_iter_peek_all(&tmp, l->b);
 
-	if (p && bkey_iter_pos_cmp(l->b, p, &path->pos) >= 0) {
-		msg = "before";
-		goto err;
-	}
+	const char *msg;
+	if (!(level > path->level && trans->journal_replay_not_finished)) {
+		/*
+		 * We can't run these checks for interior nodes when we're still
+		 * using the journal overlay because there might be a key in
+		 * the interior node that points midway through the current leaf
+		 * node - which is deleted in the journal overlay, but set_pos()
+		 * will skip past it and cause the interior node iterators to be
+		 * inconsistent in a way that doesn't matter and it can't check
+		 * for.
+		 */
 
-	if (k && bkey_iter_pos_cmp(l->b, k, &path->pos) < 0) {
-		msg = "after";
-		goto err;
+		if (p && bkey_iter_pos_cmp(l->b, p, &path->pos) >= 0) {
+			msg = "before";
+			goto err;
+		}
+
+		if (k && bkey_iter_pos_cmp(l->b, k, &path->pos) < 0) {
+			msg = "after";
+			goto err;
+		}
 	}
 
 	if (!locked)
 		btree_node_unlock(trans, path, level);
 	return;
 err:
-	bch2_bpos_to_text(&buf1, path->pos);
+	{
+		CLASS(printbuf, buf)();
+		prt_printf(&buf, "path should be %s key at level %u", msg, level);
 
-	if (p) {
-		struct bkey uk = bkey_unpack_key(l->b, p);
+		prt_str(&buf, "\npath pos ");
+		bch2_bpos_to_text(&buf, path->pos);
 
-		bch2_bkey_to_text(&buf2, &uk);
-	} else {
-		prt_printf(&buf2, "(none)");
+		prt_str(&buf, "\nprev key ");
+		if (p) {
+			struct bkey uk = bkey_unpack_key(l->b, p);
+			bch2_bkey_to_text(&buf, &uk);
+		} else {
+			prt_printf(&buf, "(none)");
+		}
+
+		prt_str(&buf, "\ncur  key ");
+		if (k) {
+			struct bkey uk = bkey_unpack_key(l->b, k);
+			bch2_bkey_to_text(&buf, &uk);
+		} else {
+			prt_printf(&buf, "(none)");
+		}
+
+		panic("%s\n", buf.buf);
 	}
-
-	if (k) {
-		struct bkey uk = bkey_unpack_key(l->b, k);
-
-		bch2_bkey_to_text(&buf3, &uk);
-	} else {
-		prt_printf(&buf3, "(none)");
-	}
-
-	panic("path should be %s key at level %u:\n"
-	      "path pos %s\n"
-	      "prev key %s\n"
-	      "cur  key %s\n",
-	      msg, level, buf1.buf, buf2.buf, buf3.buf);
 }
 
 static void __bch2_btree_path_verify(struct btree_trans *trans,
@@ -886,28 +893,53 @@ static noinline void btree_node_mem_ptr_set(struct btree_trans *trans,
 		btree_node_unlock(trans, path, plevel);
 }
 
+static noinline_for_stack int btree_node_missing_err(struct btree_trans *trans,
+						     struct btree_path *path)
+{
+	struct bch_fs *c = trans->c;
+	CLASS(printbuf, buf)();
+
+	prt_str(&buf, "node not found at pos: ");
+	bch2_bpos_to_text(&buf, path->pos);
+	prt_str(&buf, "\n  within parent node ");
+	bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&path_l(path)->b->key));
+	prt_newline(&buf);
+
+	return __bch2_topology_error(c, &buf);
+}
+
+static noinline_for_stack int btree_node_gap_err(struct btree_trans *trans,
+						 struct btree_path *path,
+						 struct bkey_i *k)
+{
+	struct bch_fs *c = trans->c;
+	CLASS(printbuf, buf)();
+
+	prt_str(&buf, "node doesn't cover expected range at pos: ");
+	bch2_bpos_to_text(&buf, path->pos);
+	prt_str(&buf, "\n  within parent node ");
+	bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&path_l(path)->b->key));
+	prt_str(&buf, "\n  but got node: ");
+	bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(k));
+	prt_newline(&buf);
+
+	return __bch2_topology_error(c, &buf);
+}
+
 static noinline int btree_node_iter_and_journal_peek(struct btree_trans *trans,
 						     struct btree_path *path,
 						     enum btree_iter_update_trigger_flags flags)
 {
 	struct bch_fs *c = trans->c;
 	struct btree_path_level *l = path_l(path);
-	struct btree_and_journal_iter jiter;
-	struct bkey_s_c k;
 	int ret = 0;
 
+	struct btree_and_journal_iter jiter;
 	__bch2_btree_and_journal_iter_init_node_iter(trans, &jiter, l->b, l->iter, path->pos);
 
-	k = bch2_btree_and_journal_iter_peek(c, &jiter);
+	struct bkey_s_c k = bch2_btree_and_journal_iter_peek(c, &jiter);
 	if (!k.k) {
-		CLASS(printbuf, buf)();
-
-		prt_str(&buf, "node not found at pos ");
-		bch2_bpos_to_text(&buf, path->pos);
-		prt_str(&buf, " at btree ");
-		bch2_btree_pos_to_text(&buf, c, l->b);
-
-		ret = bch2_fs_topology_error(c, "%s", buf.buf);
+		ret = btree_node_missing_err(trans, path);
 		goto err;
 	}
 
@@ -922,20 +954,16 @@ err:
 	return ret;
 }
 
-static noinline_for_stack int btree_node_missing_err(struct btree_trans *trans,
-						     struct btree_path *path)
+static inline bool bpos_in_btree_node_key(struct bpos pos, const struct bkey_i *k)
 {
-	struct bch_fs *c = trans->c;
-	CLASS(printbuf, buf)();
+	if (bpos_gt(pos, k->k.p))
+		return false;
 
-	prt_str(&buf, "node not found at pos ");
-	bch2_bpos_to_text(&buf, path->pos);
-	prt_str(&buf, " within parent node ");
-	bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&path_l(path)->b->key));
+	if (k->k.type == KEY_TYPE_btree_ptr_v2 &&
+	    bpos_lt(pos, bkey_i_to_btree_ptr_v2_c(k)->v.min_key))
+		return false;
 
-	bch2_fs_fatal_error(c, "%s", buf.buf);
-	printbuf_exit(&buf);
-	return bch_err_throw(c, btree_need_topology_repair);
+	return true;
 }
 
 static __always_inline int btree_path_down(struct btree_trans *trans,
@@ -970,6 +998,9 @@ static __always_inline int btree_path_down(struct btree_trans *trans,
 				return ret;
 		}
 	}
+
+	if (unlikely(!bpos_in_btree_node_key(path->pos, &trans->btree_path_down)))
+		return btree_node_gap_err(trans, path, &trans->btree_path_down);
 
 	b = bch2_btree_node_get(trans, path, &trans->btree_path_down,
 				level, lock_type, trace_ip);
@@ -1476,7 +1507,7 @@ void bch2_trans_updates_to_text(struct printbuf *buf, struct btree_trans *trans)
 {
 	prt_printf(buf, "%u transaction updates for %s journal seq %llu\n",
 		   trans->nr_updates, trans->fn, trans->journal_res.seq);
-	printbuf_indent_add(buf, 2);
+	guard(printbuf_indent)(buf);
 
 	trans_for_each_update(trans, i) {
 		struct bkey_s_c old = { &i->old_k, i->old_v };
@@ -1502,8 +1533,6 @@ void bch2_trans_updates_to_text(struct printbuf *buf, struct btree_trans *trans)
 		bch2_journal_entry_to_text(buf, trans->c, e);
 		prt_newline(buf);
 	}
-
-	printbuf_indent_sub(buf, 2);
 }
 
 static void bch2_btree_path_to_text_short(struct printbuf *out, struct btree_trans *trans, btree_path_idx_t path_idx)
@@ -1556,8 +1585,8 @@ void bch2_btree_path_to_text(struct printbuf *out, struct btree_trans *trans, bt
 
 	prt_printf(out, " uptodate %u locks_want %u", path->uptodate, path->locks_want);
 	prt_newline(out);
+	guard(printbuf_indent)(out);
 
-	printbuf_indent_add(out, 2);
 	for (unsigned l = 0; l < BTREE_MAX_DEPTH; l++) {
 		prt_printf(out, "l=%u locks %s seq %u node ", l,
 			   btree_node_locked_str(btree_node_locked_type(path, l)),
@@ -1570,7 +1599,6 @@ void bch2_btree_path_to_text(struct printbuf *out, struct btree_trans *trans, bt
 			prt_printf(out, "%px", path->l[l].b);
 		prt_newline(out);
 	}
-	printbuf_indent_sub(out, 2);
 }
 
 static noinline __cold

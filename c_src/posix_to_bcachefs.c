@@ -252,8 +252,8 @@ static void read_data(struct bch_fs *c,
 	rbio.bio.bi_private		= &cl;
 	bch2_bio_map(&rbio.bio, buf, len);
 
-	struct bch_io_opts opts;
-	bch2_inode_opts_get(&opts, c, inode);
+	struct bch_inode_opts opts;
+	bch2_inode_opts_get_inode(c, inode, &opts);
 
 	rbio_init(&rbio.bio, c, opts, read_data_endio);
 
@@ -279,7 +279,10 @@ static void write_data(struct bch_fs *c,
 	bio_init(&op.wbio.bio, NULL, bv, ARRAY_SIZE(bv), 0);
 	bch2_bio_map(&op.wbio.bio, buf, len);
 
-	bch2_write_op_init(&op, c, bch2_opts_to_inode_opts(c->opts));
+	struct bch_inode_opts opts;
+	bch2_inode_opts_get(c, &opts);
+
+	bch2_write_op_init(&op, c, opts);
 	op.write_point	= writepoint_hashed(0);
 	op.nr_replicas	= 1;
 	op.subvol	= 1;

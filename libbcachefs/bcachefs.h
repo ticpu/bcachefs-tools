@@ -458,7 +458,6 @@ BCH_DEBUG_PARAMS_ALL()
 	x(btree_node_compact)			\
 	x(btree_node_merge)			\
 	x(btree_node_sort)			\
-	x(btree_node_get)			\
 	x(btree_node_read)			\
 	x(btree_node_read_done)			\
 	x(btree_node_write)			\
@@ -466,10 +465,6 @@ BCH_DEBUG_PARAMS_ALL()
 	x(btree_interior_update_total)		\
 	x(btree_gc)				\
 	x(data_write)				\
-	x(data_write_to_submit)			\
-	x(data_write_to_queue)			\
-	x(data_write_to_btree_update)		\
-	x(data_write_btree_update)		\
 	x(data_read)				\
 	x(data_promote)				\
 	x(journal_flush_write)			\
@@ -483,6 +478,7 @@ BCH_DEBUG_PARAMS_ALL()
 	x(blocked_allocate)			\
 	x(blocked_allocate_open_bucket)		\
 	x(blocked_write_buffer_full)		\
+	x(blocked_writeback_throttle)		\
 	x(nocow_lock_contended)
 
 enum bch_time_stats {
@@ -523,6 +519,7 @@ struct discard_in_flight {
 	x(journal_read)					\
 	x(fs_journal_alloc)				\
 	x(fs_resize_on_mount)				\
+	x(sb_journal_sort)				\
 	x(btree_node_read)				\
 	x(btree_node_read_all_replicas)			\
 	x(btree_node_scrub)				\
@@ -674,6 +671,7 @@ struct bch_dev {
 	x(error)			\
 	x(topology_error)		\
 	x(errors_fixed)			\
+	x(errors_fixed_silent)		\
 	x(errors_not_fixed)		\
 	x(no_invalid_checks)		\
 	x(discard_mount_opt_set)	\
@@ -807,6 +805,8 @@ struct bch_fs {
 	struct bch_disk_groups_cpu __rcu *disk_groups;
 
 	struct bch_opts		opts;
+	atomic_t		opt_change_cookie;
+
 	unsigned		loglevel;
 	unsigned		prev_loglevel;
 

@@ -369,9 +369,9 @@ err:
 }
 
 int bch2_inode_find_by_inum_snapshot(struct btree_trans *trans,
-					    u64 inode_nr, u32 snapshot,
-					    struct bch_inode_unpacked *inode,
-					    unsigned flags)
+				     u64 inode_nr, u32 snapshot,
+				     struct bch_inode_unpacked *inode,
+				     unsigned flags)
 {
 	CLASS(btree_iter, iter)(trans, BTREE_ID_inodes, SPOS(0, inode_nr, snapshot), flags);
 	struct bkey_s_c k = bch2_btree_iter_peek_slot(&iter);
@@ -598,7 +598,7 @@ static void __bch2_inode_unpacked_to_text(struct printbuf *out,
 					  struct bch_inode_unpacked *inode)
 {
 	prt_printf(out, "\n");
-	printbuf_indent_add(out, 2);
+	guard(printbuf_indent)(out);
 	prt_printf(out, "mode=%o\n", inode->bi_mode);
 
 	prt_str(out, "flags=");
@@ -620,7 +620,6 @@ static void __bch2_inode_unpacked_to_text(struct printbuf *out,
 #undef  x
 
 	bch2_printbuf_strip_trailing_newline(out);
-	printbuf_indent_sub(out, 2);
 }
 
 void bch2_inode_unpacked_to_text(struct printbuf *out, struct bch_inode_unpacked *inode)
@@ -674,7 +673,7 @@ static inline void bkey_inode_flags_set(struct bkey_s k, u64 f)
 
 static inline bool bkey_is_unlinked_inode(struct bkey_s_c k)
 {
-	unsigned f = bkey_inode_flags(k) & BCH_INODE_unlinked;
+	unsigned f = bkey_inode_flags(k);
 
 	return (f & BCH_INODE_unlinked) && !(f & BCH_INODE_has_child_snapshot);
 }
@@ -1224,32 +1223,45 @@ struct bch_opts bch2_inode_opts_to_opts(struct bch_inode_unpacked *inode)
 	return ret;
 }
 
-void bch2_inode_opts_get(struct bch_io_opts *opts, struct bch_fs *c,
-			 struct bch_inode_unpacked *inode)
+void bch2_inode_opts_get_inode(struct bch_fs *c,
+			       struct bch_inode_unpacked *inode,
+			       struct bch_inode_opts *ret)
 {
 #define x(_name, _bits)							\
 	if ((inode)->bi_##_name) {					\
-		opts->_name = inode->bi_##_name - 1;			\
-		opts->_name##_from_inode = true;			\
+		ret->_name = inode->bi_##_name - 1;			\
+		ret->_name##_from_inode = true;				\
 	} else {							\
-		opts->_name = c->opts._name;				\
-		opts->_name##_from_inode = false;			\
+		ret->_name = c->opts._name;				\
+		ret->_name##_from_inode = false;			\
 	}
 	BCH_INODE_OPTS()
 #undef x
 
-	bch2_io_opts_fixups(opts);
+	ret->change_cookie = atomic_read(&c->opt_change_cookie);
+
+	bch2_io_opts_fixups(ret);
 }
 
-int bch2_inum_opts_get(struct btree_trans *trans, subvol_inum inum, struct bch_io_opts *opts)
+int bch2_inum_snapshot_opts_get(struct btree_trans *trans,
+				u64 inum, u32 snapshot,
+				struct bch_inode_opts *opts)
 {
-	struct bch_inode_unpacked inode;
-	int ret = lockrestart_do(trans, bch2_inode_find_by_inum_trans(trans, inum, &inode));
+	if (inum) {
+		struct bch_inode_unpacked inode;
+		int ret = bch2_inode_find_by_inum_snapshot(trans, inum, snapshot, &inode, 0);
+		if (ret)
+			return ret;
 
-	if (ret)
-		return ret;
+		bch2_inode_opts_get_inode(trans->c, &inode, opts);
+	} else {
+		/*
+		 * data_update_index_update may call us for reflink btree extent
+		 * updates, inum will be 0
+		 */
 
-	bch2_inode_opts_get(opts, trans->c, &inode);
+		bch2_inode_opts_get(trans->c, opts);
+	}
 	return 0;
 }
 
@@ -1347,7 +1359,7 @@ err:
 	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 		goto retry;
 
-	return ret ?: bch_err_throw(c, transaction_restart_nested);
+	return ret;
 }
 
 /*
@@ -1386,7 +1398,8 @@ next_parent:
 int bch2_inode_rm_snapshot(struct btree_trans *trans, u64 inum, u32 snapshot)
 {
 	return __bch2_inode_rm_snapshot(trans, inum, snapshot) ?:
-		delete_ancestor_snapshot_inodes(trans, SPOS(0, inum, snapshot));
+		delete_ancestor_snapshot_inodes(trans, SPOS(0, inum, snapshot)) ?:
+		bch_err_throw(trans->c, transaction_restart_nested);
 }
 
 static int may_delete_deleted_inode(struct btree_trans *trans, struct bpos pos,

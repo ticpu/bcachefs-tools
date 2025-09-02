@@ -51,25 +51,17 @@ static int __bch2_lru_set(struct btree_trans *trans, u16 lru_id,
 		: 0;
 }
 
-int bch2_lru_del(struct btree_trans *trans, u16 lru_id, u64 dev_bucket, u64 time)
+static int bch2_lru_set(struct btree_trans *trans, u16 lru_id, u64 dev_bucket, u64 time)
 {
-	return __bch2_lru_set(trans, lru_id, dev_bucket, time, KEY_TYPE_deleted);
-}
-
-int bch2_lru_set(struct btree_trans *trans, u16 lru_id, u64 dev_bucket, u64 time)
-{
-	return __bch2_lru_set(trans, lru_id, dev_bucket, time, KEY_TYPE_set);
+	return __bch2_lru_set(trans, lru_id, dev_bucket, time, true);
 }
 
 int __bch2_lru_change(struct btree_trans *trans,
 		      u16 lru_id, u64 dev_bucket,
 		      u64 old_time, u64 new_time)
 {
-	if (old_time == new_time)
-		return 0;
-
-	return  bch2_lru_del(trans, lru_id, dev_bucket, old_time) ?:
-		bch2_lru_set(trans, lru_id, dev_bucket, new_time);
+	return  __bch2_lru_set(trans, lru_id, dev_bucket, old_time, false) ?:
+		__bch2_lru_set(trans, lru_id, dev_bucket, new_time, true);
 }
 
 static const char * const bch2_lru_types[] = {
@@ -87,7 +79,6 @@ int bch2_lru_check_set(struct btree_trans *trans,
 		       struct bkey_buf *last_flushed)
 {
 	struct bch_fs *c = trans->c;
-	CLASS(printbuf, buf)();
 	CLASS(btree_iter, lru_iter)(trans, BTREE_ID_lru, lru_pos(lru_id, dev_bucket, time), 0);
 	struct bkey_s_c lru_k = bch2_btree_iter_peek_slot(&lru_iter);
 	int ret = bkey_err(lru_k);
@@ -99,10 +90,13 @@ int bch2_lru_check_set(struct btree_trans *trans,
 		if (ret)
 			return ret;
 
-		if (fsck_err(trans, alloc_key_to_missing_lru_entry,
-			     "missing %s lru entry\n%s",
-			     bch2_lru_types[lru_type(lru_k)],
-			     (bch2_bkey_val_to_text(&buf, c, referring_k), buf.buf))) {
+		CLASS(printbuf, buf)();
+		prt_printf(&buf, "missing %s lru entry at pos ", bch2_lru_types[lru_type(lru_k)]);
+		bch2_bpos_to_text(&buf, lru_iter.pos);
+		prt_newline(&buf);
+		bch2_bkey_val_to_text(&buf, c, referring_k);
+
+		if (fsck_err(trans, alloc_key_to_missing_lru_entry, "%s", buf.buf)) {
 			ret = bch2_lru_set(trans, lru_id, dev_bucket, time);
 			if (ret)
 				return ret;
@@ -125,6 +119,23 @@ static struct bbpos lru_pos_to_bp(struct bkey_s_c lru_k)
 	default:
 		BUG();
 	}
+}
+
+int bch2_dev_remove_lrus(struct bch_fs *c, struct bch_dev *ca)
+{
+	CLASS(btree_trans, trans)(c);
+	int ret = bch2_btree_write_buffer_flush_sync(trans) ?:
+		for_each_btree_key(trans, iter,
+				 BTREE_ID_lru, POS_MIN, BTREE_ITER_prefetch, k, ({
+		struct bbpos bp = lru_pos_to_bp(k);
+
+		bp.btree == BTREE_ID_alloc && bp.pos.inode == ca->dev_idx
+		? (bch2_btree_delete_at(trans, &iter, 0) ?:
+		   bch2_trans_commit(trans, NULL, NULL, 0))
+		: 0;
+	}));
+	bch_err_fn(c, ret);
+	return ret;
 }
 
 static u64 bkey_lru_type_idx(struct bch_fs *c,

@@ -1520,11 +1520,11 @@ static const struct vm_operations_struct bch_vm_ops = {
 	.page_mkwrite   = bch2_page_mkwrite,
 };
 
-static int bch2_mmap(struct file *file, struct vm_area_struct *vma)
+static int bch2_mmap_prepare(struct vm_area_desc *desc)
 {
-	file_accessed(file);
+	file_accessed(desc->file);
 
-	vma->vm_ops = &bch_vm_ops;
+	desc->vm_ops = &bch_vm_ops;
 	return 0;
 }
 
@@ -1586,7 +1586,7 @@ static const __maybe_unused unsigned bch_flags_to_xflags[] = {
 };
 
 static int bch2_fileattr_get(struct dentry *dentry,
-			     struct fileattr *fa)
+			     struct file_kattr *fa)
 {
 	struct bch_inode_info *inode = to_bch_ei(d_inode(dentry));
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
@@ -1649,7 +1649,7 @@ static int fssetxattr_inode_update_fn(struct btree_trans *trans,
 
 static int bch2_fileattr_set(struct mnt_idmap *idmap,
 			     struct dentry *dentry,
-			     struct fileattr *fa)
+			     struct file_kattr *fa)
 {
 	struct bch_inode_info *inode = to_bch_ei(d_inode(dentry));
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
@@ -1714,7 +1714,7 @@ static const struct file_operations bch_file_operations = {
 	.llseek		= bch2_llseek,
 	.read_iter	= bch2_read_iter,
 	.write_iter	= bch2_write_iter,
-	.mmap		= bch2_mmap,
+	.mmap_prepare	= bch2_mmap_prepare,
 	.get_unmapped_area = thp_get_unmapped_area,
 	.fsync		= bch2_fsync,
 	.splice_read	= filemap_splice_read,
@@ -2147,9 +2147,11 @@ static void bch2_evict_inode(struct inode *vinode)
 				KEY_TYPE_QUOTA_WARN);
 		int ret = bch2_inode_rm(c, inode_inum(inode));
 		if (ret && !bch2_err_matches(ret, EROFS)) {
-			bch_err_msg(c, ret, "VFS incorrectly tried to delete inode %llu:%llu",
-				    inode->ei_inum.subvol,
-				    inode->ei_inum.inum);
+			CLASS(printbuf, buf)();
+			bch2_trans_do(c, bch2_inum_to_path(trans, inode->ei_inum, &buf));
+
+			bch_err_msg(c, ret, "VFS incorrectly tried to delete inode %llu:%llu\n%s",
+				    inode->ei_inum.subvol, inode->ei_inum.inum, buf.buf);
 			bch2_sb_error_count(c, BCH_FSCK_ERR_vfs_bad_inode_rm);
 		}
 
@@ -2236,11 +2238,16 @@ static int bch2_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct bch_fs *c = sb->s_fs_info;
 	struct bch_fs_usage_short usage = bch2_fs_usage_read_short(c);
 	unsigned shift = sb->s_blocksize_bits - 9;
+
 	/*
-	 * this assumes inodes take up 64 bytes, which is a decent average
+	 * This assumes inodes take up 64 bytes, which is a decent average
 	 * number:
+	 *
+	 * Not anymore - bi_dir, bi_dir_offset came later and shouldn't have
+	 * been varint fields: seeing 144-160 byte inodes, so let's call it 256
+	 * bytes:
 	 */
-	u64 avail_inodes = ((usage.capacity - usage.used) << 3);
+	u64 avail_inodes = ((usage.capacity - usage.used) << 1);
 
 	buf->f_type	= BCACHEFS_STATFS_MAGIC;
 	buf->f_bsize	= sb->s_blocksize;

@@ -717,15 +717,11 @@ fsck_err:
 
 static int bch2_gc_btree(struct btree_trans *trans,
 			 struct progress_indicator_state *progress,
-			 enum btree_id btree, bool initial)
+			 enum btree_id btree, unsigned target_depth,
+			 bool initial)
 {
 	struct bch_fs *c = trans->c;
-	unsigned target_depth = btree_node_type_has_triggers(__btree_node_type(0, btree)) ? 0 : 1;
 	int ret = 0;
-
-	/* We need to make sure every leaf node is readable before going RW */
-	if (initial)
-		target_depth = 0;
 
 	for (unsigned level = target_depth; level < BTREE_MAX_DEPTH; level++) {
 		struct btree *prev = NULL;
@@ -797,7 +793,21 @@ static int bch2_gc_btrees(struct bch_fs *c)
 		if (IS_ERR_OR_NULL(bch2_btree_id_root(c, btree)->b))
 			continue;
 
-		ret = bch2_gc_btree(trans, &progress, btree, true);
+
+		unsigned target_depth = BIT_ULL(btree) & btree_leaf_has_triggers_mask ? 0 : 1;
+
+		/*
+		 * In fsck, we need to make sure every leaf node is readable
+		 * before going RW, otherwise we can no longer rewind inside
+		 * btree_lost_data to repair during the current fsck run.
+		 *
+		 * Otherwise, we can delay the repair to the next
+		 * mount or offline fsck.
+		 */
+		if (test_bit(BCH_FS_in_fsck, &c->flags))
+			target_depth = 0;
+
+		ret = bch2_gc_btree(trans, &progress, btree, target_depth, true);
 	}
 
 	bch_err_fn(c, ret);
@@ -1228,7 +1238,7 @@ int bch2_gc_gens(struct bch_fs *c)
 	}
 
 	for (unsigned i = 0; i < BTREE_ID_NR; i++)
-		if (btree_type_has_ptrs(i)) {
+		if (btree_type_has_data_ptrs(i)) {
 			c->gc_gens_btree = i;
 			c->gc_gens_pos = POS_MIN;
 

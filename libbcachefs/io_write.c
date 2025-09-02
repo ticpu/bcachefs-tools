@@ -205,7 +205,8 @@ int bch2_sum_sector_overwrites(struct btree_trans *trans,
 static inline int bch2_extent_update_i_size_sectors(struct btree_trans *trans,
 						    struct btree_iter *extent_iter,
 						    u64 new_i_size,
-						    s64 i_sectors_delta)
+						    s64 i_sectors_delta,
+						    struct bch_inode_unpacked *inode_u)
 {
 	/*
 	 * Crazy performance optimization:
@@ -227,7 +228,13 @@ static inline int bch2_extent_update_i_size_sectors(struct btree_trans *trans,
 				BTREE_ITER_intent|
 				BTREE_ITER_cached);
 	struct bkey_s_c k = bch2_btree_iter_peek_slot(&iter);
-	int ret = bkey_err(k);
+
+	/*
+	 * XXX: we currently need to unpack the inode on every write because we
+	 * need the current io_opts, for transactional consistency - inode_v4?
+	 */
+	int ret = bkey_err(k) ?:
+		  bch2_inode_unpack(k, inode_u);
 	if (unlikely(ret))
 		return ret;
 
@@ -303,8 +310,10 @@ int bch2_extent_update(struct btree_trans *trans,
 		       struct disk_reservation *disk_res,
 		       u64 new_i_size,
 		       s64 *i_sectors_delta_total,
-		       bool check_enospc)
+		       bool check_enospc,
+		       u32 change_cookie)
 {
+	struct bch_fs *c = trans->c;
 	struct bpos next_pos;
 	bool usage_increasing;
 	s64 i_sectors_delta = 0, disk_sectors_delta = 0;
@@ -335,7 +344,7 @@ int bch2_extent_update(struct btree_trans *trans,
 
 	if (disk_res &&
 	    disk_sectors_delta > (s64) disk_res->sectors) {
-		ret = bch2_disk_reservation_add(trans->c, disk_res,
+		ret = bch2_disk_reservation_add(c, disk_res,
 					disk_sectors_delta - disk_res->sectors,
 					!check_enospc || !usage_increasing
 					? BCH_DISK_RESERVATION_NOFAIL : 0);
@@ -349,9 +358,16 @@ int bch2_extent_update(struct btree_trans *trans,
 	 * aren't changing - for fsync to work properly; fsync relies on
 	 * inode->bi_journal_seq which is updated by the trigger code:
 	 */
+	struct bch_inode_unpacked inode;
+	struct bch_inode_opts opts;
+
 	ret =   bch2_extent_update_i_size_sectors(trans, iter,
 						  min(k->k.p.offset << 9, new_i_size),
-						  i_sectors_delta) ?:
+						  i_sectors_delta, &inode) ?:
+		(bch2_inode_opts_get_inode(c, &inode, &opts),
+		 bch2_bkey_set_needs_rebalance(c, &opts, k,
+					       SET_NEEDS_REBALANCE_foreground,
+					       change_cookie)) ?:
 		bch2_trans_update(trans, iter, k, 0) ?:
 		bch2_trans_commit(trans, disk_res, NULL,
 				BCH_TRANS_COMMIT_no_check_rw|
@@ -402,7 +418,8 @@ static int bch2_write_index_default(struct bch_write_op *op)
 		ret =   bch2_extent_update(trans, inum, &iter, sk.k,
 					&op->res,
 					op->new_i_size, &op->i_sectors_delta,
-					op->flags & BCH_WRITE_check_enospc);
+					op->flags & BCH_WRITE_check_enospc,
+					op->opts.change_cookie);
 
 		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 			continue;
@@ -792,10 +809,6 @@ static void init_append_extent(struct bch_write_op *op,
 
 	bch2_alloc_sectors_append_ptrs_inlined(op->c, wp, &e->k_i, crc.compressed_size,
 				       op->flags & BCH_WRITE_cached);
-
-	if (!(op->flags & BCH_WRITE_move))
-		bch2_bkey_set_needs_rebalance(op->c, &op->opts, &e->k_i);
-
 	bch2_keylist_push(&op->insert_keys);
 }
 
@@ -1225,6 +1238,7 @@ static int bch2_nocow_write_convert_one_unwritten(struct btree_trans *trans,
 		return 0;
 	}
 
+	struct bch_fs *c = trans->c;
 	struct bkey_i *new = bch2_trans_kmalloc_nomemzero(trans,
 				bkey_bytes(k.k) + sizeof(struct bch_extent_rebalance));
 	int ret = PTR_ERR_OR_ZERO(new);
@@ -1239,8 +1253,6 @@ static int bch2_nocow_write_convert_one_unwritten(struct btree_trans *trans,
 	bkey_for_each_ptr(ptrs, ptr)
 		ptr->unwritten = 0;
 
-	bch2_bkey_set_needs_rebalance(op->c, &op->opts, new);
-
 	/*
 	 * Note that we're not calling bch2_subvol_get_snapshot() in this path -
 	 * that was done when we kicked off the write, and here it's important
@@ -1248,8 +1260,20 @@ static int bch2_nocow_write_convert_one_unwritten(struct btree_trans *trans,
 	 * since been created. The write is still outstanding, so we're ok
 	 * w.r.t. snapshot atomicity:
 	 */
+
+	/*
+	 * For transactional consistency, set_needs_rebalance() has to be called
+	 * with the io_opts from the btree in the same transaction:
+	 */
+	struct bch_inode_unpacked inode;
+	struct bch_inode_opts opts;
+
 	return  bch2_extent_update_i_size_sectors(trans, iter,
-					min(new->k.p.offset << 9, new_i_size), 0) ?:
+					min(new->k.p.offset << 9, new_i_size), 0, &inode) ?:
+		(bch2_inode_opts_get_inode(c, &inode, &opts),
+		 bch2_bkey_set_needs_rebalance(c, &opts, new,
+					       SET_NEEDS_REBALANCE_foreground,
+					       op->opts.change_cookie)) ?:
 		bch2_trans_update(trans, iter, new,
 				  BTREE_UPDATE_internal_snapshot_node);
 }
@@ -1742,7 +1766,7 @@ void bch2_write_op_to_text(struct printbuf *out, struct bch_write_op *op)
 	prt_printf(out, "pos:\t");
 	bch2_bpos_to_text(out, op->pos);
 	prt_newline(out);
-	printbuf_indent_add(out, 2);
+	guard(printbuf_indent)(out);
 
 	prt_printf(out, "started:\t");
 	bch2_pr_time_units(out, local_clock() - op->start_time);
@@ -1754,11 +1778,12 @@ void bch2_write_op_to_text(struct printbuf *out, struct bch_write_op *op)
 
 	prt_printf(out, "nr_replicas:\t%u\n", op->nr_replicas);
 	prt_printf(out, "nr_replicas_required:\t%u\n", op->nr_replicas_required);
+	prt_printf(out, "devs_have:\t");
+	bch2_devs_list_to_text(out, &op->devs_have);
+	prt_newline(out);
 
 	prt_printf(out, "ref:\t%u\n", closure_nr_remaining(&op->cl));
 	prt_printf(out, "ret\t%s\n", bch2_err_str(op->error));
-
-	printbuf_indent_sub(out, 2);
 }
 
 void bch2_fs_io_write_exit(struct bch_fs *c)

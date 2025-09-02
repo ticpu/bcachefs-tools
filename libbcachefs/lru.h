@@ -59,8 +59,6 @@ void bch2_lru_pos_to_text(struct printbuf *, struct bpos);
 	.min_val_size	= 8,			\
 })
 
-int bch2_lru_del(struct btree_trans *, u16, u64, u64);
-int bch2_lru_set(struct btree_trans *, u16, u64, u64);
 int __bch2_lru_change(struct btree_trans *, u16, u64, u64, u64);
 
 static inline int bch2_lru_change(struct btree_trans *trans,
@@ -72,9 +70,10 @@ static inline int bch2_lru_change(struct btree_trans *trans,
 		: 0;
 }
 
+int bch2_dev_remove_lrus(struct bch_fs *, struct bch_dev *);
+
 struct bkey_buf;
 int bch2_lru_check_set(struct btree_trans *, u16, u64, u64, struct bkey_s_c, struct bkey_buf *);
-
 int bch2_check_lrus(struct bch_fs *);
 
 #endif /* _BCACHEFS_LRU_H */

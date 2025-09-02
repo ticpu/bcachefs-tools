@@ -658,10 +658,9 @@ void bch2_opts_to_text(struct printbuf *,
 		       struct bch_fs *, struct bch_sb *,
 		       unsigned, unsigned, unsigned);
 
-int bch2_opt_hook_pre_set(struct bch_fs *, struct bch_dev *, enum bch_opt_id, u64);
+int bch2_opt_hook_pre_set(struct bch_fs *, struct bch_dev *, u64, enum bch_opt_id, u64);
 int bch2_opts_hooks_pre_set(struct bch_fs *);
-void bch2_opt_hook_post_set(struct bch_fs *, struct bch_dev *, u64,
-			    struct bch_opts *, enum bch_opt_id);
+void bch2_opt_hook_post_set(struct bch_fs *, struct bch_dev *, u64, enum bch_opt_id, u64);
 
 int bch2_parse_one_mount_opt(struct bch_fs *, struct bch_opts *,
 			     struct printbuf *, const char *, const char *);
@@ -670,16 +669,19 @@ int bch2_parse_mount_opts(struct bch_fs *, struct bch_opts *, struct printbuf *,
 
 /* inode opts: */
 
-struct bch_io_opts {
+struct bch_inode_opts {
 #define x(_name, _bits)	u##_bits _name;
 	BCH_INODE_OPTS()
 #undef x
+
 #define x(_name, _bits)	u64 _name##_from_inode:1;
 	BCH_INODE_OPTS()
 #undef x
+
+	u32 change_cookie;
 };
 
-static inline void bch2_io_opts_fixups(struct bch_io_opts *opts)
+static inline void bch2_io_opts_fixups(struct bch_inode_opts *opts)
 {
 	if (!opts->background_target)
 		opts->background_target = opts->foreground_target;
@@ -692,7 +694,7 @@ static inline void bch2_io_opts_fixups(struct bch_io_opts *opts)
 	}
 }
 
-struct bch_io_opts bch2_opts_to_inode_opts(struct bch_opts);
+void bch2_inode_opts_get(struct bch_fs *, struct bch_inode_opts *);
 bool bch2_opt_is_inode_opt(enum bch_opt_id);
 
 #endif /* _BCACHEFS_OPTS_H */

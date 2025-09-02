@@ -277,6 +277,17 @@ struct bch_fs *bch2_uuid_to_fs(__uuid_t uuid)
 	return c;
 }
 
+void bch2_devs_list_to_text(struct printbuf *out, struct bch_devs_list *d)
+{
+	prt_char(out, '[');
+	darray_for_each(*d, i) {
+		if (i != d->data)
+			prt_char(out, ' ');
+		prt_printf(out, "%u", *i);
+	}
+	prt_char(out, ']');
+}
+
 /* Filesystem RO/RW: */
 
 /*
@@ -310,6 +321,8 @@ static void __bch2_fs_read_only(struct bch_fs *c)
 
 	do {
 		clean_passes++;
+
+		bch2_do_discards_going_ro(c);
 
 		if (bch2_btree_interior_updates_flush(c) ||
 		    bch2_btree_write_buffer_flush_going_ro(c) ||
@@ -461,9 +474,11 @@ static bool __bch2_fs_emergency_read_only2(struct bch_fs *c, struct printbuf *ou
 	bch2_fs_read_only_async(c);
 	wake_up(&bch2_read_only_wait);
 
-	if (ret)
+	if (ret) {
 		prt_printf(out, "emergency read only at seq %llu\n",
 			   journal_cur_seq(&c->journal));
+		bch2_prt_task_backtrace(out, current, 2, out->atomic ? GFP_ATOMIC : GFP_KERNEL);
+	}
 
 	return ret;
 }
@@ -1196,12 +1211,14 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 
 	bch2_opts_apply(&c->opts, *opts);
 
+#ifdef __KERNEL__
 	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) &&
 	    c->opts.block_size > PAGE_SIZE) {
 		bch_err(c, "cannot mount bs > ps filesystem without CONFIG_TRANSPARENT_HUGEPAGE");
 		ret = -EINVAL;
 		goto err;
 	}
+#endif
 
 	c->btree_key_cache_btrees |= 1U << BTREE_ID_alloc;
 	if (c->opts.inodes_use_key_cache)
@@ -1273,7 +1290,12 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 	if (ret)
 		goto err;
 
-	if (go_rw_in_recovery(c)) {
+	/*
+	 * just make sure this is always allocated if we might need it - mount
+	 * failing due to kthread_create() failing is _very_ annoying
+	 */
+	if (!(c->sb.features & BIT_ULL(BCH_FEATURE_no_alloc_info)) ||
+	    go_rw_in_recovery(c)) {
 		/*
 		 * start workqueues/kworkers early - kthread creation checks for
 		 * pending signals, which is _very_ annoying
@@ -1769,7 +1791,7 @@ static int bch2_dev_alloc(struct bch_fs *c, unsigned dev_idx)
 static int __bch2_dev_attach_bdev(struct bch_dev *ca, struct bch_sb_handle *sb,
 				  struct printbuf *err)
 {
-	unsigned ret;
+	int ret;
 
 	if (bch2_dev_is_online(ca)) {
 		prt_printf(err, "already have device online in slot %u\n",
@@ -1992,9 +2014,9 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 	__bch2_dev_read_only(c, ca);
 
 	ret = fast_device_removal
-		? bch2_dev_data_drop_by_backpointers(c, ca->dev_idx, flags)
-		: (bch2_dev_data_drop(c, ca->dev_idx, flags) ?:
-		   bch2_dev_remove_stripes(c, ca->dev_idx, flags));
+		? bch2_dev_data_drop_by_backpointers(c, ca->dev_idx, flags, err)
+		: (bch2_dev_data_drop(c, ca->dev_idx, flags, err) ?:
+		   bch2_dev_remove_stripes(c, ca->dev_idx, flags, err));
 	if (ret)
 		goto err;
 

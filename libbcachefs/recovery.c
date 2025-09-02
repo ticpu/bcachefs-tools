@@ -15,6 +15,7 @@
 #include "error.h"
 #include "journal_io.h"
 #include "journal_reclaim.h"
+#include "journal_sb.h"
 #include "journal_seq_blacklist.h"
 #include "logged_ops.h"
 #include "move.h"
@@ -67,9 +68,12 @@ int bch2_btree_lost_data(struct bch_fs *c,
 #endif
 
 	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_lru_entry_bad, ext->errors_silent);
+	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_alloc_key_to_missing_lru_entry, ext->errors_silent);
 	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_backpointer_to_missing_ptr, ext->errors_silent);
 	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_alloc_key_data_type_wrong, ext->errors_silent);
 	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_alloc_key_dirty_sectors_wrong, ext->errors_silent);
+	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_need_discard_key_wrong, ext->errors_silent);
+	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_freespace_key_wrong, ext->errors_silent);
 
 	switch (btree) {
 	case BTREE_ID_alloc:
@@ -644,6 +648,10 @@ int bch2_fs_recovery(struct bch_fs *c)
 
 		bch_info(c, "recovering from clean shutdown, journal seq %llu",
 			 le64_to_cpu(clean->journal_seq));
+
+		ret = bch2_sb_journal_sort(c);
+		if (ret)
+			goto err;
 	} else {
 		bch_info(c, "recovering from unclean shutdown");
 	}
@@ -829,33 +837,39 @@ use_clean:
 	bch2_async_btree_node_rewrites_flush(c);
 
 	/* fsync if we fixed errors */
-	if (test_bit(BCH_FS_errors_fixed, &c->flags)) {
+	bool errors_fixed = test_bit(BCH_FS_errors_fixed, &c->flags) ||
+		test_bit(BCH_FS_errors_fixed_silent, &c->flags);
+
+	if (errors_fixed) {
 		bch2_journal_flush_all_pins(&c->journal);
 		bch2_journal_meta(&c->journal);
 	}
 
 	/* If we fixed errors, verify that fs is actually clean now: */
 	if (IS_ENABLED(CONFIG_BCACHEFS_DEBUG) &&
-	    test_bit(BCH_FS_errors_fixed, &c->flags) &&
+	    errors_fixed &&
 	    !test_bit(BCH_FS_errors_not_fixed, &c->flags) &&
 	    !test_bit(BCH_FS_error, &c->flags)) {
 		bch2_flush_fsck_errs(c);
 
 		bch_info(c, "Fixed errors, running fsck a second time to verify fs is clean");
+		errors_fixed = test_bit(BCH_FS_errors_fixed, &c->flags);
 		clear_bit(BCH_FS_errors_fixed, &c->flags);
+		clear_bit(BCH_FS_errors_fixed_silent, &c->flags);
 
 		ret = bch2_run_recovery_passes(c,
 			BCH_RECOVERY_PASS_check_alloc_info);
 		if (ret)
 			goto err;
 
-		if (test_bit(BCH_FS_errors_fixed, &c->flags) ||
+		if (errors_fixed ||
 		    test_bit(BCH_FS_errors_not_fixed, &c->flags)) {
 			bch_err(c, "Second fsck run was not clean");
 			set_bit(BCH_FS_errors_not_fixed, &c->flags);
 		}
 
-		set_bit(BCH_FS_errors_fixed, &c->flags);
+		if (errors_fixed)
+			set_bit(BCH_FS_errors_fixed, &c->flags);
 	}
 
 	if (enabled_qtypes(c)) {

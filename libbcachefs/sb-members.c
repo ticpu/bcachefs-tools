@@ -36,12 +36,10 @@ int bch2_dev_missing_bkey(struct bch_fs *c, struct bkey_s_c k, unsigned dev)
 
 void bch2_dev_missing_atomic(struct bch_fs *c, unsigned dev)
 {
-	if (dev != BCH_SB_MEMBER_INVALID) {
+	if (dev != BCH_SB_MEMBER_INVALID)
 		bch2_fs_inconsistent(c, "pointer to %s device %u",
 				     test_bit(dev, c->devs_removed.d)
 				     ? "removed" : "nonexistent", dev);
-		dump_stack();
-	}
 }
 
 void bch2_dev_bucket_missing(struct bch_dev *ca, u64 bucket)
@@ -287,10 +285,9 @@ static void member_to_text(struct printbuf *out,
 		return;
 
 	prt_printf(out, "Device:\t%u\n", idx);
+	guard(printbuf_indent)(out);
 
-	printbuf_indent_add(out, 2);
 	bch2_member_to_text(out, &m, gi, sb, idx);
-	printbuf_indent_sub(out, 2);
 }
 
 static int bch2_sb_members_v1_validate(struct bch_sb *sb, struct bch_sb_field *f,
@@ -437,21 +434,19 @@ void bch2_dev_io_errors_to_text(struct printbuf *out, struct bch_dev *ca)
 	prt_str(out, "IO errors since filesystem creation");
 	prt_newline(out);
 
-	printbuf_indent_add(out, 2);
-	for (unsigned i = 0; i < BCH_MEMBER_ERROR_NR; i++)
-		prt_printf(out, "%s:\t%llu\n", bch2_member_error_strs[i], atomic64_read(&ca->errors[i]));
-	printbuf_indent_sub(out, 2);
+	scoped_guard(printbuf_indent, out)
+		for (unsigned i = 0; i < BCH_MEMBER_ERROR_NR; i++)
+			prt_printf(out, "%s:\t%llu\n", bch2_member_error_strs[i], atomic64_read(&ca->errors[i]));
 
 	prt_str(out, "IO errors since ");
 	bch2_pr_time_units(out, (ktime_get_real_seconds() - le64_to_cpu(m.errors_reset_time)) * NSEC_PER_SEC);
 	prt_str(out, " ago");
 	prt_newline(out);
 
-	printbuf_indent_add(out, 2);
-	for (unsigned i = 0; i < BCH_MEMBER_ERROR_NR; i++)
-		prt_printf(out, "%s:\t%llu\n", bch2_member_error_strs[i],
-			   atomic64_read(&ca->errors[i]) - le64_to_cpu(m.errors_at_reset[i]));
-	printbuf_indent_sub(out, 2);
+	scoped_guard(printbuf_indent, out)
+		for (unsigned i = 0; i < BCH_MEMBER_ERROR_NR; i++)
+			prt_printf(out, "%s:\t%llu\n", bch2_member_error_strs[i],
+				   atomic64_read(&ca->errors[i]) - le64_to_cpu(m.errors_at_reset[i]));
 }
 
 void bch2_dev_errors_reset(struct bch_dev *ca)

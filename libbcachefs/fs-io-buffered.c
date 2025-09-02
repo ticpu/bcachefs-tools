@@ -284,12 +284,12 @@ void bch2_readahead(struct readahead_control *ractl)
 {
 	struct bch_inode_info *inode = to_bch_ei(ractl->mapping->host);
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
-	struct bch_io_opts opts;
 	struct folio *folio;
 	struct readpages_iter readpages_iter;
 	struct blk_plug plug;
 
-	bch2_inode_opts_get(&opts, c, &inode->ei_inode);
+	struct bch_inode_opts opts;
+	bch2_inode_opts_get_inode(c, &inode->ei_inode, &opts);
 
 	int ret = readpages_iter_init(&readpages_iter, ractl);
 	if (ret)
@@ -350,7 +350,7 @@ int bch2_read_single_folio(struct folio *folio, struct address_space *mapping)
 	struct bch_inode_info *inode = to_bch_ei(mapping->host);
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
 	struct bch_read_bio *rbio;
-	struct bch_io_opts opts;
+	struct bch_inode_opts opts;
 	struct blk_plug plug;
 	int ret;
 	DECLARE_COMPLETION_ONSTACK(done);
@@ -361,7 +361,7 @@ int bch2_read_single_folio(struct folio *folio, struct address_space *mapping)
 	if (!bch2_folio_create(folio, GFP_KERNEL))
 		return -ENOMEM;
 
-	bch2_inode_opts_get(&opts, c, &inode->ei_inode);
+	bch2_inode_opts_get_inode(c, &inode->ei_inode, &opts);
 
 	rbio = rbio_init(bio_alloc_bioset(NULL, 1, REQ_OP_READ, GFP_KERNEL, &c->bio_read),
 			 c,
@@ -407,7 +407,7 @@ struct bch_writepage_io {
 
 struct bch_writepage_state {
 	struct bch_writepage_io	*io;
-	struct bch_io_opts	opts;
+	struct bch_inode_opts	opts;
 	struct bch_folio_sector	*tmp;
 	unsigned		tmp_sectors;
 	struct blk_plug		plug;
@@ -530,6 +530,39 @@ static void bch2_writepage_io_alloc(struct bch_fs *c,
 	op->devs_need_flush	= &inode->ei_devs_need_flush;
 	op->wbio.bio.bi_iter.bi_sector = sector;
 	op->wbio.bio.bi_opf	= wbc_to_write_flags(wbc);
+}
+
+static bool can_write_now(struct bch_fs *c, unsigned replicas_want, struct closure *cl)
+{
+	unsigned reserved = OPEN_BUCKETS_COUNT -
+		(OPEN_BUCKETS_COUNT - bch2_open_buckets_reserved(BCH_WATERMARK_normal)) / 2;
+
+	if (unlikely(c->open_buckets_nr_free <= reserved)) {
+		closure_wait(&c->open_buckets_wait, cl);
+		return false;
+	}
+
+	if (BCH_WATERMARK_normal < c->journal.watermark && !bch2_journal_error(&c->journal)) {
+		closure_wait(&c->journal.async_wait, cl);
+		return false;
+	}
+
+	return true;
+}
+
+static void throttle_writes(struct bch_fs *c, unsigned replicas_want, struct closure *cl)
+{
+	u64 start = 0;
+	while (!can_write_now(c, replicas_want, cl)) {
+		if (!start)
+			start = local_clock();
+		closure_sync(cl);
+	}
+
+	BUG_ON(closure_nr_remaining(cl) > 1);
+
+	if (start)
+		bch2_time_stats_update(&c->times[BCH_TIME_blocked_writeback_throttle], start);
 }
 
 static int __bch2_writepage(struct folio *folio,
@@ -667,26 +700,25 @@ do_io:
 	return 0;
 }
 
-static int bch2_write_cache_pages(struct address_space *mapping,
-		      struct writeback_control *wbc, void *data)
-{
-	struct folio *folio = NULL;
-	int error;
-
-	while ((folio = writeback_iter(mapping, wbc, folio, &error)))
-		error = __bch2_writepage(folio, wbc, data);
-	return error;
-}
-
 int bch2_writepages(struct address_space *mapping, struct writeback_control *wbc)
 {
 	struct bch_fs *c = mapping->host->i_sb->s_fs_info;
 	struct bch_writepage_state *w = kzalloc(sizeof(*w), GFP_NOFS|__GFP_NOFAIL);
 
-	bch2_inode_opts_get(&w->opts, c, &to_bch_ei(mapping->host)->ei_inode);
+	bch2_inode_opts_get_inode(c, &to_bch_ei(mapping->host)->ei_inode, &w->opts);
 
 	blk_start_plug(&w->plug);
-	int ret = bch2_write_cache_pages(mapping, wbc, w);
+
+	struct closure cl;
+	closure_init_stack(&cl);
+
+	struct folio *folio = NULL;
+	int ret = 0;
+
+	while (throttle_writes(c, w->opts.data_replicas, &cl),
+	       (folio = writeback_iter(mapping, wbc, folio, &ret)))
+		ret = __bch2_writepage(folio, wbc, w);
+
 	if (w->io)
 		bch2_writepage_do_io(w);
 	blk_finish_plug(&w->plug);
@@ -697,7 +729,7 @@ int bch2_writepages(struct address_space *mapping, struct writeback_control *wbc
 
 /* buffered writes: */
 
-int bch2_write_begin(struct file *file, struct address_space *mapping,
+int bch2_write_begin(const struct kiocb *iocb, struct address_space *mapping,
 		     loff_t pos, unsigned len,
 		     struct folio **foliop, void **fsdata)
 {
@@ -780,7 +812,7 @@ err_unlock:
 	return bch2_err_class(ret);
 }
 
-int bch2_write_end(struct file *file, struct address_space *mapping,
+int bch2_write_end(const struct kiocb *iocb, struct address_space *mapping,
 		   loff_t pos, unsigned len, unsigned copied,
 		   struct folio *folio, void *fsdata)
 {

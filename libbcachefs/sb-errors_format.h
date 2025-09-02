@@ -160,7 +160,7 @@ enum bch_fsck_flags {
 	x(extent_ptrs_unwritten,				140,	0)		\
 	x(extent_ptrs_written_and_unwritten,			141,	0)		\
 	x(ptr_to_invalid_device,				142,	0)		\
-	x(ptr_to_removed_device,				322,	0)		\
+	x(ptr_to_removed_device,				322,	FSCK_AUTOFIX)	\
 	x(ptr_to_duplicate_device,				143,	0)		\
 	x(ptr_after_last_bucket,				144,	0)		\
 	x(ptr_before_first_bucket,				145,	0)		\
@@ -329,6 +329,7 @@ enum bch_fsck_flags {
 	x(accounting_key_version_0,				282,	FSCK_AUTOFIX)	\
 	x(accounting_key_nr_counters_wrong,			307,	FSCK_AUTOFIX)	\
 	x(accounting_key_underflow,				325,	FSCK_AUTOFIX)	\
+	x(accounting_key_version_out_of_order,			326,	FSCK_AUTOFIX)	\
 	x(logged_op_but_clean,					283,	FSCK_AUTOFIX)	\
 	x(compression_opt_not_marked_in_sb,			295,	FSCK_AUTOFIX)	\
 	x(compression_type_not_marked_in_sb,			296,	FSCK_AUTOFIX)	\
@@ -337,7 +338,7 @@ enum bch_fsck_flags {
 	x(dirent_stray_data_after_cf_name,			305,	0)		\
 	x(rebalance_work_incorrectly_set,			309,	FSCK_AUTOFIX)	\
 	x(rebalance_work_incorrectly_unset,			310,	FSCK_AUTOFIX)	\
-	x(MAX,							326,	0)
+	x(MAX,							327,	0)
 
 enum bch_sb_error_id {
 #define x(t, n, ...) BCH_FSCK_ERR_##t = n,

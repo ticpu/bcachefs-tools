@@ -216,7 +216,9 @@ nocompact:
 
 	if (seq <  c->journal_entries_base_seq ||
 	    seq >= c->journal_entries_base_seq + U32_MAX) {
-		bch_err(c, "journal entry sequence numbers span too large a range: cannot reply, contact developers");
+		bch_err(c, "journal entry sequence numbers span too large a range: cannot replay, contact developers\n"
+			"base %llu last_seq currently %llu, but have seq %llu",
+			c->journal_entries_base_seq, jlist->last_seq, seq);
 		return bch_err_throw(c, ENOMEM_journal_entry_add);
 	}
 
@@ -758,8 +760,8 @@ static void journal_entry_dev_usage_to_text(struct printbuf *out, struct bch_fs 
 		return;
 
 	prt_printf(out, "dev=%u", le32_to_cpu(u->dev));
+	guard(printbuf_indent)(out);
 
-	printbuf_indent_add(out, 2);
 	for (i = 0; i < nr_types; i++) {
 		prt_newline(out);
 		bch2_prt_data_type(out, i);
@@ -768,7 +770,6 @@ static void journal_entry_dev_usage_to_text(struct printbuf *out, struct bch_fs 
 		       le64_to_cpu(u->d[i].sectors),
 		       le64_to_cpu(u->d[i].fragmented));
 	}
-	printbuf_indent_sub(out, 2);
 }
 
 static int journal_entry_log_validate(struct bch_fs *c,

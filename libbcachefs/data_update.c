@@ -11,6 +11,7 @@
 #include "ec.h"
 #include "error.h"
 #include "extents.h"
+#include "inode.h"
 #include "io_write.h"
 #include "keylist.h"
 #include "move.h"
@@ -428,13 +429,18 @@ restart_drop_extra_replicas:
 			goto out;
 		}
 
+		struct bch_inode_opts opts;
+
 		ret =   bch2_trans_log_str(trans, bch2_data_update_type_strs[m->type]) ?:
 			bch2_trans_log_bkey(trans, m->btree_id, 0, m->k.k) ?:
 			bch2_insert_snapshot_whiteouts(trans, m->btree_id,
 						k.k->p, bkey_start_pos(&insert->k)) ?:
 			bch2_insert_snapshot_whiteouts(trans, m->btree_id,
 						k.k->p, insert->k.p) ?:
-			bch2_bkey_set_needs_rebalance(c, &op->opts, insert) ?:
+			bch2_inum_snapshot_opts_get(trans, k.k->p.inode, k.k->p.snapshot, &opts) ?:
+			bch2_bkey_set_needs_rebalance(c, &opts, insert,
+						      SET_NEEDS_REBALANCE_foreground,
+						      m->op.opts.change_cookie) ?:
 			bch2_trans_update(trans, &iter, insert,
 				BTREE_UPDATE_internal_snapshot_node);
 		if (ret)
@@ -613,7 +619,7 @@ int bch2_update_unwritten_extent(struct btree_trans *trans,
 }
 
 void bch2_data_update_opts_to_text(struct printbuf *out, struct bch_fs *c,
-				   struct bch_io_opts *io_opts,
+				   struct bch_inode_opts *io_opts,
 				   struct data_update_opts *data_opts)
 {
 	if (!out->nr_tabstops)
@@ -657,31 +663,32 @@ void bch2_data_update_to_text(struct printbuf *out, struct data_update *m)
 
 	prt_str_indented(out, "old key:\t");
 	bch2_bkey_val_to_text(out, m->op.c, bkey_i_to_s_c(m->k.k));
+
+	bch2_write_op_to_text(out, &m->op);
 }
 
 void bch2_data_update_inflight_to_text(struct printbuf *out, struct data_update *m)
 {
 	bch2_bkey_val_to_text(out, m->op.c, bkey_i_to_s_c(m->k.k));
 	prt_newline(out);
-	printbuf_indent_add(out, 2);
+	guard(printbuf_indent)(out);
 	bch2_data_update_opts_to_text(out, m->op.c, &m->op.opts, &m->data_opts);
 
 	if (!m->read_done) {
 		prt_printf(out, "read:\n");
-		printbuf_indent_add(out, 2);
+		guard(printbuf_indent)(out);
 		bch2_read_bio_to_text(out, m->op.c, &m->rbio);
 	} else {
 		prt_printf(out, "write:\n");
-		printbuf_indent_add(out, 2);
+		guard(printbuf_indent)(out);
 		bch2_write_op_to_text(out, &m->op);
 	}
-	printbuf_indent_sub(out, 4);
 }
 
 int bch2_extent_drop_ptrs(struct btree_trans *trans,
 			  struct btree_iter *iter,
 			  struct bkey_s_c k,
-			  struct bch_io_opts *io_opts,
+			  struct bch_inode_opts *io_opts,
 			  struct data_update_opts *data_opts)
 {
 	struct bch_fs *c = trans->c;
@@ -731,7 +738,7 @@ int bch2_extent_drop_ptrs(struct btree_trans *trans,
 }
 
 static int __bch2_data_update_bios_init(struct data_update *m, struct bch_fs *c,
-					struct bch_io_opts *io_opts,
+					struct bch_inode_opts *io_opts,
 					unsigned buf_bytes)
 {
 	unsigned nr_vecs = DIV_ROUND_UP(buf_bytes, PAGE_SIZE);
@@ -758,7 +765,7 @@ static int __bch2_data_update_bios_init(struct data_update *m, struct bch_fs *c,
 }
 
 int bch2_data_update_bios_init(struct data_update *m, struct bch_fs *c,
-			       struct bch_io_opts *io_opts)
+			       struct bch_inode_opts *io_opts)
 {
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(bkey_i_to_s_c(m->k.k));
 	const union bch_extent_entry *entry;
@@ -830,7 +837,7 @@ int bch2_data_update_init(struct btree_trans *trans,
 			  struct moving_context *ctxt,
 			  struct data_update *m,
 			  struct write_point_specifier wp,
-			  struct bch_io_opts *io_opts,
+			  struct bch_inode_opts *io_opts,
 			  struct data_update_opts data_opts,
 			  enum btree_id btree_id,
 			  struct bkey_s_c k)
