@@ -205,7 +205,7 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	/* calculate block size: */
 	if (!opt_defined(fs_opts, block_size)) {
 		unsigned max_dev_block_size = 0;
-	
+
 		darray_for_each(devs, i)
 			max_dev_block_size = max(max_dev_block_size, get_blocksize(i->bdev->bd_fd));
 
@@ -356,6 +356,16 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 		bch2_super_write(i->bdev->bd_fd, sb.sb);
 		xclose(i->bdev->bd_fd);
 	}
+
+	/*
+	 * Ensure that 'bcachefs mount' sees the newly formatted devices when
+	 * scanning by UUID in the udev database:
+	 */
+	CLASS(printbuf, udevadm_cmd)();
+	prt_str(&udevadm_cmd, "udevadm trigger --settle");
+	darray_for_each(devs, i)
+		prt_printf(&udevadm_cmd, " %s", i->path);
+	system(udevadm_cmd.buf);
 
 	return sb.sb;
 }

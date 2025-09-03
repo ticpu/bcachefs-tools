@@ -480,6 +480,14 @@ int cmd_recover_super(int argc, char *argv[])
 	if (args.yes || ask_yn())
 		bch2_super_write(dev_fd, sb);
 
+	/*
+	 * Ensure that 'bcachefs mount' sees the newly formatted devices when
+	 * scanning by UUID in the udev database:
+	 */
+	CLASS(printbuf, udevadm_cmd)();
+	prt_printf(&udevadm_cmd, "udevadm trigger --settle %s", dev_path);
+	system(udevadm_cmd.buf);
+
 	if (args.src_device)
 		printf("Recovered device will no longer have a journal, please run fsck\n");
 
