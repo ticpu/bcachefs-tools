@@ -444,7 +444,7 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	if (!sb_offset)
 		die("Please specify offset of existing superblock");
 
-	int fd = xopen(devs.data[0], O_RDWR);
+	int fd = xopen(devs.data[0], O_RDWR | O_EXCL);
 	struct bch_sb *sb = __bch2_super_read(fd, sb_offset);
 	unsigned sb_size;
 	/* Check for invocation errors early */
