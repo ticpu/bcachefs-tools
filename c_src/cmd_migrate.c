@@ -108,6 +108,10 @@ static void mark_unreserved_space(struct bch_fs *c, ranges extents)
 		mark_nouse_range(ca, i.start >> 9,
 			round_up(i.end, 1 << 9) >> 9);
 	}
+
+	/* Also be sure to mark the space for the default sb layout */
+	unsigned sb_size = 1U << ca->disk_sb.sb->layout.sb_max_size_bits;
+	mark_nouse_range(ca, 0, BCH_SB_SECTOR + sb_size * 2);
 }
 
 static ranges reserve_new_fs_space(const char *file_path, unsigned block_size,
@@ -283,7 +287,7 @@ static int migrate_fs(const char		*fs_path,
 		.dev		= stat.st_dev,
 		.extents	= extents,
 		.type		= BCH_MIGRATE_migrate,
-		.reserve_start	= roundup((format_opts.superblock_size * 2 + 8) << 9,
+		.reserve_start	= roundup((format_opts.superblock_size * 2 + BCH_SB_SECTOR) << 9,
 					  bucket_bytes(c->devs[0])),
 	};
 
