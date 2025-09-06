@@ -452,7 +452,8 @@ int cmd_migrate_superblock(int argc, char *argv[])
 
 	/* Rewrite first 0-3.5k bytes with zeroes, ensuring we blow away
 	 * the old superblock */
-	static const char zeroes[BCH_SB_SECTOR << 9];
+	// TODO: fix the "Superblock write was silently dropped" warning properly
+	static const char zeroes[(BCH_SB_SECTOR << 9) + sizeof(struct bch_sb)];
 	xpwrite(fd, zeroes, ARRAY_SIZE(zeroes), 0, "zeroing start of disk");
 
 	xclose(fd);
