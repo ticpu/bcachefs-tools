@@ -86,6 +86,15 @@ found:
 	return ret;
 }
 
+static void mark_nouse_range(struct bch_dev *ca, u64 sector_from, u64 sector_to)
+{
+	u64 b = sector_to_bucket(ca, sector_from);
+	do {
+		set_bit(b, ca->buckets_nouse);
+		b++;
+	} while (bucket_to_sector(ca, b) < sector_to);
+}
+
 static void mark_unreserved_space(struct bch_fs *c, ranges extents)
 {
 	struct bch_dev *ca = c->devs[0];
@@ -93,16 +102,11 @@ static void mark_unreserved_space(struct bch_fs *c, ranges extents)
 	struct range i;
 
 	for_each_hole(iter, extents, bucket_to_sector(ca, ca->mi.nbuckets) << 9, i) {
-		u64 b;
-
 		if (i.start == i.end)
 			return;
 
-		b = sector_to_bucket(ca, i.start >> 9);
-		do {
-			set_bit(b, ca->buckets_nouse);
-			b++;
-		} while (bucket_to_sector(ca, b) << 9 < i.end);
+		mark_nouse_range(ca, i.start >> 9,
+			round_up(i.end, 1 << 9) >> 9);
 	}
 }
 
@@ -454,8 +458,7 @@ int cmd_migrate_superblock(int argc, char *argv[])
 		die("error opening filesystem: %s", bch2_err_str(ret));
 
 	struct bch_dev *ca = c->devs[0];
-	for (u64 b = 0; bucket_to_sector(ca, b) < BCH_SB_SECTOR + sb_size * 2; b++)
-		set_bit(b, ca->buckets_nouse);
+	mark_nouse_range(ca, 0, BCH_SB_SECTOR + sb_size * 2);
 
 	ret = bch2_fs_start(c);
 	if (ret)
