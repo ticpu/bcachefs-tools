@@ -495,20 +495,23 @@ int cmd_migrate_superblock(int argc, char *argv[])
 
 	bch2_fs_stop(c);
 
+#if CONFIG_BCACHEFS_DEBUG
+	/* Verify that filesystem is clean and consistent */
+
 	opts = bch2_opts_empty();
 	opt_set(opts, fsck, true);
 	opt_set(opts, fix_errors, true);
-
-	/*
-	 * Hack: the free space counters are coming out wrong after marking the
-	 * new superblock, but it's just the device counters so it's
-	 * inconsequential:
-	 */
+	opt_set(opts, nochanges, true);
 
 	c = bch2_fs_open(&devs, &opts);
 	ret =   PTR_ERR_OR_ZERO(c);
 	if (ret)
-		die("error opening filesystem: %s", bch2_err_str(ret));
+		die("error checking filesystem: %s", bch2_err_str(ret));
+
+	if (test_bit(BCH_FS_errors, &c->flags) || test_bit(BCH_FS_errors_fixed, &c->flags))
+		die("Filesystem has errors after migration");
+
 	bch2_fs_stop(c);
+#endif
 	return 0;
 }
