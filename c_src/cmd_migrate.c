@@ -443,17 +443,19 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	int fd = xopen(devs.data[0], O_RDWR);
 	struct bch_sb *sb = __bch2_super_read(fd, sb_offset);
 	unsigned sb_size;
+	/* Check for invocation errors early */
 	add_default_sb_layout(sb, &sb_size);
 
-	/* also write first 0-3.5k bytes with zeroes, ensure we blow away old
-	 * superblock */
+	/* Rewrite first 0-3.5k bytes with zeroes, ensuring we blow away
+	 * the old superblock */
 	static const char zeroes[BCH_SB_SECTOR << 9];
-	xpwrite(fd, zeroes, BCH_SB_SECTOR << 9, 0, "zeroing start of disk");
+	xpwrite(fd, zeroes, ARRAY_SIZE(zeroes), 0, "zeroing start of disk");
 
-	bch2_super_write(fd, sb);
 	xclose(fd);
 
-	/* mark new superblocks */
+	/* We start a normal FS instance with the sb buckets temporarily
+	 * prohibited from allocation, performing any recovery/upgrade/downgrade
+	 * as needed, and only then change the superblock layout */
 
 	struct bch_opts opts = bch2_opts_empty();
 	opt_set(opts, nostart,	true);
@@ -471,6 +473,21 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	ret = bch2_fs_start(c);
 	if (ret)
 		die("Error starting filesystem: %s", bch2_err_str(ret));
+
+	BUG_ON(1U << ca->disk_sb.sb->layout.sb_max_size_bits != sb_size);
+
+	/* Here the FS is already RW.
+	 * Apply the superblock layout changes first, everything else can be
+	 * repaired on a subsequent recovery */
+	add_default_sb_layout(ca->disk_sb.sb, NULL);
+	ret = bch2_write_super(c);
+	if (ret)
+		die("Error writing superblock: %s", bch2_err_str(ret));
+
+	/* Now explicitly mark the new sb buckets in FS metadata */
+	ret = bch2_trans_mark_dev_sb(c, ca, BTREE_TRIGGER_transactional);
+	if (ret)
+		die("Error marking superblock buckets: %s", bch2_err_str(ret));
 
 	bch2_fs_stop(c);
 
