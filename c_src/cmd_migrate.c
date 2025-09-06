@@ -385,6 +385,28 @@ static void migrate_superblock_usage(void)
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
+static void add_default_sb_layout(struct bch_sb* sb, unsigned *out_sb_size)
+{
+	unsigned sb_size = 1U << sb->layout.sb_max_size_bits;
+	if (out_sb_size)
+		*out_sb_size = sb_size;
+
+	if (sb->layout.nr_superblocks >= ARRAY_SIZE(sb->layout.sb_offset))
+		die("Can't add superblock: no space left in superblock layout");
+
+	for (unsigned i = 0; i < sb->layout.nr_superblocks; i++)
+		if (le64_to_cpu(sb->layout.sb_offset[i]) == BCH_SB_SECTOR ||
+		    le64_to_cpu(sb->layout.sb_offset[i]) == BCH_SB_SECTOR + sb_size)
+			die("Superblock layout already has default superblocks");
+
+	memmove(&sb->layout.sb_offset[2],
+		&sb->layout.sb_offset[0],
+		sb->layout.nr_superblocks * sizeof(u64));
+	sb->layout.nr_superblocks += 2;
+	sb->layout.sb_offset[0] = cpu_to_le64(BCH_SB_SECTOR);
+	sb->layout.sb_offset[1] = cpu_to_le64(BCH_SB_SECTOR + sb_size);
+}
+
 int cmd_migrate_superblock(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
@@ -420,22 +442,8 @@ int cmd_migrate_superblock(int argc, char *argv[])
 
 	int fd = xopen(devs.data[0], O_RDWR);
 	struct bch_sb *sb = __bch2_super_read(fd, sb_offset);
-	unsigned sb_size = 1U << sb->layout.sb_max_size_bits;
-
-	if (sb->layout.nr_superblocks >= ARRAY_SIZE(sb->layout.sb_offset))
-		die("Can't add superblock: no space left in superblock layout");
-
-	for (unsigned i = 0; i < sb->layout.nr_superblocks; i++)
-		if (le64_to_cpu(sb->layout.sb_offset[i]) == BCH_SB_SECTOR ||
-		    le64_to_cpu(sb->layout.sb_offset[i]) == BCH_SB_SECTOR + sb_size)
-			die("Superblock layout already has default superblocks");
-
-	memmove(&sb->layout.sb_offset[2],
-		&sb->layout.sb_offset[0],
-		sb->layout.nr_superblocks * sizeof(u64));
-	sb->layout.nr_superblocks += 2;
-	sb->layout.sb_offset[0] = cpu_to_le64(BCH_SB_SECTOR);
-	sb->layout.sb_offset[1] = cpu_to_le64(BCH_SB_SECTOR + sb_size);
+	unsigned sb_size;
+	add_default_sb_layout(sb, &sb_size);
 
 	/* also write first 0-3.5k bytes with zeroes, ensure we blow away old
 	 * superblock */
