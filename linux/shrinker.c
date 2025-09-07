@@ -15,6 +15,9 @@ static DEFINE_MUTEX(shrinker_lock);
 
 void shrinker_free(struct shrinker *s)
 {
+	if (!s)
+		return;
+
 	if (s->list.next) {
 		mutex_lock(&shrinker_lock);
 		list_del(&s->list);
