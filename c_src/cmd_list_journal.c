@@ -222,24 +222,29 @@ static bool entry_has_log(struct jset_entry *entry, struct jset_entry *end)
 	return false;
 }
 
+static struct jset_entry *transaction_start(struct jset_entry *entry, struct jset_entry *end)
+{
+	while (entry < end && !entry_is_transaction_start(entry))
+		entry = vstruct_next(entry);
+
+	return entry;
+}
+
 static struct jset_entry *transaction_end(struct jset_entry *entry, struct jset_entry *end)
 {
 	do
 		entry = vstruct_next(entry);
-	while (entry != end &&
+	while (entry < end &&
 	       !entry_is_transaction_start(entry) &&
 	       !entry_is_non_transaction(entry));
 
-	return entry;
+	return min(entry, end);
 }
 
 static bool should_print_transaction(journal_filter f,
 				     struct jset_entry *entry, struct jset_entry *end)
 {
 	BUG_ON(entry->type != BCH_JSET_ENTRY_log);
-
-	if (!f.filtering)
-		return true;
 
 	if (f.log && entry_is_log_only(entry, end))
 		return true;
@@ -263,13 +268,8 @@ static bool should_print_transaction(journal_filter f,
 }
 
 static void journal_entry_header_to_text(struct printbuf *out, struct bch_fs *c,
-					 struct journal_replay *p,
-					 bool blacklisted, bool *printed_header)
+					 struct journal_replay *p, bool blacklisted)
 {
-	if (*printed_header)
-		return;
-	*printed_header = true;
-
 	prt_printf(out,
 		   "\n%s"
 		   "journal entry     %llu\n"
@@ -317,7 +317,6 @@ static void print_one_entry(struct printbuf		*out,
 			    journal_filter		f,
 			    struct journal_replay	*p,
 			    bool			blacklisted,
-			    bool			*printed_header,
 			    struct jset_entry		*entry)
 {
 	if (entry_is_print_key(entry) && !entry->u64s)
@@ -325,8 +324,6 @@ static void print_one_entry(struct printbuf		*out,
 
 	if (entry_is_print_key(entry) && !entry_matches_btree_filter(f, entry))
 		return;
-
-	journal_entry_header_to_text(out, c, p, blacklisted, printed_header);
 
 	bool highlight = entry_matches_transaction_filter(f.key, entry);
 	if (highlight)
@@ -376,42 +373,41 @@ static void journal_replay_print(struct bch_fs *c,
 		goto print;
 	}
 
-	if (!f.filtering)
-		journal_entry_header_to_text(&buf, c, p, blacklisted, &printed_header);
-
 	struct jset_entry *entry = p->j.start;
 	struct jset_entry *end = vstruct_last(&p->j);
 
-	while (entry < end &&
-	       vstruct_next(entry) <= end &&
-	       !entry_is_transaction_start(entry)) {
-		if (!f.filtering)
-			print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
-		entry = vstruct_next(entry);
-	}
+	if (!f.filtering) {
+		journal_entry_header_to_text(&buf, c, p, blacklisted);
 
-	while (entry < end &&
-	       vstruct_next(entry) <= end &&
-	       entry_is_transaction_start(entry)) {
-		struct jset_entry *t_end = transaction_end(entry, end);
-
-		if (should_print_transaction(f, entry, t_end)) {
-			while (entry < t_end &&
-			       vstruct_next(entry) <= t_end) {
-				print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
-				entry = vstruct_next(entry);
-			}
+		while (entry < end &&
+		       vstruct_next(entry) <= end) {
+			print_one_entry(&buf, c, f, p, blacklisted, entry);
+			entry = vstruct_next(entry);
 		}
+	} else {
+		while (true) {
+			entry = transaction_start(entry, end);
+			if (entry >= end ||
+			    vstruct_next(entry) >= end)
+				break;
 
-		entry = t_end;
-	}
+			struct jset_entry *t_end = transaction_end(entry, end);
 
-	while (entry < end &&
-	       vstruct_next(entry) <= end &&
-	       !entry_is_transaction_start(entry)) {
-		if (!f.filtering)
-			print_one_entry(&buf, c, f, p, blacklisted, &printed_header, entry);
-		entry = vstruct_next(entry);
+			if (should_print_transaction(f, entry, t_end)) {
+				if (!printed_header) {
+					journal_entry_header_to_text(&buf, c, p, blacklisted);
+					printed_header = true;
+				}
+
+				while (entry < t_end &&
+				       vstruct_next(entry) <= t_end) {
+					print_one_entry(&buf, c, f, p, blacklisted, entry);
+					entry = vstruct_next(entry);
+				}
+			}
+
+			entry = t_end;
+		}
 	}
 print:
 	if (buf.buf) {
