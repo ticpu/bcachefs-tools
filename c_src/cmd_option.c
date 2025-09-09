@@ -117,7 +117,7 @@ int cmd_set_option(int argc, char *argv[])
 				fprintf(stderr, "Can't set option %s\n", opt->attr.name);
 
 			if (opt->flags & OPT_FS) {
-				ret = bch2_opt_hook_pre_set(c, NULL, 0, i, v);
+				ret = bch2_opt_hook_pre_set(c, NULL, 0, i, v, true);
 				if (ret < 0) {
 					fprintf(stderr, "error setting %s: %i\n", opt->attr.name, ret);
 					continue;
@@ -135,7 +135,7 @@ int cmd_set_option(int argc, char *argv[])
 							continue;
 						}
 
-						ret = bch2_opt_hook_pre_set(c, ca, 0, i, v);
+						ret = bch2_opt_hook_pre_set(c, ca, 0, i, v, true);
 						if (ret < 0) {
 							fprintf(stderr, "error setting %s: %i\n", opt->attr.name, ret);
 							continue;

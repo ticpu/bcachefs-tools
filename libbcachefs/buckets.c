@@ -462,6 +462,7 @@ int bch2_bucket_ref_update(struct btree_trans *trans, struct bch_dev *ca,
 	size_t bucket_nr = PTR_BUCKET_NR(ca, ptr);
 	CLASS(printbuf, buf)();
 	bool inserting = sectors > 0;
+	int ret = 0;
 
 	BUG_ON(!sectors);
 
@@ -489,8 +490,17 @@ int bch2_bucket_ref_update(struct btree_trans *trans, struct bch_dev *ca,
 					     BCH_FSCK_ERR_ptr_too_stale);
 	}
 
-	if (b_gen != ptr->gen && ptr->cached)
+	if (b_gen != ptr->gen && ptr->cached) {
+		if (fsck_err_on(c->sb.compat & BIT_ULL(BCH_COMPAT_no_stale_ptrs),
+				trans, stale_ptr_with_no_stale_ptrs_feature,
+				"stale cached ptr, but have no_stale_ptrs feature\n%s",
+				(bch2_bkey_val_to_text(&buf, c, k), buf.buf))) {
+			guard(mutex)(&c->sb_lock);
+			c->disk_sb.sb->compat[0] &= ~cpu_to_le64(BIT_ULL(BCH_COMPAT_no_stale_ptrs));
+			bch2_write_super(c);
+		}
 		return 1;
+	}
 
 	if (unlikely(b_gen != ptr->gen)) {
 		bch2_log_msg_start(c, &buf);
@@ -530,7 +540,8 @@ int bch2_bucket_ref_update(struct btree_trans *trans, struct bch_dev *ca,
 	}
 
 	*bucket_sectors += sectors;
-	return 0;
+fsck_err:
+	return ret;
 }
 
 void bch2_trans_account_disk_usage_change(struct btree_trans *trans)
@@ -749,6 +760,7 @@ static int __trigger_extent(struct btree_trans *trans,
 			    enum btree_iter_update_trigger_flags flags)
 {
 	bool gc = flags & BTREE_TRIGGER_gc;
+	bool insert = !(flags & BTREE_TRIGGER_overwrite);
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
 	const union bch_extent_entry *entry;
 	struct extent_ptr_decoded p;
@@ -802,7 +814,7 @@ static int __trigger_extent(struct btree_trans *trans,
 
 		if (cur_compression_type &&
 		    cur_compression_type != p.crc.compression_type) {
-			if (flags & BTREE_TRIGGER_overwrite)
+			if (!insert)
 				bch2_u64s_neg(compression_acct, ARRAY_SIZE(compression_acct));
 
 			ret = bch2_disk_accounting_mod2(trans, gc, compression_acct,
@@ -835,7 +847,7 @@ static int __trigger_extent(struct btree_trans *trans,
 	}
 
 	if (cur_compression_type) {
-		if (flags & BTREE_TRIGGER_overwrite)
+		if (!insert)
 			bch2_u64s_neg(compression_acct, ARRAY_SIZE(compression_acct));
 
 		ret = bch2_disk_accounting_mod2(trans, gc, compression_acct,
@@ -845,12 +857,17 @@ static int __trigger_extent(struct btree_trans *trans,
 	}
 
 	if (level) {
-		ret = bch2_disk_accounting_mod2_nr(trans, gc, &replicas_sectors, 1, btree, btree_id);
+		const bool leaf_node = level == 1;
+		s64 v[3] = {
+			replicas_sectors,
+			insert ? 1 : -1,
+			!leaf_node ? (insert ? 1 : -1) : 0,
+		};
+
+		ret = bch2_disk_accounting_mod2(trans, gc, v, btree, btree_id);
 		if (ret)
 			return ret;
 	} else {
-		bool insert = !(flags & BTREE_TRIGGER_overwrite);
-
 		s64 v[3] = {
 			insert ? 1 : -1,
 			insert ? k.k->size : -((s64) k.k->size),
@@ -869,7 +886,6 @@ int bch2_trigger_extent(struct btree_trans *trans,
 			struct bkey_s_c old, struct bkey_s new,
 			enum btree_iter_update_trigger_flags flags)
 {
-	struct bch_fs *c = trans->c;
 	struct bkey_ptrs_c new_ptrs = bch2_bkey_ptrs_c(new.s_c);
 	struct bkey_ptrs_c old_ptrs = bch2_bkey_ptrs_c(old);
 	unsigned new_ptrs_bytes = (void *) new_ptrs.end - (void *) new_ptrs.start;
@@ -900,30 +916,9 @@ int bch2_trigger_extent(struct btree_trans *trans,
 				return ret;
 		}
 
-		int need_rebalance_delta = 0;
-		s64 need_rebalance_sectors_delta[1] = { 0 };
-
-		s64 s = bch2_bkey_sectors_need_rebalance(c, old);
-		need_rebalance_delta -= s != 0;
-		need_rebalance_sectors_delta[0] -= s;
-
-		s = bch2_bkey_sectors_need_rebalance(c, new.s_c);
-		need_rebalance_delta += s != 0;
-		need_rebalance_sectors_delta[0] += s;
-
-		if ((flags & BTREE_TRIGGER_transactional) && need_rebalance_delta) {
-			int ret = bch2_btree_bit_mod_buffered(trans, BTREE_ID_rebalance_work,
-							  new.k->p, need_rebalance_delta > 0);
-			if (ret)
-				return ret;
-		}
-
-		if (need_rebalance_sectors_delta[0]) {
-			int ret = bch2_disk_accounting_mod2(trans, flags & BTREE_TRIGGER_gc,
-							    need_rebalance_sectors_delta, rebalance_work);
-			if (ret)
-				return ret;
-		}
+		int ret = bch2_trigger_extent_rebalance(trans, old, new.s_c, flags);
+		if (ret)
+			return ret;
 	}
 
 	return 0;

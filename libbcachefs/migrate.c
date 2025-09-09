@@ -84,13 +84,6 @@ static int bch2_dev_usrdata_drop_key(struct btree_trans *trans,
 		return ret;
 
 	/*
-	 * If the new extent no longer has any pointers, bch2_extent_normalize()
-	 * will do the appropriate thing with it (turning it into a
-	 * KEY_TYPE_error key, or just a discard if it was a cached extent)
-	 */
-	bch2_extent_normalize(c, bkey_i_to_s(n));
-
-	/*
 	 * Since we're not inserting through an extent iterator
 	 * (BTREE_ITER_all_snapshots iterators aren't extent iterators),
 	 * we aren't using the extent overwrite path to delete, we're
@@ -273,10 +266,15 @@ int bch2_dev_data_drop(struct bch_fs *c, unsigned dev_idx,
 		       unsigned flags, struct printbuf *err)
 {
 	struct progress_indicator_state progress;
-	bch2_progress_init(&progress, c,
-			   BIT_ULL(BTREE_ID_extents)|
-			   BIT_ULL(BTREE_ID_reflink));
+	int ret;
 
-	return bch2_dev_usrdata_drop(c, &progress, dev_idx, flags, err) ?:
-		bch2_dev_metadata_drop(c, &progress, dev_idx, flags, err);
+	bch2_progress_init(&progress, c,
+			   btree_has_data_ptrs_mask & ~BIT_ULL(BTREE_ID_stripes));
+
+	if ((ret = bch2_dev_usrdata_drop(c, &progress, dev_idx, flags, err)))
+		return ret;
+
+	bch2_progress_init_inner(&progress, c, 0, ~0ULL);
+
+	return bch2_dev_metadata_drop(c, &progress, dev_idx, flags, err);
 }

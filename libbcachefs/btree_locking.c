@@ -69,6 +69,7 @@ struct trans_waiting_for_lock {
 struct lock_graph {
 	struct trans_waiting_for_lock	g[8];
 	unsigned			nr;
+	bool				printed_chain;
 };
 
 static noinline void print_cycle(struct printbuf *out, struct lock_graph *g)
@@ -89,6 +90,10 @@ static noinline void print_cycle(struct printbuf *out, struct lock_graph *g)
 
 static noinline void print_chain(struct printbuf *out, struct lock_graph *g)
 {
+	if (g->printed_chain || g->nr <= 1)
+		return;
+	g->printed_chain = true;
+
 	struct trans_waiting_for_lock *i;
 
 	for (i = g->g; i != g->g + g->nr; i++) {
@@ -124,6 +129,7 @@ static void __lock_graph_down(struct lock_graph *g, struct btree_trans *trans)
 		.node_want	= trans->locking,
 		.lock_want	= trans->locking_wait.lock_want,
 	};
+	g->printed_chain = false;
 }
 
 static void lock_graph_down(struct lock_graph *g, struct btree_trans *trans)
@@ -265,8 +271,12 @@ static int lock_graph_descend(struct lock_graph *g, struct btree_trans *trans,
 	if (unlikely(g->nr == ARRAY_SIZE(g->g))) {
 		closure_put(&trans->ref);
 
-		if (orig_trans->lock_may_not_fail)
+		if (orig_trans->lock_may_not_fail) {
+			/* Other threads will have to rerun the cycle detector: */
+			for (struct trans_waiting_for_lock *i = g->g + 1; i < g->g + g->nr; i++)
+				wake_up_process(i->trans->locking_wait.task);
 			return 0;
+		}
 
 		lock_graph_pop_all(g);
 
@@ -398,7 +408,7 @@ next:
 		}
 	}
 up:
-	if (g.nr > 1 && cycle)
+	if (cycle)
 		print_chain(cycle, &g);
 	lock_graph_up(&g);
 	goto next;

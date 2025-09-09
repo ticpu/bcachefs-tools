@@ -266,8 +266,10 @@ update-bcachefs-sources:
 	git rm -rf --ignore-unmatch libbcachefs
 	test -d libbcachefs || mkdir libbcachefs
 	cp $(LINUX_DIR)/fs/bcachefs/*.[ch] libbcachefs/
+	cp $(LINUX_DIR)/fs/bcachefs/Makefile libbcachefs/
 	rm libbcachefs/fast_list.c libbcachefs/async_objs.c
 	git add libbcachefs/*.[ch]
+	git add libbcachefs/Makefile
 	git rm -f libbcachefs/mean_and_variance_test.c
 	cp $(LINUX_DIR)/include/linux/closure.h include/linux/
 	git add include/linux/closure.h

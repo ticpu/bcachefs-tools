@@ -440,7 +440,6 @@ bool bch2_extent_merge(struct bch_fs *, struct bkey_s, struct bkey_s_c);
 	.key_validate	= bch2_bkey_ptrs_validate,		\
 	.val_to_text	= bch2_bkey_ptrs_to_text,		\
 	.swab		= bch2_ptr_swab,			\
-	.key_normalize	= bch2_extent_normalize,		\
 	.key_merge	= bch2_extent_merge,			\
 	.trigger	= bch2_trigger_extent,			\
 })
@@ -689,8 +688,8 @@ bch2_extent_has_ptr(struct bkey_s_c, struct extent_ptr_decoded, struct bkey_s);
 void bch2_extent_ptr_set_cached(struct bch_fs *, struct bch_inode_opts *,
 				struct bkey_s, struct bch_extent_ptr *);
 
-bool bch2_extent_normalize_by_opts(struct bch_fs *, struct bch_inode_opts *, struct bkey_s);
-bool bch2_extent_normalize(struct bch_fs *, struct bkey_s);
+int bch2_bkey_drop_stale_ptrs(struct btree_trans *, struct btree_iter *, struct bkey_s_c);
+void bch2_bkey_drop_extra_cached_ptrs(struct bch_fs *, struct bch_inode_opts *, struct bkey_s);
 
 void bch2_extent_ptr_to_text(struct printbuf *out, struct bch_fs *, const struct bch_extent_ptr *);
 void bch2_bkey_ptrs_to_text(struct printbuf *, struct bch_fs *,
