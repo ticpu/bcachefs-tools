@@ -1,8 +1,9 @@
 use std::{
     ffi::{c_long, CStr, CString},
     fs,
-    io::{stdin, IsTerminal},
+    io::{self, stdin, IsTerminal},
     mem,
+    os::fd::{AsFd, BorrowedFd},
     path::Path,
     process::{Command, Stdio},
     ptr, thread,
@@ -143,10 +144,10 @@ impl Passphrase {
     }
 
     pub fn new(uuid: &Uuid) -> Result<Self> {
-        if stdin().is_terminal() {
-            Self::new_from_prompt(uuid)
-        } else {
-            Self::new_from_stdin()
+        match get_stdin_type() {
+            StdinType::Terminal => Self::new_from_prompt(uuid),
+            StdinType::DevNull => Self::new_from_askpassword(uuid).unwrap_or_else(|err| Err(err)),
+            StdinType::Other => Self::new_from_stdin(),
         }
     }
 
@@ -251,5 +252,33 @@ impl Passphrase {
         ensure!(sb_key.magic == bch_key_magic, "incorrect passphrase");
 
         Ok((passphrase_key, sb_key))
+    }
+}
+
+fn is_dev_null(fd: BorrowedFd) -> io::Result<bool> {
+    let stat = rustix::fs::fstat(fd)?;
+    let file_type = rustix::fs::FileType::from_raw_mode(stat.st_mode);
+    if file_type != rustix::fs::FileType::CharacterDevice {
+        return Ok(false);
+    }
+    let major = rustix::fs::major(stat.st_rdev);
+    let minor = rustix::fs::minor(stat.st_rdev);
+    Ok(major == 1 && minor == 3)
+}
+
+enum StdinType {
+    Terminal,
+    DevNull,
+    Other,
+}
+
+fn get_stdin_type() -> StdinType {
+    let stdin = stdin();
+    if stdin.is_terminal() {
+        StdinType::Terminal
+    } else if is_dev_null(stdin.as_fd()).unwrap_or(false) {
+        StdinType::DevNull
+    } else {
+        StdinType::Other
     }
 }
