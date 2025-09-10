@@ -159,6 +159,8 @@ impl Passphrase {
         let output = Command::new("systemd-ask-password")
             .arg("--icon=drive-harddisk")
             .arg(format!("--id=bcachefs:{}", uuid.as_hyphenated()))
+            .arg(format!("--keyname={}", uuid.as_hyphenated()))
+            .arg("--accept-cached")
             .arg("-n")
             .arg("Enter passphrase: ")
             .stdin(Stdio::inherit())
