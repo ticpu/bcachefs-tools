@@ -1,4 +1,4 @@
-VERSION=1.25.3
+VERSION=$(shell cargo metadata --format-version 1 | jq -r '.packages[] | select(.name | test("bcachefs-tools")) | .version')
 
 PREFIX?=/usr/local
 LIBEXECDIR?=$(PREFIX)/libexec
