@@ -1,27 +1,33 @@
-bcachefs-tools (1:1.25.3-1) unstable; urgency=medium
+bcachefs-tools (1:1.13.0-1~exp1) experimental; urgency=medium
 
-  New image tooling:
-  * bcachefs image create
-  * bcachefs image update
+  * QA Upload
+  * New upstream release
+    - Regenerate dependency patch
+  * New build-dependency: librust-env-logger-dev
+  * New build-dependency: librust-owo-colors-dev
+  * Add missing character in previous changelog entry
+    (s/tom/toml)
 
- -- Kent Overstreet <kent.overstreet@linux.dev>  Sun, 20 Jul 2025 12:21:03 -0400
+ -- Jonathan Carter <jcc@debian.org>  Mon, 06 Jan 2025 12:37:38 +0200
 
-bcachefs-tools (1:1.25.2-1) unstable; urgency=medium
+bcachefs-tools (1:1.9.4-1~exp1) experimental; urgency=medium
 
-  * don't pick a non power of two bucket size
-  * pick_bucket_size() was picking non blocksize aligned bucket sizes, which
-    uncovered a few bugs.
+  * New upstream release
+  * Remove build-dependency on librust-colored-2-dev (no longer needed)
+  * New build-dependencies: librust-rustix-dev, rustfmt,
+                            librust-memoffset-06-dev -> librust-memoffset-dev
+  * Refresh build-deps patch
+  * Add upstream metadata
+  * Remove self from maintaners (orphaning package)
 
- -- Kent Overstreet <kent.overstreet@linux.dev>  Sat, 19 Apr 2025 00:24:19 +0300
+ -- Jonathan Carter <jcc@debian.org>  Sat, 20 Jul 2024 04:19:03 +0200
 
-bcachefs-tools (1:1.25.1-1) unstable; urgency=medium
+bcachefs-tools (1:1.9.2-1) experimental; urgency=medium
 
-  * bcachefs migrate now works
-  * bcachefs list-journal transaction filter fixes
-  * bcachefs format now loads the bcachefs module, so that we can correctly
-  * detect the version supported by the running kernel
+  * New upstream release
+  * Fix Vcs fields in debian/control
 
- -- Kent Overstreet <kent.overstreet@linux.dev>  Tue, 01 Apr 2025 13:06:37 -0400
+ -- Jonathan Carter <jcc@debian.org>  Thu, 11 Jul 2024 15:01:59 +0200
 
 bcachefs-tools (1:1.9.1-1) unstable; urgency=medium
 
