@@ -1,0 +1,197 @@
+on:
+  workflow_call:
+    secrets:
+      GPG_SECRET_SUBKEYS:
+        required: true
+      GPG_SIGNING_SUBKEY_FINGERPRINT:
+        required: true
+      GPG_AUTH_SUBKEY_KEYGRIP:
+        required: true
+      SSH_HOST:
+        required: true
+      SSH_SERVER_KEYS:
+        required: true
+
+jobs:
+  linux:
+    concurrency: apt.bcachefs.org
+    runs-on: ubuntu-latest
+    container:
+      image: debian:unstable-slim
+      options: --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --device /dev/fuse --tmpfs /tmp:exec --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}:exec
+    env:
+      SUITE: ${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'release' || 'snapshot' }}
+    steps:
+      - name: Install necessary packages
+        timeout-minutes: 1
+        run: |
+          set -xe
+          tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io > /dev/null <<EOT
+          force-unsafe-io
+          EOT
+          tee /etc/apt/apt.conf.d/tmpfs > /dev/null <<EOT
+          Dir::Cache::Archives "/tmp/apt/archives";
+          APT::ExtractTemplates::TempDir "/tmp/apt/temp";
+          EOT
+          mkdir -p /tmp/apt/archives
+          tee /etc/apt/apt.conf.d/80retry > /dev/null <<EOT
+          Acquire::Retries "10";
+          EOT
+          tee /etc/apt/apt.conf.d/80recommends > /dev/null <<EOT
+          APT::Install-Recommends "false";
+          EOT
+          tee /etc/apt/apt.conf.d/80suggests > /dev/null <<EOT
+          APT::Install-Suggests "false";
+          EOT
+          tee /etc/apt/apt.conf.d/80forceyes > /dev/null <<EOT
+          APT::Get::Assume-Yes "true";
+          EOT
+          tee /etc/apt/apt.conf.d/80fixmissing > /dev/null <<EOT
+          APT::Get::Fix-Missing "true";
+          EOT
+          rm -rf /var/lib/apt/lists/*
+          rm -rf /etc/apt/sources.list*
+          tee /etc/apt/sources.list > /dev/null <<EOT
+          deb http://deb.debian.org/debian unstable main
+          EOT
+          apt update
+          apt full-upgrade
+          apt install \
+            devscripts \
+            gnupg \
+            gpg-agent \
+            openssh-client \
+            reprepro \
+            sshfs \
+            tar \
+            xz-utils \
+            zip
+          apt clean
+      - name: Configure gpg-agent / ssh
+        timeout-minutes: 1
+        run: |
+          set -xe
+          mkdir -p ~/.gnupg ~/.ssh
+          echo "" >> ~/.gnupg/gpg-agent.conf
+          echo "enable-ssh-support" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent
+          gpgconf --launch gpg-agent
+          export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
+          echo "SSH_AUTH_SOCK=$(echo ${SSH_AUTH_SOCK})" >> $GITHUB_ENV
+          echo "" >> /etc/ssh/ssh_known_hosts
+          echo "${{ secrets.SSH_SERVER_KEYS }}" >> /etc/ssh/ssh_known_hosts
+      - name: Import GPG key
+        timeout-minutes: 1
+        if: github.event_name != 'pull_request'
+        uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6.3.0
+        with:
+          gpg_private_key: ${{ secrets.GPG_SECRET_SUBKEYS }}
+          fingerprint: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          trust_level: 5
+      - name: Configure GPG
+        timeout-minutes: 1
+        run: |
+          set -xe
+          gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
+          gpg --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc --armor --export ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          gpg --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --import /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
+          tee -a ~/.gnupg/gpg.conf > /dev/null <<EOT
+          default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          EOT
+          tee -a  ~/.gbp.conf > /dev/null <<EOT
+          [buildpackage]
+          sign-tags = True
+          keyid = ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          EOT
+          tee -a ~/.devscripts > /dev/null <<EOT
+          DEBSIGN_KEYID=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          EOT
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$verbose = 1;
+          \$dpkg_buildpackage_user_options = ['--sign-keyid=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}', '--force-sign'];
+          EOT
+      - name: Download all artifacts
+        timeout-minutes: 1
+        uses: actions/download-artifact@v5
+        with:
+          path: packed-artifacts
+      - name: Unpack all artifacts
+        timeout-minutes: 1
+        run: |
+          set -xe
+          SRC_DIR="$GITHUB_WORKSPACE/src-artifacts"
+          mkdir -p "$SRC_DIR"
+          find "$GITHUB_WORKSPACE/packed-artifacts" -type f -name artifact-src.tar -exec tar -xf {} -C "$SRC_DIR" ';' -delete
+          BIN_DIR="$GITHUB_WORKSPACE/bin-artifacts"
+          mkdir -p "$BIN_DIR"
+          find "$GITHUB_WORKSPACE/packed-artifacts" -type f -name '*.tar' -exec tar -xf {} -C "$BIN_DIR" ';' -delete
+          rm -rf "$GITHUB_WORKSPACE/packed-artifacts"
+      - name: Create and populate repos
+        timeout-minutes: 60
+        run: |
+          set -xe
+          ls -lahR
+          MOUNTPOINT="$GITHUB_WORKSPACE/remotefs"
+          mkdir -p "$MOUNTPOINT"
+          sshfs ${{ secrets.SSH_HOST }}/uploads "$MOUNTPOINT"
+          REPO_ROOT="$MOUNTPOINT/public_html"
+          mkdir -p "$REPO_ROOT"
+          cp -f /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc "$REPO_ROOT"
+          cat > "$REPO_ROOT/README.txt" <<EOF
+          To add this repository to your computer, do:
+
+
+              wget -qO- https://apt.bcachefs.org/apt.bcachefs.org.asc | sudo tee /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
+              # Fingerprint: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+              sudo cat > "/etc/apt/sources.list.d/apt.bcachefs.org.sources" <<EOF
+              Types: deb deb-src
+              URIs: https://apt.bcachefs.org/unstable/
+              Suites: bcachefs-tools-snapshot # or -release
+              Components: main
+              Signed-By: /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
+              EOF
+              sudo apt update
+              sudo apt install bcachefs-tools
+
+
+
+          For more information, see:
+          https://wiki.debian.org/DebianRepository/UseThirdParty
+
+          Source, Debian tarballs and dsc files can be verified using https://github.com/sigstore/rekor.
+          EOF
+          cd "$GITHUB_WORKSPACE/bin-artifacts"
+          for DIST in *
+          do
+          SRCDIR="$GITHUB_WORKSPACE/bin-artifacts/$DIST"
+          cd "$SRCDIR"
+          REPO="$REPO_ROOT/$DIST"
+          mkdir -p "$REPO/conf/distributions"
+          tee "$REPO/conf/distributions/$SUITE.conf" > /dev/null <<EOT
+          Codename: bcachefs-tools-$SUITE
+          Architectures: source amd64 arm64
+          Components: main
+          Contents:
+          Origin: apt.bcachefs.org
+          Label: apt.bcachefs.org Packages
+          Description: bcachefs APT repository
+          SignWith: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          Signed-By: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          Uploaders: uploaders
+          EOT
+          tee "$REPO/conf/uploaders" > /dev/null <<EOT
+          allow * by key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          EOT
+          tee "$REPO/conf/options" > /dev/null <<EOT
+          verbose
+          ignore longkeyid
+          EOT
+          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-$SUITE "$GITHUB_WORKSPACE/src-artifacts/"*.changes
+          for f in "$SRCDIR"/*/*.changes
+          do
+          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-$SUITE $f
+          done
+          reprepro --basedir "$REPO" createsymlinks
+          reprepro --basedir "$REPO" export
+          done
+          umount "$MOUNTPOINT"

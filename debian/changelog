@@ -1,3 +1,10 @@
+bcachefs-tools (1:1.31.0) unstable; urgency=medium
+
+  * Fix package, build against vendored deps
+  * Implement apt.bcachefs.org repo
+
+ -- Roman Lebedev <lebedev.ri@gmail.com>  Tue, 16 Sep 2025 12:50:36 +0300
+
 bcachefs-tools (1:1.13.0-1~exp1) experimental; urgency=medium
 
   * QA Upload
