@@ -77,10 +77,7 @@
           rustfmtToml = builtins.fromTOML (builtins.readFile ./rustfmt.toml);
 
           rev = self.shortRev or self.dirtyShortRev or (substring 0 8 self.lastModifiedDate);
-          makefileVersion = removePrefix "VERSION=" (
-            findFirst (line: hasPrefix "VERSION=" line) "VERSION=0.0.0" (split "\n" (readFile ./Makefile))
-          );
-          version = "${makefileVersion}+${rev}";
+          version = "${cargoToml.package.version}+${rev}";
 
           mkCommon =
             {
