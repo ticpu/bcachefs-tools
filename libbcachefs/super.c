@@ -2437,10 +2437,10 @@ static bool bch2_dev_will_resize_on_mount(struct bch_dev *ca)
 
 static bool bch2_fs_will_resize_on_mount(struct bch_fs *c)
 {
+	bool ret = false;
 	for_each_online_member(c, ca, BCH_DEV_READ_REF_fs_resize_on_mount)
-		if (bch2_dev_will_resize_on_mount(ca))
-			return true;
-	return false;
+		ret |= bch2_dev_will_resize_on_mount(ca);
+	return ret;
 }
 
 int bch2_fs_resize_on_mount(struct bch_fs *c)
