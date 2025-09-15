@@ -80,7 +80,7 @@ static int cmd_data_scrub(int argc, char *argv[])
 		.op			= BCH_DATA_OP_scrub,
 		.scrub.data_types	= ~0,
 	};
-	int opt;
+	int ret = 0, opt;
 
 	while ((opt = getopt_long(argc, argv, "hm", longopts, NULL)) != -1)
 		switch (opt) {
@@ -187,6 +187,11 @@ static int cmd_data_scrub(int argc, char *argv[])
 				dev->corrected	= e.p.sectors_error_corrected;
 				dev->uncorrected= e.p.sectors_error_uncorrected;
 				dev->total	= e.p.sectors_total;
+
+				if (dev->corrected)
+					ret |= 2;
+				if (dev->uncorrected)
+					ret |= 4;
 			}
 
 			if (dev->progress_fd >= 0 && e.ret) {
@@ -253,7 +258,7 @@ static int cmd_data_scrub(int argc, char *argv[])
 	fputs("\n", stdout);
 	printbuf_exit(&buf);
 
-	return 0;
+	return ret;
 }
 
 static void data_job_usage(void)
