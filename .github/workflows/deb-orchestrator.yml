@@ -1,0 +1,58 @@
+name: .deb build orchestrator
+
+on:
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches:
+      - "**"
+    tags:
+      - v*
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  source-only:
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    uses: ./.github/workflows/deb-src.yml
+    secrets:
+      GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
+      GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+  buildd:
+    needs: source-only
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        stack:
+          - { runs-on: "ubuntu-latest",    arch: "amd64" }
+          - { runs-on: "ubuntu-24.04-arm", arch: "arm64" }
+        dist: [ unstable, forky, trixie ]
+    uses: ./.github/workflows/deb-buildd.yml
+    with:
+      deb-src-artifact-id: ${{ needs.source-only.outputs.deb-src-artifact-id }}
+      runs-on: ${{ matrix.stack.runs-on }}
+      arch: ${{ matrix.stack.arch }}
+      dist: ${{ matrix.dist }}
+    secrets:
+      GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
+      GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+  publish:
+    needs: [ source-only, buildd ]
+    if: github.event_name != 'pull_request' && (github.ref_type == 'tag' || (github.ref_type == 'branch' && github.ref_name == 'master'))
+    uses: ./.github/workflows/deb-publish.yml
+    secrets:
+      GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
+      GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+      GPG_AUTH_SUBKEY_KEYGRIP: ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }}
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_SERVER_KEYS: ${{ secrets.SSH_SERVER_KEYS }}

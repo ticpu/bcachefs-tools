@@ -1,19 +1,16 @@
 Source: bcachefs-tools
-Maintainer: Debian QA Group <packages@qa.debian.org>
+Maintainer: Roman Lebedev <lebedev.ri@gmail.com>
 Section: utils
 Priority: optional
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 13),
                cargo,
-               rustfmt,
-               python3:native,
-               pkgconf,
-               python3-docutils,
-               python3-pytest,
+               jq,
                libaio-dev,
-               libfuse3-dev,
                libblkid-dev,
+               libclang-dev,
+               libfuse3-dev,
                libkeyutils-dev,
                liblz4-dev,
                libscrypt-dev,
@@ -21,39 +18,14 @@ Build-Depends: debhelper-compat (= 13),
                libudev-dev,
                liburcu-dev,
                libzstd-dev,
+               pkgconf,
+               python3-docutils,
+               python3-pytest,
+               python3:native,
+               rustfmt,
                systemd-dev,
                uuid-dev,
                zlib1g-dev,
-#              -- Cargo.toml
-               librust-atty-0.2-dev (>= 0.2.14-~~),
-               librust-log-0.4-dev,
-               librust-log-0+std-dev,
-               librust-clap-4-dev (>= 4.0.32-~~),
-               librust-clap-4+derive-dev,
-               librust-clap-4+wrap-help-dev,
-               librust-clap-complete-4-dev (>= 4.3.2-~~),
-	       librust-chrono-dev,
-	       librust-gag-dev,
-	       librust-getset-dev,
-               librust-anyhow-1.0-dev,
-               librust-libc-0.2-dev,
-               librust-udev-0-dev (>= 0.7-~~),
-               librust-uuid-1-dev (>= 1.2.2-~~),
-               librust-errno-0-dev (>= 0.2),
-               librust-either-1-dev (>= 1.5),
-               librust-rpassword-7-dev,
-               librust-byteorder-1-dev (>= 1.3),
-	       librust-owo-colors-dev,
-	       librust-strum-dev (>= 0.26),
-	       librust-env-logger-dev,
-#              -- bch_bindgen/Cargo.toml
-#              anyhow, uuid, byteorder are covered above
-               librust-bitfield-0-dev (>= 0.14.0-~~),
-               librust-memoffset-dev,
-               librust-bitflags-1-dev (>= 1.3.2-~~),
-               librust-paste-1.0-dev,
-               librust-pkg-config-0.3-dev,
-               librust-bindgen-0.70-dev
 Homepage: https://bcachefs.org/
 Vcs-Git: https://salsa.debian.org/debian/bcachefs-tools.git
 Vcs-Browser: https://salsa.debian.org/debian/bcachefs-tools

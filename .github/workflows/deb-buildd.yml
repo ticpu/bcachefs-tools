@@ -1,0 +1,199 @@
+on:
+  workflow_call:
+    inputs:
+      deb-src-artifact-id:
+        required: true
+        type: string
+      runs-on:
+        required: true
+        type: string
+      arch:
+        required: true
+        type: string
+      dist:
+        required: true
+        type: string
+    secrets:
+      GPG_SECRET_SUBKEYS:
+      GPG_SIGNING_SUBKEY_FINGERPRINT:
+
+jobs:
+  linux:
+    runs-on: ${{ inputs.runs-on }}
+    container:
+      image: debian:unstable-slim
+      options: --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --tmpfs /tmp:exec --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}:exec
+    env:
+      DEBFULLNAME: apt.bcachefs.org CI bot
+      DEBEMAIL: linux-bcachefs@vger.kernel.org
+      DEB_SIGN_KEYID: "${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    steps:
+      - name: Install necessary packages
+        timeout-minutes: 1
+        run: |
+          set -xe
+          tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io > /dev/null <<EOT
+          force-unsafe-io
+          EOT
+          tee /etc/apt/apt.conf.d/tmpfs > /dev/null <<EOT
+          Dir::Cache::Archives "/tmp/apt/archives";
+          APT::ExtractTemplates::TempDir "/tmp/apt/temp";
+          EOT
+          mkdir -p /tmp/apt/archives
+          tee /etc/apt/apt.conf.d/80retry > /dev/null <<EOT
+          Acquire::Retries "10";
+          EOT
+          tee /etc/apt/apt.conf.d/80recommends > /dev/null <<EOT
+          APT::Install-Recommends "false";
+          EOT
+          tee /etc/apt/apt.conf.d/80suggests > /dev/null <<EOT
+          APT::Install-Suggests "false";
+          EOT
+          tee /etc/apt/apt.conf.d/80forceyes > /dev/null <<EOT
+          APT::Get::Assume-Yes "true";
+          EOT
+          tee /etc/apt/apt.conf.d/80fixmissing > /dev/null <<EOT
+          APT::Get::Fix-Missing "true";
+          EOT
+          rm -rf /var/lib/apt/lists/*
+          rm -rf /etc/apt/sources.list*
+          tee /etc/apt/sources.list > /dev/null <<EOT
+          deb http://deb.debian.org/debian unstable main
+          EOT
+          apt update
+          apt full-upgrade
+          apt install \
+            curl \
+            debian-keyring \
+            devscripts \
+            gpg \
+            iproute2 \
+            mmdebstrap \
+            sbuild \
+            sudo \
+            tar \
+            uidmap \
+            xz-utils \
+            zip
+          apt clean
+          USER=`whoami`
+          sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
+          BUILD_DIR="$GITHUB_WORKSPACE/deb-bin/${{ inputs.dist }}/${{ inputs.arch }}"
+          mkdir -p "$BUILD_DIR"
+          tee ~/.sbuildrc > /dev/null <<EOT
+          \$verbose = 0;
+          \$build_dir = '$BUILD_DIR';
+          \$distribution = '${{ inputs.dist }}';
+          #\$host_arch = '${{ inputs.arch }}';
+          \$chroot_mode = 'unshare';
+          \$unshare_tmpdir_template = '/tmp/tmp.sbuild.XXXXXXXXXX';
+          \$key_id = '${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}';
+          EOT
+          if    [ "${{ inputs.dist }}" != "unstable" ] \
+             && [ "${{ inputs.dist }}" != "testing" ];
+          then
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$extra_repositories = [
+            'deb http://deb.debian.org/debian ${{ inputs.dist }}-updates main',
+            'deb http://deb.debian.org/debian ${{ inputs.dist }}-backports main'
+          ];
+          EOT
+          fi
+      - name: Import GPG key
+        timeout-minutes: 1
+        id: gpg
+        if: github.event_name != 'pull_request'
+        uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6.3.0
+        with:
+          gpg_private_key: ${{ secrets.GPG_SECRET_SUBKEYS }}
+          fingerprint: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          trust_level: 5
+      - name: Configure GPG
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          gpg --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc --armor --export ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          gpg --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --import /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
+          tee -a ~/.gnupg/gpg.conf > /dev/null <<EOT
+          default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          EOT
+          tee -a  ~/.gbp.conf > /dev/null <<EOT
+          [buildpackage]
+          sign-tags = True
+          keyid = ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          EOT
+          tee -a ~/.devscripts > /dev/null <<EOT
+          DEBSIGN_KEYID=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          EOT
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$verbose = 1;
+          \$dpkg_buildpackage_user_options = ['--sign-keyid=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}', '--force-sign'];
+          EOT
+      - name: Download source-only .deb to be built
+        timeout-minutes: 1
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: ${{ inputs.deb-src-artifact-id }}
+          path: deb-src
+      - name: Unpack the downloaded tarball
+        timeout-minutes: 1
+        run: |
+          set -xe
+          cd "$GITHUB_WORKSPACE/deb-src"
+          tar -xf "$GITHUB_WORKSPACE/deb-src/artifact-src.tar"
+      - name: Ensure that source package is signed
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          dscverify --verbose "$GITHUB_WORKSPACE/deb-src/"*.changes
+      - name: Build the package
+        timeout-minutes: 10
+        run: |
+          set -xe
+          cd "$GITHUB_WORKSPACE/deb-bin/"
+          sbuild --verbose "$GITHUB_WORKSPACE/deb-src/"*.dsc
+      - name: Sign the .deb's
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          find "$GITHUB_WORKSPACE/deb-bin/" -type f -name '*.deb' -exec gpg --verbose --detach-sign {} ';'
+      - name: Ensure that binary package is signed
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          cd "$GITHUB_WORKSPACE/deb-bin/"
+          find -name '*.changes' -print0 | xargs -0 dscverify --verbose
+      - name: Archive build artifacts
+        timeout-minutes: 1
+        run: |
+          set -xe
+          cd "$GITHUB_WORKSPACE/deb-bin/"
+          tar -cf "$GITHUB_WORKSPACE/deb-bin/artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar" *
+      - name: Attest build artifact
+        timeout-minutes: 1
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: '${{ github.workspace }}/deb-bin'
+      - name: Upload build artifact archive
+        timeout-minutes: 1
+        id: deb-bin-upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar
+          path: '${{ github.workspace }}/deb-bin/artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar'
+          if-no-files-found: error
+          compression-level: 0
+      - name: Attest uploaded build artifact
+        timeout-minutes: 1
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar.zip
+          subject-digest: sha256:${{ steps.deb-bin-upload.outputs.artifact-digest }}
