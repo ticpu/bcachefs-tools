@@ -44,6 +44,7 @@
 #include <linux/siphash.h>
 #include <linux/statfs.h>
 #include <linux/string.h>
+#include <linux/version.h>
 #include <linux/xattr.h>
 
 static struct kmem_cache *bch2_inode_cache;
@@ -1585,6 +1586,10 @@ static const __maybe_unused unsigned bch_flags_to_xflags[] = {
 	[__BCH_INODE_noatime]	= FS_XFLAG_NOATIME,
 };
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,17,0)
+#define file_kattr fileattr
+#endif
+
 static int bch2_fileattr_get(struct dentry *dentry,
 			     struct file_kattr *fa)
 {
@@ -1803,8 +1808,6 @@ static const struct address_space_operations bch_address_space_operations = {
 	.writepages	= bch2_writepages,
 	.readahead	= bch2_readahead,
 	.dirty_folio	= filemap_dirty_folio,
-	.write_begin	= bch2_write_begin,
-	.write_end	= bch2_write_end,
 	.invalidate_folio = bch2_invalidate_folio,
 	.release_folio	= bch2_release_folio,
 #ifdef CONFIG_MIGRATION
