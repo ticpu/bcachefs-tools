@@ -137,13 +137,13 @@ jobs:
           REPO_ROOT="$MOUNTPOINT/public_html"
           mkdir -p "$REPO_ROOT"
           cp -f /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc "$REPO_ROOT"
-          cat > "$REPO_ROOT/README.txt" <<EOF
+          cat > "$REPO_ROOT/README.txt" <<EOR
           To add this repository to your computer, do:
 
 
           wget -qO- https://apt.bcachefs.org/apt.bcachefs.org.asc | sudo tee /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
           # Fingerprint: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
-          sudo cat > "/etc/apt/sources.list.d/apt.bcachefs.org.sources" <<EOF
+          sudo cat > "/etc/apt/sources.list.d/apt.bcachefs.org.sources" <<EOS
           Types: deb deb-src
           URIs: https://apt.bcachefs.org/unstable/
           # Or replace unstable with your distro's release name
@@ -152,7 +152,7 @@ jobs:
           # Suites: bcachefs-tools-release
           Components: main
           Signed-By: /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
-          EOF
+          EOS
           sudo apt update
           sudo apt install bcachefs-tools
 
@@ -168,7 +168,7 @@ jobs:
           https://wiki.debian.org/DebianRepository/UseThirdParty
 
           Source, Debian tarballs and dsc files can be verified using https://github.com/sigstore/rekor.
-          EOF
+          EOR
           cd "$GITHUB_WORKSPACE/bin-artifacts"
           for DIST in *
           do
