@@ -21,6 +21,8 @@ endif
 PREFIX := /usr
 ROOT_SBINDIR := /usr/sbin
 
+export PREFIX ROOT_SBINDIR
+
 DEB_BUILD_ARCH ?= $(shell dpkg-architecture -qDEB_BUILD_ARCH)
 
 ifeq ($(DEB_BUILD_ARCH),amd64)
