@@ -5,6 +5,7 @@ Priority: optional
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 13),
+               dh-dkms,
                cargo,
                jq,
                libaio-dev,
@@ -24,7 +25,6 @@ Build-Depends: debhelper-compat (= 13),
                systemd-dev,
                uuid-dev,
                zlib1g-dev,
-Depends: dkms
 Homepage: https://bcachefs.org/
 Vcs-Git: https://salsa.debian.org/debian/bcachefs-tools.git
 Vcs-Browser: https://salsa.debian.org/debian/bcachefs-tools

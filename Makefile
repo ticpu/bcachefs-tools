@@ -200,6 +200,9 @@ endif
 # Rebuild the 'version' command any time the version string changes
 cmd_version.o : .version
 
+dkms/dkms.conf:
+	sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/dkms.conf.in > dkms/dkms.conf
+
 .PHONY: install
 install: INITRAMFS_HOOK=$(INITRAMFS_DIR)/hooks/bcachefs
 install: INITRAMFS_SCRIPT=$(INITRAMFS_DIR)/scripts/local-premount/bcachefs
@@ -226,19 +229,18 @@ install_systemd: $(systemd_services) $(systemd_libexecfiles)
 	$(INSTALL) -m0644 -D $(systemd_services) -t $(DESTDIR)$(PKGCONFIG_SERVICEDIR)
 
 .PHONY: install_dkms
-install_dkms:
+install_dkms: dkms/dkms.conf
 	$(INSTALL) -m0644 -D dkms/Makefile         -t $(DESTDIR)$(DKMSDIR)
 	$(INSTALL) -m0644 -D dkms/dkms.conf        -t $(DESTDIR)$(DKMSDIR)
 	$(INSTALL) -m0644 -D libbcachefs/Makefile  -t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
 	$(INSTALL) -m0644 -D libbcachefs/*.[ch]    -t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
-	sed -i "s|@PACKAGE_VERSION@|$(VERSION)|g" $(DESTDIR)$(DKMSDIR)/dkms.conf
 	sed -i "s|^#define TRACE_INCLUDE_PATH \\.\\./\\.\\./fs/bcachefs$$|#define TRACE_INCLUDE_PATH $(DKMSDIR)/src/fs/bcachefs|" \
 	  $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/trace.h
 
 .PHONY: clean
 clean:
 	@echo "Cleaning all"
-	$(Q)$(RM) libbcachefs.a c_src/libbcachefs.a .version *.tar.xz $(OBJS) $(DEPS) $(DOCGENERATED)
+	$(Q)$(RM) libbcachefs.a c_src/libbcachefs.a .version dkms/dkms.conf *.tar.xz $(OBJS) $(DEPS) $(DOCGENERATED)
 	$(Q)$(CARGO_CLEAN)
 	$(Q)$(RM) -f $(built_scripts)
 

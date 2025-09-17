@@ -32,7 +32,7 @@ endif
 export CARGO_ARGS = "--frozen"
 
 %:
-	dh $@ --parallel
+	dh $@ --parallel --with dkms
 
 override_dh_clean:
 	# HACK: breaks cargo checksumming by deleting some vendored files.

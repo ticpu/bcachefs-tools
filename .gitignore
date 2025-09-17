@@ -10,6 +10,7 @@ TAGS
 cscope*
 bcachefs-tools
 compile_commands.json
+dkms/dkms.conf
 
 # dot-files that we don't want to ignore
 !.gitignore
