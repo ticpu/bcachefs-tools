@@ -17,6 +17,7 @@
 #include "libbcachefs/btree_iter.h"
 #include "libbcachefs/buckets.h"
 #include "libbcachefs/dirent.h"
+#include "libbcachefs/disk_accounting.h"
 #include "libbcachefs/errcode.h"
 #include "libbcachefs/error.h"
 #include "libbcachefs/namei.h"
@@ -383,13 +384,13 @@ static void userbio_init(struct bio *bio, struct bio_vec *bv,
 	bv->bv_offset		= 0;
 }
 
-static int get_inode_io_opts(struct bch_fs *c, subvol_inum inum, struct bch_io_opts *opts)
+static int get_inode_io_opts(struct bch_fs *c, subvol_inum inum, struct bch_inode_opts *opts)
 {
 	struct bch_inode_unpacked inode;
 	if (bch2_inode_find_by_inum(c, inum, &inode))
 		return -EINVAL;
 
-	bch2_inode_opts_get(opts, c, &inode);
+	bch2_inode_opts_get_inode(c, &inode, opts);
 	return 0;
 }
 
@@ -461,7 +462,7 @@ static int read_aligned(struct bch_fs *c, subvol_inum inum, size_t aligned_size,
 	BUG_ON(aligned_size & (block_bytes(c) - 1));
 	BUG_ON(aligned_offset & (block_bytes(c) - 1));
 
-	struct bch_io_opts io_opts;
+	struct bch_inode_opts io_opts;
 	if (get_inode_io_opts(c, inum, &io_opts))
 		return -ENOENT;
 
@@ -563,7 +564,7 @@ err:
 }
 
 static int write_aligned(struct bch_fs *c, subvol_inum inum,
-			 struct bch_io_opts io_opts, void *buf,
+			 struct bch_inode_opts io_opts, void *buf,
 			 size_t aligned_size, off_t aligned_offset,
 			 off_t new_i_size, size_t *written_out)
 {
@@ -617,7 +618,7 @@ static void bcachefs_fuse_write(fuse_req_t req, fuse_ino_t ino,
 {
 	subvol_inum inum = map_root_ino(ino);
 	struct bch_fs *c	= fuse_req_userdata(req);
-	struct bch_io_opts	io_opts;
+	struct bch_inode_opts	io_opts;
 	size_t			aligned_written;
 	int			ret = 0;
 
@@ -715,7 +716,7 @@ static void bcachefs_fuse_symlink(fuse_req_t req, const char *link,
 	if (ret)
 		goto err;
 
-	struct bch_io_opts io_opts;
+	struct bch_inode_opts io_opts;
 	ret = get_inode_io_opts(c, dir, &io_opts);
 	if (ret)
 		goto err;
@@ -987,13 +988,19 @@ static void bcachefs_fuse_statfs(fuse_req_t req, fuse_ino_t inum)
 	struct bch_fs *c = fuse_req_userdata(req);
 	struct bch_fs_usage_short usage = bch2_fs_usage_read_short(c);
 	unsigned shift = c->block_bits;
+
+	u64 nr_inodes = 0;
+	struct disk_accounting_pos k;
+	disk_accounting_key_init(k, nr_inodes);
+	bch2_accounting_mem_read(c, disk_accounting_pos_to_bpos(&k), &nr_inodes, 1);
+
 	struct statvfs statbuf = {
 		.f_bsize	= block_bytes(c),
 		.f_frsize	= block_bytes(c),
 		.f_blocks	= usage.capacity >> shift,
 		.f_bfree	= (usage.capacity - usage.used) >> shift,
 		//.f_bavail	= statbuf.f_bfree,
-		.f_files	= usage.nr_inodes,
+		.f_files	= nr_inodes,
 		.f_ffree	= U64_MAX,
 		.f_namemax	= BCH_NAME_MAX,
 	};
