@@ -729,6 +729,146 @@ int bch2_writepages(struct address_space *mapping, struct writeback_control *wbc
 
 /* buffered writes: */
 
+int bch2_write_begin(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,17,0)
+		     const struct kiocb *iocb,
+#else
+		     struct file *file,
+#endif
+		     struct address_space *mapping,
+		     loff_t pos, unsigned len,
+		     struct folio **foliop, void **fsdata)
+{
+	struct bch_inode_info *inode = to_bch_ei(mapping->host);
+	struct bch_fs *c = inode->v.i_sb->s_fs_info;
+	struct bch2_folio_reservation *res;
+	struct folio *folio;
+	unsigned offset;
+	int ret = -ENOMEM;
+
+	res = kmalloc(sizeof(*res), GFP_KERNEL);
+	if (!res)
+		return -ENOMEM;
+
+	bch2_folio_reservation_init(c, inode, res);
+	*fsdata = res;
+
+	bch2_pagecache_add_get(inode);
+
+	folio = __filemap_get_folio(mapping, pos >> PAGE_SHIFT,
+				    FGP_WRITEBEGIN | fgf_set_order(len),
+				    mapping_gfp_mask(mapping));
+	if (IS_ERR(folio))
+		goto err_unlock;
+
+	offset = pos - folio_pos(folio);
+	len = min_t(size_t, len, folio_end_pos(folio) - pos);
+
+	if (folio_test_uptodate(folio))
+		goto out;
+
+	/* If we're writing entire folio, don't need to read it in first: */
+	if (!offset && len == folio_size(folio))
+		goto out;
+
+	if (!offset && pos + len >= inode->v.i_size) {
+		folio_zero_segment(folio, len, folio_size(folio));
+		flush_dcache_folio(folio);
+		goto out;
+	}
+
+	if (folio_pos(folio) >= inode->v.i_size) {
+		folio_zero_segments(folio, 0, offset, offset + len, folio_size(folio));
+		flush_dcache_folio(folio);
+		goto out;
+	}
+readpage:
+	ret = bch2_read_single_folio(folio, mapping);
+	if (ret)
+		goto err;
+out:
+	ret = bch2_folio_set(c, inode_inum(inode), &folio, 1);
+	if (ret)
+		goto err;
+
+	ret = bch2_folio_reservation_get(c, inode, folio, res, offset, len);
+	if (ret) {
+		if (!folio_test_uptodate(folio)) {
+			/*
+			 * If the folio hasn't been read in, we won't know if we
+			 * actually need a reservation - we don't actually need
+			 * to read here, we just need to check if the folio is
+			 * fully backed by uncompressed data:
+			 */
+			goto readpage;
+		}
+
+		goto err;
+	}
+
+	*foliop = folio;
+	return 0;
+err:
+	folio_unlock(folio);
+	folio_put(folio);
+err_unlock:
+	bch2_pagecache_add_put(inode);
+	kfree(res);
+	*fsdata = NULL;
+	return bch2_err_class(ret);
+}
+
+int bch2_write_end(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,17,0)
+		   const struct kiocb *iocb,
+#else
+		   struct file *file,
+#endif
+		   struct address_space *mapping,
+		   loff_t pos, unsigned len, unsigned copied,
+		   struct folio *folio, void *fsdata)
+{
+	struct bch_inode_info *inode = to_bch_ei(mapping->host);
+	struct bch_fs *c = inode->v.i_sb->s_fs_info;
+	struct bch2_folio_reservation *res = fsdata;
+	unsigned offset = pos - folio_pos(folio);
+
+	BUG_ON(offset + copied > folio_size(folio));
+
+	if (unlikely(copied < len && !folio_test_uptodate(folio))) {
+		/*
+		 * The folio needs to be read in, but that would destroy
+		 * our partial write - simplest thing is to just force
+		 * userspace to redo the write:
+		 */
+		folio_zero_range(folio, 0, folio_size(folio));
+		flush_dcache_folio(folio);
+		copied = 0;
+	}
+
+	scoped_guard(spinlock, &inode->v.i_lock)
+		if (pos + copied > inode->v.i_size)
+			i_size_write(&inode->v, pos + copied);
+
+	if (copied) {
+		if (!folio_test_uptodate(folio))
+			folio_mark_uptodate(folio);
+
+		bch2_set_folio_dirty(c, inode, folio, res, offset, copied);
+
+		inode->ei_last_dirtied = (unsigned long) current;
+	}
+
+	folio_unlock(folio);
+	folio_put(folio);
+	bch2_pagecache_add_put(inode);
+
+	bch2_folio_reservation_put(c, inode, res);
+	kfree(res);
+
+	return copied;
+}
+
 static noinline void folios_trunc(folios *fs, struct folio **fi)
 {
 	while (fs->data + fs->nr > fi) {

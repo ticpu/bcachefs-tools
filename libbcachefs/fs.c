@@ -1808,6 +1808,8 @@ static const struct address_space_operations bch_address_space_operations = {
 	.writepages	= bch2_writepages,
 	.readahead	= bch2_readahead,
 	.dirty_folio	= filemap_dirty_folio,
+	.write_begin	= bch2_write_begin,
+	.write_end	= bch2_write_end,
 	.invalidate_folio = bch2_invalidate_folio,
 	.release_folio	= bch2_release_folio,
 #ifdef CONFIG_MIGRATION
