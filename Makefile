@@ -200,13 +200,16 @@ endif
 # Rebuild the 'version' command any time the version string changes
 cmd_version.o : .version
 
-dkms/dkms.conf:
+dkms/dkms.conf: dkms/dkms.conf.in
 	sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/dkms.conf.in > dkms/dkms.conf
+
+initramfs/hook: initramfs/hook.in
+	sed "s|@ROOT_SBINDIR@|$(ROOT_SBINDIR)|g" initramfs/hook.in > initramfs/hook
 
 .PHONY: install
 install: INITRAMFS_HOOK=$(INITRAMFS_DIR)/hooks/bcachefs
 install: INITRAMFS_SCRIPT=$(INITRAMFS_DIR)/scripts/local-premount/bcachefs
-install: bcachefs install_dkms $(optional_install)
+install: bcachefs initramfs/hook install_dkms $(optional_install)
 	$(INSTALL) -m0755 -D $(BUILT_BIN)  -t $(DESTDIR)$(ROOT_SBINDIR)
 	$(INSTALL) -m0644 -D bcachefs.8    -t $(DESTDIR)$(PREFIX)/share/man/man8/
 	$(INSTALL) -m0755 -D initramfs/script $(DESTDIR)$(INITRAMFS_SCRIPT)
@@ -218,10 +221,6 @@ install: bcachefs install_dkms $(optional_install)
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/mkfs.fuse.bcachefs
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/fsck.fuse.bcachefs
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/mount.fuse.bcachefs
-
-	sed -i '/^# Note: make install replaces/,$$d' $(DESTDIR)$(INITRAMFS_HOOK)
-	echo "copy_exec $(ROOT_SBINDIR)/bcachefs /sbin/bcachefs" >> $(DESTDIR)$(INITRAMFS_HOOK)
-	echo "copy_exec $(ROOT_SBINDIR)/mount.bcachefs /sbin/mount.bcachefs" >> $(DESTDIR)$(INITRAMFS_HOOK)
 
 .PHONY: install_systemd
 install_systemd: $(systemd_services) $(systemd_libexecfiles)

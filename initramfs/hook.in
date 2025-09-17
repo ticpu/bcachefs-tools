@@ -22,7 +22,5 @@ manual_add_modules 'bcachefs'
 add_loaded_modules 'chacha20[-_]*'
 add_loaded_modules 'poly1305[-_]*'
 
-# Add the bcachefs utility to the initramfs
-# Note: make install replaces this with the install path, so it must be last
-#copy_exec /usr/local/sbin/bcachefs /sbin/bcachefs
-#copy_exec /usr/local/sbin/mount.bcachefs /sbin/mount.bcachefs
+copy_exec @ROOT_SBINDIR@/bcachefs /sbin/bcachefs
+copy_exec @ROOT_SBINDIR@/mount.bcachefs /sbin/mount.bcachefs

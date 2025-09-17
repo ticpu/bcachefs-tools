@@ -11,6 +11,7 @@ cscope*
 bcachefs-tools
 compile_commands.json
 dkms/dkms.conf
+initramfs/hook
 
 # dot-files that we don't want to ignore
 !.gitignore
