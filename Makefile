@@ -156,7 +156,7 @@ optional_install+=install_systemd
 endif	# PKGCONFIG_SERVICEDIR
 
 .PHONY: all
-all: bcachefs $(optional_build)
+all: bcachefs initramfs/hook dkms/dkms.conf $(optional_build)
 
 .PHONY: debug
 debug: CFLAGS+=-Werror -DCONFIG_BCACHEFS_DEBUG=y -DCONFIG_VALGRIND=y
@@ -201,15 +201,17 @@ endif
 cmd_version.o : .version
 
 dkms/dkms.conf: dkms/dkms.conf.in
-	sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/dkms.conf.in > dkms/dkms.conf
+	@echo "    [SED]    $@"
+	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/dkms.conf.in > dkms/dkms.conf
 
 initramfs/hook: initramfs/hook.in
-	sed "s|@ROOT_SBINDIR@|$(ROOT_SBINDIR)|g" initramfs/hook.in > initramfs/hook
+	@echo "    [SED]    $@"
+	$(Q)sed "s|@ROOT_SBINDIR@|$(ROOT_SBINDIR)|g" initramfs/hook.in > initramfs/hook
 
 .PHONY: install
 install: INITRAMFS_HOOK=$(INITRAMFS_DIR)/hooks/bcachefs
 install: INITRAMFS_SCRIPT=$(INITRAMFS_DIR)/scripts/local-premount/bcachefs
-install: bcachefs initramfs/hook install_dkms $(optional_install)
+install: all install_dkms $(optional_install)
 	$(INSTALL) -m0755 -D $(BUILT_BIN)  -t $(DESTDIR)$(ROOT_SBINDIR)
 	$(INSTALL) -m0644 -D bcachefs.8    -t $(DESTDIR)$(PREFIX)/share/man/man8/
 	$(INSTALL) -m0755 -D initramfs/script $(DESTDIR)$(INITRAMFS_SCRIPT)
