@@ -1,3 +1,9 @@
+bcachefs-tools (1:1.31.1) unstable; urgency=medium
+
+  * DKMS support
+
+ -- Kent Overstreet <kent.overstreet@linux.dev> Wed Sep 17 06:31:34 PM EDT 2025
+
 bcachefs-tools (1:1.31.0) unstable; urgency=medium
 
   * Fix package, build against vendored deps
