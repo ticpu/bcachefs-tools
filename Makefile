@@ -118,45 +118,8 @@ else
 	INITRAMFS_DIR=/etc/initramfs-tools
 endif
 
-PKGCONFIG_SERVICEDIR:=$(shell $(PKG_CONFIG) --variable=systemdsystemunitdir systemd)
-ifeq (,$(PKGCONFIG_SERVICEDIR))
-  $(warning skipping systemd integration)
-else
-BCACHEFSCK_ARGS=-f -n
-systemd_libexecfiles=\
-	fsck/bcachefsck_fail \
-	fsck/bcachefsck_all
-
-systemd_services=\
-	fsck/bcachefsck_fail@.service \
-	fsck/bcachefsck@.service \
-	fsck/system-bcachefsck.slice \
-	fsck/bcachefsck_all_fail.service \
-	fsck/bcachefsck_all.service \
-	fsck/bcachefsck_all.timer
-
-built_scripts+=\
-	fsck/bcachefsck_fail@.service \
-	fsck/bcachefsck@.service \
-	fsck/bcachefsck_all_fail.service \
-	fsck/bcachefsck_all \
-	fsck/bcachefsck_all.service
-
-%.service: %.service.in
-	@echo "    [SED]    $@"
-	$(Q)sed -e "s|@libexecdir@|$(LIBEXECDIR)|g" \
-	        -e "s|@bcachefsck_args@|$(BCACHEFSCK_ARGS)|g" < $< > $@
-
-fsck/bcachefsck_all: fsck/bcachefsck_all.in
-	@echo "    [SED]    $@"
-	$(Q)sed -e "s|@bcachefsck_args@|$(BCACHEFSCK_ARGS)|g" < $< > $@
-
-optional_build+=$(systemd_libexecfiles) $(systemd_services)
-optional_install+=install_systemd
-endif	# PKGCONFIG_SERVICEDIR
-
 .PHONY: all
-all: bcachefs initramfs/hook dkms/dkms.conf $(optional_build)
+all: bcachefs initramfs/hook dkms/dkms.conf
 
 .PHONY: debug
 debug: CFLAGS+=-Werror -DCONFIG_BCACHEFS_DEBUG=y -DCONFIG_VALGRIND=y
@@ -211,7 +174,7 @@ initramfs/hook: initramfs/hook.in
 .PHONY: install
 install: INITRAMFS_HOOK=$(INITRAMFS_DIR)/hooks/bcachefs
 install: INITRAMFS_SCRIPT=$(INITRAMFS_DIR)/scripts/local-premount/bcachefs
-install: all install_dkms $(optional_install)
+install: all install_dkms
 	$(INSTALL) -m0755 -D $(BUILT_BIN)  -t $(DESTDIR)$(ROOT_SBINDIR)
 	$(INSTALL) -m0644 -D bcachefs.8    -t $(DESTDIR)$(PREFIX)/share/man/man8/
 	$(INSTALL) -m0755 -D initramfs/script $(DESTDIR)$(INITRAMFS_SCRIPT)
@@ -223,11 +186,6 @@ install: all install_dkms $(optional_install)
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/mkfs.fuse.bcachefs
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/fsck.fuse.bcachefs
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/mount.fuse.bcachefs
-
-.PHONY: install_systemd
-install_systemd: $(systemd_services) $(systemd_libexecfiles)
-	$(INSTALL) -m0755 -D $(systemd_libexecfiles) -t $(DESTDIR)$(LIBEXECDIR)
-	$(INSTALL) -m0644 -D $(systemd_services) -t $(DESTDIR)$(PKGCONFIG_SERVICEDIR)
 
 .PHONY: install_dkms
 install_dkms: dkms/dkms.conf
