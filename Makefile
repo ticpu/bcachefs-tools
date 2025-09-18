@@ -189,10 +189,11 @@ install: all install_dkms
 
 .PHONY: install_dkms
 install_dkms: dkms/dkms.conf
-	$(INSTALL) -m0644 -D dkms/Makefile         -t $(DESTDIR)$(DKMSDIR)
-	$(INSTALL) -m0644 -D dkms/dkms.conf        -t $(DESTDIR)$(DKMSDIR)
-	$(INSTALL) -m0644 -D libbcachefs/Makefile  -t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
-	$(INSTALL) -m0644 -D libbcachefs/*.[ch]    -t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
+	$(INSTALL) -m0644 -D dkms/Makefile		-t $(DESTDIR)$(DKMSDIR)
+	$(INSTALL) -m0644 -D dkms/dkms.conf		-t $(DESTDIR)$(DKMSDIR)
+	$(INSTALL) -m0644 -D libbcachefs/Makefile	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
+	$(INSTALL) -m0644 -D libbcachefs/*.[ch]		-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
+	$(INSTALL) -m0644 -D libbcachefs/vendor/*.[ch]	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/vendor
 	sed -i "s|^#define TRACE_INCLUDE_PATH \\.\\./\\.\\./fs/bcachefs$$|#define TRACE_INCLUDE_PATH $(DKMSDIR)/src/fs/bcachefs|" \
 	  $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/trace.h
 
@@ -225,16 +226,14 @@ cargo-update-msrv:
 .PHONY: update-bcachefs-sources
 update-bcachefs-sources:
 	git rm -rf --ignore-unmatch libbcachefs
-	test -d libbcachefs || mkdir libbcachefs
+	mkdir -p libbcachefs/vendor
 	cp $(LINUX_DIR)/fs/bcachefs/*.[ch] libbcachefs/
+	cp $(LINUX_DIR)/fs/bcachefs/vendor/*.[ch] libbcachefs/vendor/
 	cp $(LINUX_DIR)/fs/bcachefs/Makefile libbcachefs/
 	git add libbcachefs/*.[ch]
+	git add libbcachefs/vendor/*.[ch]
 	git add libbcachefs/Makefile
 	git rm -f libbcachefs/mean_and_variance_test.c
-	cp $(LINUX_DIR)/include/linux/closure.h include/linux/
-	git add include/linux/closure.h
-	cp $(LINUX_DIR)/lib/closure.c linux/
-	git add linux/closure.c
 	cp $(LINUX_DIR)/include/linux/xxhash.h include/linux/
 	git add include/linux/xxhash.h
 	cp $(LINUX_DIR)/lib/xxhash.c linux/
