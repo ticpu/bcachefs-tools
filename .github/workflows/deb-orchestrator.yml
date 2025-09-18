@@ -21,6 +21,10 @@ jobs:
       contents: read
       attestations: write
     uses: ./.github/workflows/deb-src.yml
+    with:
+      runs-on: ubuntu-latest
+      dist-name: debian
+      dist-version: unstable
     secrets:
       GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
       GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
@@ -36,19 +40,24 @@ jobs:
         stack:
           - { runs-on: "ubuntu-latest",    arch: "amd64" }
           - { runs-on: "ubuntu-24.04-arm", arch: "arm64" }
-        dist: [ unstable, forky, trixie ]
+        dist:
+          - { name: debian, version: unstable }
+          - { name: debian, version: forky    } # Debian 14
+          - { name: debian, version: trixie   } # Debian 13
+          - { name: ubuntu, version: questing } # Ubuntu 25.10       (Questing Quokka) Beta
+          - { name: ubuntu, version: plucky   } # Ubuntu 25.04       (Plucky Puffin)
     uses: ./.github/workflows/deb-buildd.yml
     with:
       deb-src-artifact-id: ${{ needs.source-only.outputs.deb-src-artifact-id }}
       runs-on: ${{ matrix.stack.runs-on }}
       arch: ${{ matrix.stack.arch }}
-      dist: ${{ matrix.dist }}
+      dist-name: ${{ matrix.dist.name }}
+      dist-version: ${{ matrix.dist.version }}
     secrets:
       GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
       GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
   publish:
     needs: [ source-only, buildd ]
-    if: github.event_name != 'pull_request' && (github.ref_type == 'tag' || (github.ref_type == 'branch' && github.ref_name == 'master'))
     uses: ./.github/workflows/deb-publish.yml
     secrets:
       GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}

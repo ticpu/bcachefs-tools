@@ -10,7 +10,10 @@ on:
       arch:
         required: true
         type: string
-      dist:
+      dist-name:
+        required: true
+        type: string
+      dist-version:
         required: true
         type: string
     secrets:
@@ -67,8 +70,8 @@ jobs:
           apt update
           apt full-upgrade
           apt install \
+            ${{ inputs.dist-name }}-keyring \
             curl \
-            debian-keyring \
             devscripts \
             gpg \
             iproute2 \
@@ -82,27 +85,6 @@ jobs:
           apt clean
           USER=`whoami`
           sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
-          BUILD_DIR="$GITHUB_WORKSPACE/deb-bin/${{ inputs.dist }}/${{ inputs.arch }}"
-          mkdir -p "$BUILD_DIR"
-          tee ~/.sbuildrc > /dev/null <<EOT
-          \$verbose = 0;
-          \$build_dir = '$BUILD_DIR';
-          \$distribution = '${{ inputs.dist }}';
-          #\$host_arch = '${{ inputs.arch }}';
-          \$chroot_mode = 'unshare';
-          \$unshare_tmpdir_template = '/tmp/tmp.sbuild.XXXXXXXXXX';
-          \$key_id = '${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}';
-          EOT
-          if    [ "${{ inputs.dist }}" != "unstable" ] \
-             && [ "${{ inputs.dist }}" != "testing" ];
-          then
-          tee -a ~/.sbuildrc > /dev/null <<EOT
-          \$extra_repositories = [
-            'deb http://deb.debian.org/debian ${{ inputs.dist }}-updates main',
-            'deb http://deb.debian.org/debian ${{ inputs.dist }}-backports main'
-          ];
-          EOT
-          fi
       - name: Import GPG key
         timeout-minutes: 1
         id: gpg
@@ -118,11 +100,12 @@ jobs:
         run: |
           set -xe
           gpg --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc --armor --export ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          rm -f ~/.gnupg/trustedkeys.gpg
           gpg --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --import /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
           tee -a ~/.gnupg/gpg.conf > /dev/null <<EOT
           default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
-          tee -a  ~/.gbp.conf > /dev/null <<EOT
+          tee -a ~/.gbp.conf > /dev/null <<EOT
           [buildpackage]
           sign-tags = True
           keyid = ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
@@ -131,9 +114,82 @@ jobs:
           DEBSIGN_KEYID=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
           tee -a ~/.sbuildrc > /dev/null <<EOT
-          \$verbose = 1;
+          \$key_id = '${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}';
           \$dpkg_buildpackage_user_options = ['--sign-keyid=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}', '--force-sign'];
           EOT
+      - name: Configure sbuild
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          BUILD_DIR="$GITHUB_WORKSPACE/deb-bin/${{ inputs.dist-version }}/${{ inputs.arch }}"
+          mkdir -p "$BUILD_DIR"
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$verbose = 1;
+          \$build_dir = '$BUILD_DIR';
+          \$distribution = '${{ inputs.dist-version }}';
+          #\$host_arch = '${{ inputs.arch }}';
+          \$chroot_mode = 'unshare';
+          \$unshare_tmpdir_template = '/tmp/tmp.sbuild.XXXXXXXXXX';
+          EOT
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          push @{\$unshare_mmdebstrap_extra_args}, "*", [
+            '--variant=apt'
+          ];
+          EOT
+          if [ "${{ inputs.dist-name }}" = "debian" ];
+          then
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          push @{\$unshare_mmdebstrap_extra_args}, "*", [
+            'http://deb.debian.org/debian',
+            '--keyring=/usr/share/keyrings/debian-keyring.gpg',
+            '--components=main'
+          ];
+          EOT
+          fi
+          if [ "${{ inputs.dist-name }}" = "debian" ] && [ "${{ inputs.dist-version }}" != "unstable" ];
+          then
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$extra_repositories = [
+            'deb http://deb.debian.org/debian ${{ inputs.dist-version }}-updates main',
+            'deb http://deb.debian.org/debian ${{ inputs.dist-version }}-backports main'
+          ];
+          EOT
+          fi
+          if [ "${{ inputs.dist-name }}" = "ubuntu" ];
+          then
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          push @{\$unshare_mmdebstrap_extra_args}, "*", [
+            '--keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg',
+            '--components=main,universe'
+          ];
+          EOT
+          fi
+          if [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.arch }}" = "amd64" ];
+          then
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          push @{\$unshare_mmdebstrap_extra_args}, "*", [
+            'http://archive.ubuntu.com/ubuntu',
+          ];
+          \$extra_repositories = [
+            'deb http://archive.ubuntu.com/ubuntu ${{ inputs.dist-version }}-updates main universe',
+            'deb http://archive.ubuntu.com/ubuntu ${{ inputs.dist-version }}-security main universe',
+            'deb http://archive.ubuntu.com/ubuntu ${{ inputs.dist-version }}-backports main universe',
+          ];
+          EOT
+          elif [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.arch }}" != "amd64" ];
+          then
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          push @{\$unshare_mmdebstrap_extra_args}, "*", [
+            'http://ports.ubuntu.com/ubuntu-ports',
+          ];
+          \$extra_repositories = [
+            'deb http://ports.ubuntu.com/ubuntu-ports ${{ inputs.dist-version }}-updates main universe',
+            'deb http://ports.ubuntu.com/ubuntu-ports ${{ inputs.dist-version }}-security main universe',
+            'deb http://ports.ubuntu.com/ubuntu-ports ${{ inputs.dist-version }}-backports main universe',
+          ];
+          EOT
+          fi
       - name: Download source-only .deb to be built
         timeout-minutes: 1
         uses: actions/download-artifact@v5
@@ -146,37 +202,51 @@ jobs:
           set -xe
           cd "$GITHUB_WORKSPACE/deb-src"
           tar -xf "$GITHUB_WORKSPACE/deb-src/artifact-src.tar"
-      - name: Ensure that source package is signed
+          rm "$GITHUB_WORKSPACE/deb-src/artifact-src.tar"
+      - name: Ensure that all incoming source artifacts are signed
         timeout-minutes: 1
         if: steps.gpg.conclusion != 'skipped'
         run: |
           set -xe
-          dscverify --verbose "$GITHUB_WORKSPACE/deb-src/"*.changes
+          cd "$GITHUB_WORKSPACE/deb-src"
+          find . -type f -not -iname '*.sig' -print0 | xargs --null -I'{}' sh -c "\
+               echo 'Processing {}' \
+            && ( \
+                 gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     \
+              || gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig \
+              || (echo 'Processing {}: NOT SIGNED!' && exit 1) \
+            ) \
+            && echo 'Processing {}: ok' \
+          "
       - name: Build the package
         timeout-minutes: 10
         run: |
           set -xe
-          cd "$GITHUB_WORKSPACE/deb-bin/"
-          sbuild --verbose "$GITHUB_WORKSPACE/deb-src/"*.dsc
-      - name: Sign the .deb's
+          cd "$GITHUB_WORKSPACE/deb-bin"
+          if [ "${{ inputs.dist-name }}" = "ubuntu" ];
+          then
+          export DEB_BUILD_OPTIONS=noautodbgsym
+          fi
+          sbuild --verbose --arch-any --arch-all "$GITHUB_WORKSPACE/deb-src/"*.dsc
+      - name: Ensure that all binary artifacts are signed, or sign them
         timeout-minutes: 1
         if: steps.gpg.conclusion != 'skipped'
         run: |
           set -xe
-          find "$GITHUB_WORKSPACE/deb-bin/" -type f -name '*.deb' -exec gpg --verbose --detach-sign {} ';'
-      - name: Ensure that binary package is signed
-        timeout-minutes: 1
-        if: steps.gpg.conclusion != 'skipped'
-        run: |
-          set -xe
-          cd "$GITHUB_WORKSPACE/deb-bin/"
-          find -name '*.changes' -print0 | xargs -0 dscverify --verbose
+          cd "$GITHUB_WORKSPACE/deb-bin"
+          find . -type f -not -iname '*.sig' -print0 | xargs --null -I'{}' sh -c "\
+            echo 'Processing {}' && ( \
+                 gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     \
+              || gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig \
+              || gpg --verbose --detach-sign {}                                                        \
+            ) \
+          "
       - name: Archive build artifacts
         timeout-minutes: 1
         run: |
           set -xe
-          cd "$GITHUB_WORKSPACE/deb-bin/"
-          tar -cf "$GITHUB_WORKSPACE/deb-bin/artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar" *
+          cd "$GITHUB_WORKSPACE/deb-bin"
+          tar -cf "$GITHUB_WORKSPACE/deb-bin/artifact-bin-${{ inputs.dist-version }}-${{ inputs.arch }}.tar" *
       - name: Attest build artifact
         timeout-minutes: 1
         if: github.event_name != 'pull_request'
@@ -188,8 +258,8 @@ jobs:
         id: deb-bin-upload
         uses: actions/upload-artifact@v4
         with:
-          name: artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar
-          path: '${{ github.workspace }}/deb-bin/artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar'
+          name: artifact-bin-${{ inputs.dist-version }}-${{ inputs.arch }}.tar
+          path: '${{ github.workspace }}/deb-bin/artifact-bin-${{ inputs.dist-version }}-${{ inputs.arch }}.tar'
           if-no-files-found: error
           compression-level: 0
       - name: Attest uploaded build artifact
@@ -197,5 +267,5 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v3
         with:
-          subject-name: artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar.zip
+          subject-name: artifact-bin-${{ inputs.dist-version }}-${{ inputs.arch }}.tar.zip
           subject-digest: sha256:${{ steps.deb-bin-upload.outputs.artifact-digest }}
