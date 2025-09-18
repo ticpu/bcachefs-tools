@@ -169,6 +169,7 @@ jobs:
           tar -cf "$GITHUB_WORKSPACE/deb-src/artifact-src.tar" *
       - name: Attest the source-only .deb package artifact
         timeout-minutes: 1
+        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: '${{ github.workspace }}/deb-src'
@@ -183,6 +184,7 @@ jobs:
           compression-level: 0
       - name: Attest the uploaded source-only .deb package artifact
         timeout-minutes: 1
+        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v3
         id: upload
         with:
