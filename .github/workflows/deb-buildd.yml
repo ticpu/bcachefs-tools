@@ -179,6 +179,7 @@ jobs:
           tar -cf "$GITHUB_WORKSPACE/deb-bin/artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar" *
       - name: Attest build artifact
         timeout-minutes: 1
+        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: '${{ github.workspace }}/deb-bin'
@@ -193,6 +194,7 @@ jobs:
           compression-level: 0
       - name: Attest uploaded build artifact
         timeout-minutes: 1
+        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: artifact-bin-${{ inputs.dist }}-${{ inputs.arch }}.tar.zip

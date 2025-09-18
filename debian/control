@@ -26,17 +26,61 @@ Build-Depends: debhelper-compat (= 13),
                uuid-dev,
                zlib1g-dev,
 Homepage: https://bcachefs.org/
-Vcs-Git: https://salsa.debian.org/debian/bcachefs-tools.git
-Vcs-Browser: https://salsa.debian.org/debian/bcachefs-tools
+Vcs-Git: git://evilpiepirate.org/bcachefs-tools.git
+Vcs-Browser: https://evilpiepirate.org/git/bcachefs-tools.git
 
 Package: bcachefs-tools
 Architecture: linux-any
 Depends: ${shlibs:Depends}, ${misc:Depends}, python3:any
-Recommends: initramfs-tools | linux-initramfs-tool
+Recommends: bcachefs-kernel-dkms (= ${binary:Version}),
+            initramfs-tools | linux-initramfs-tool,
+Breaks: bcachefs-kernel-dkms (<< ${binary:Version}),
+        bcachefs-kernel-dkms (>> ${binary:Version}),
 Description: bcachefs userspace tools
  Userspace tools for bcachefs, a modern copy on write, checksumming, multi
  device filesystem.
  .
  Note: The current Debian kernels do not come with bcachefs support, you
- will have to use your own kernel or one provided by a 3rd party that
- contains bcachefs support.
+ will have to install bcachefs-kernel-dkms package or build your own kernel
+ or one provided by a 3rd party that contains bcachefs support.
+
+Package: bcachefs-kernel-dkms
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends},
+	 initramfs-tools | linux-initramfs-tool,
+	 linux-headers-amd64 [amd64],
+	 linux-headers-arm64 [arm64],
+Pre-Depends: bcachefs-tools (= ${binary:Version}),
+Provides: bcachefs-kernel
+Description: bcachefs kernel module DKMS source
+ "The COW filesystem for Linux that won't eat your data".
+ .
+ Bcachefs is an advanced new filesystem for Linux, with an emphasis
+ on reliability and robustness and the complete set of features
+ one would expect from a modern filesystem.
+ .
+  * Copy on write (COW) - like zfs
+  * Full data and metadata checksumming, for full data integrity:
+    the filesystem should always detect (and where possible,
+    recover from) damage; it should never return incorrect data.
+  * Multiple devices
+  * Replication
+  * Erasure coding (incomplete) High performance: doesn't fragment
+    your writes (like ZFS), no RAID hole
+  * Caching, data placement
+  * Compression
+  * Encryption
+  * Snapshots
+  * Nocow mode
+  * Reflink
+  * Extended attributes, ACLs, quotas
+  * Petabyte scalability
+  * Full online fsck, check and repair (in progress)
+  * Robustness and rock solid repair. Damage and breakage are a fact of life,
+    it's not a matter of if, but when. It doesn't matter what happened
+    to the filesystem: bad hardware, lightning strikes, an errant dd,
+    you can expect that bcachefs will repair the damage and keep going,
+    usually with no user intervention required.
+ .
+ It's the job of the filesystem to never lose your data:
+ anything that can be repaired, will be.
