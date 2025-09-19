@@ -1,5 +1,15 @@
 on:
   workflow_call:
+    inputs:
+      runs-on:
+        required: true
+        type: string
+      dist-name:
+        required: true
+        type: string
+      dist-version:
+        required: true
+        type: string
     outputs:
       deb-src-artifact-id:
         value: ${{ jobs.linux.outputs.deb-src-artifact-id }}
@@ -9,13 +19,11 @@ on:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     container:
       image: debian:unstable-slim
       options: --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --tmpfs /tmp:exec --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}:exec
     env:
-      DIST: unstable
-      ARCH: x86_64
       RUST_VERSION: 1.89.0
       DEBFULLNAME: apt.bcachefs.org CI bot
       DEBEMAIL: linux-bcachefs@vger.kernel.org
@@ -57,6 +65,7 @@ jobs:
           apt update
           apt full-upgrade
           apt install \
+            ${{ inputs.dist-name }}-keyring \
             curl \
             devscripts \
             git \
@@ -73,12 +82,6 @@ jobs:
           apt clean
           USER=`whoami`
           sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
-          tee ~/.sbuildrc > /dev/null <<EOT
-          \$build_dir = '$GITHUB_WORKSPACE/deb-src';
-          \$chroot_mode = 'unshare';
-          \$unshare_tmpdir_template = '/tmp/tmp.sbuild.XXXXXXXXXX';
-          \$key_id = '${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}';
-          EOT
       - name: Import GPG key
         timeout-minutes: 1
         id: gpg
@@ -94,11 +97,12 @@ jobs:
         run: |
           set -xe
           gpg --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc --armor --export ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          rm -f ~/.gnupg/trustedkeys.gpg
           gpg --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --import /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
           tee -a ~/.gnupg/gpg.conf > /dev/null <<EOT
           default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
-          tee -a  ~/.gbp.conf > /dev/null <<EOT
+          tee -a ~/.gbp.conf > /dev/null <<EOT
           [buildpackage]
           sign-tags = True
           keyid = ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
@@ -107,8 +111,31 @@ jobs:
           DEBSIGN_KEYID=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
           tee -a ~/.sbuildrc > /dev/null <<EOT
-          \$verbose = 1;
+          \$key_id = '${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}';
           \$dpkg_buildpackage_user_options = ['--sign-keyid=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}', '--force-sign'];
+          EOT
+      - name: Configure sbuild
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          BUILD_DIR="$GITHUB_WORKSPACE/deb-src"
+          mkdir -p "$BUILD_DIR"
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$verbose = 1;
+          \$build_dir = '$BUILD_DIR';
+          \$distribution = '${{ inputs.dist-version }}';
+          #\$host_arch = '${{ inputs.arch }}';
+          \$chroot_mode = 'unshare';
+          \$unshare_tmpdir_template = '/tmp/tmp.sbuild.XXXXXXXXXX';
+          EOT
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          push @{\$unshare_mmdebstrap_extra_args}, "*", [
+            'http://deb.debian.org/debian',
+            '--variant=apt',
+            '--keyring=/usr/share/keyrings/debian-keyring.gpg',
+            '--components=main'
+          ];
           EOT
       - name: Install Rust / cargo
         timeout-minutes: 1
@@ -129,7 +156,7 @@ jobs:
           set -xe
           git config --global user.email "${{ env.DEBFULLNAME }}"
           git config --global user.name "${{ env.DEBEMAIL }}"
-          cd "$GITHUB_WORKSPACE/bcachefs-tools/"
+          cd "$GITHUB_WORKSPACE/bcachefs-tools"
           CURR_TAG="$(git describe --abbrev=0 --tags $(git rev-list HEAD --tags --skip=0 --max-count=1))"
           PREV_TAG="$(git describe --abbrev=0 --tags $(git rev-list HEAD --tags --skip=1 --max-count=1))"
           NEW_VERSION="${{ env.DEBPKG_EPOCH }}:$(echo $CURR_TAG | sed 's/^v//')"
@@ -145,27 +172,28 @@ jobs:
         run: |
           set -xe
           . "$HOME/.cargo/env"
-          cd "$GITHUB_WORKSPACE/bcachefs-tools/"
+          cd "$GITHUB_WORKSPACE/bcachefs-tools"
           mkdir -p "$GITHUB_WORKSPACE/deb-src"
           # FIXME: pubkey is not avaliable in chroot, .dsc signature verification fails
-          gbp buildpackage --git-verbose --git-ignore-branch --no-clean --git-dist=${{ env.DIST }} --git-builder=sbuild --source --source-only-changes --no-arch-all --no-arch-any
-      - name: Sign the source tarball
+          gbp buildpackage --git-verbose --git-ignore-branch --no-clean --git-dist=${{ inputs.dist-version }} --git-builder=sbuild --source --source-only-changes --no-arch-all --no-arch-any
+      - name: Ensure that all source artifacts are signed, or sign them
         timeout-minutes: 1
         if: steps.gpg.conclusion != 'skipped'
         run: |
           set -xe
-          find "$GITHUB_WORKSPACE/deb-src/" -type f -name '*.tar.*' -exec gpg --verbose --detach-sign {} ';'
-      - name: Ensure that source package is signed
-        timeout-minutes: 1
-        if: steps.gpg.conclusion != 'skipped'
-        run: |
-          set -xe
-          dscverify --verbose "$GITHUB_WORKSPACE/deb-src/"*.changes
+          cd "$GITHUB_WORKSPACE/deb-src"
+          find . -type f -not -iname '*.sig' -print0 | xargs --null -I'{}' sh -c "\
+            echo 'Processing {}' && ( \
+                 gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     \
+              || gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig \
+              || gpg --verbose --detach-sign {}                                                        \
+            ) \
+          "
       - name: Archive source build artifacts
         timeout-minutes: 1
         run: |
           set -xe
-          cd "$GITHUB_WORKSPACE/deb-src/"
+          cd "$GITHUB_WORKSPACE/deb-src"
           tar -cf "$GITHUB_WORKSPACE/deb-src/artifact-src.tar" *
       - name: Attest the source-only .deb package artifact
         timeout-minutes: 1

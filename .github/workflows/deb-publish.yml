@@ -67,7 +67,7 @@ jobs:
             xz-utils \
             zip
           apt clean
-      - name: Configure gpg-agent / ssh
+      - name: Pre-Configure gpg-agent / ssh
         timeout-minutes: 1
         run: |
           set -xe
@@ -82,33 +82,37 @@ jobs:
           echo "${{ secrets.SSH_SERVER_KEYS }}" >> /etc/ssh/ssh_known_hosts
       - name: Import GPG key
         timeout-minutes: 1
+        id: gpg
         if: github.event_name != 'pull_request'
         uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6.3.0
         with:
           gpg_private_key: ${{ secrets.GPG_SECRET_SUBKEYS }}
           fingerprint: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           trust_level: 5
-      - name: Configure GPG
+      - name: Finish configuring gpg-agent / ssh
         timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
         run: |
           set -xe
           gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
+      - name: Configure GPG
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
           gpg --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc --armor --export ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          rm -f ~/.gnupg/trustedkeys.gpg
           gpg --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --import /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
           tee -a ~/.gnupg/gpg.conf > /dev/null <<EOT
           default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
-          tee -a  ~/.gbp.conf > /dev/null <<EOT
+          tee -a ~/.gbp.conf > /dev/null <<EOT
           [buildpackage]
           sign-tags = True
           keyid = ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
           tee -a ~/.devscripts > /dev/null <<EOT
           DEBSIGN_KEYID=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
-          EOT
-          tee -a ~/.sbuildrc > /dev/null <<EOT
-          \$verbose = 1;
-          \$dpkg_buildpackage_user_options = ['--sign-keyid=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}', '--force-sign'];
           EOT
       - name: Download all artifacts
         timeout-minutes: 1
@@ -119,13 +123,28 @@ jobs:
         timeout-minutes: 1
         run: |
           set -xe
-          SRC_DIR="$GITHUB_WORKSPACE/src-artifacts"
+          SRC_DIR="$GITHUB_WORKSPACE/incoming/src-artifacts"
           mkdir -p "$SRC_DIR"
           find "$GITHUB_WORKSPACE/packed-artifacts" -type f -name artifact-src.tar -exec tar -xf {} -C "$SRC_DIR" ';' -delete
-          BIN_DIR="$GITHUB_WORKSPACE/bin-artifacts"
+          BIN_DIR="$GITHUB_WORKSPACE/incoming/bin-artifacts"
           mkdir -p "$BIN_DIR"
           find "$GITHUB_WORKSPACE/packed-artifacts" -type f -name '*.tar' -exec tar -xf {} -C "$BIN_DIR" ';' -delete
           rm -rf "$GITHUB_WORKSPACE/packed-artifacts"
+      - name: Ensure that all incoming artifacts are signed
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          cd "$GITHUB_WORKSPACE/incoming"
+          find . -type f -not -iname '*.sig' -print0 | xargs --null -I'{}' sh -c "\
+               echo 'Processing {}' \
+            && ( \
+                 gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     \
+              || gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig \
+              || (echo 'Processing {}: NOT SIGNED!' && exit 1) \
+            ) \
+            && echo 'Processing {}: ok' \
+          "
       - name: Create and populate repos
         timeout-minutes: 60
         run: |
@@ -133,7 +152,9 @@ jobs:
           ls -lahR
           MOUNTPOINT="$GITHUB_WORKSPACE/remotefs"
           mkdir -p "$MOUNTPOINT"
+          if [ -n "${{ secrets.SSH_HOST }}" ]; then
           sshfs ${{ secrets.SSH_HOST }}/uploads "$MOUNTPOINT"
+          fi
           REPO_ROOT="$MOUNTPOINT/public_html"
           mkdir -p "$REPO_ROOT"
           cp -f /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc "$REPO_ROOT"
@@ -169,10 +190,10 @@ jobs:
 
           Source, Debian tarballs and dsc files can be verified using https://github.com/sigstore/rekor.
           EOR
-          cd "$GITHUB_WORKSPACE/bin-artifacts"
+          cd "$GITHUB_WORKSPACE/incoming/bin-artifacts"
           for DIST in *
           do
-          SRCDIR="$GITHUB_WORKSPACE/bin-artifacts/$DIST"
+          SRCDIR="$GITHUB_WORKSPACE/incoming/bin-artifacts/$DIST"
           cd "$SRCDIR"
           REPO="$REPO_ROOT/$DIST"
           mkdir -p "$REPO/conf/distributions"
@@ -195,7 +216,7 @@ jobs:
           verbose
           ignore longkeyid
           EOT
-          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-$SUITE "$GITHUB_WORKSPACE/src-artifacts/"*.changes
+          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-$SUITE "$GITHUB_WORKSPACE/incoming/src-artifacts/"*.changes
           for f in "$SRCDIR"/*/*.changes
           do
           reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-$SUITE $f
@@ -203,4 +224,4 @@ jobs:
           reprepro --basedir "$REPO" createsymlinks
           reprepro --basedir "$REPO" export
           done
-          umount "$MOUNTPOINT"
+          umount "$MOUNTPOINT" || /bin/true
