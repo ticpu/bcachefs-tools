@@ -53,7 +53,7 @@ fn main() {
         .allowlist_function("cmd_.*")
         .allowlist_function(".*_cmds")
         .allowlist_function(".*bch2_.*")
-        .allowlist_function("bcache_fs_open")
+        .allowlist_function("bcache_fs_open_fallible")
         .allowlist_function("bcache_fs_close")
         .allowlist_function("bio_.*")
         .allowlist_function("derive_passphrase")
