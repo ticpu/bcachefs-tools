@@ -559,7 +559,7 @@ read_super:
 		struct bch_sb_handle sb;
 		int ret = bch2_read_super(path, &opts, &sb);
 		if (ret)
-			die("Error opening %s: %s", path, strerror(-ret));
+			return ret;
 
 		fs->dev_idx = sb.sb->dev_idx;
 		uuid_str = buf;
