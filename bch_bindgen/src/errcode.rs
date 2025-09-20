@@ -1,5 +1,5 @@
 use crate::bcachefs;
-use std::ffi::CStr;
+use std::ffi::{c_int, CStr};
 use std::fmt;
 
 pub use crate::c::bch_errcode;
@@ -8,6 +8,16 @@ impl fmt::Display for bch_errcode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = unsafe { CStr::from_ptr(bcachefs::bch2_err_str(*self as i32)) };
         write!(f, "{:?}", s)
+    }
+}
+
+pub fn ret_to_result(ret: c_int) -> Result<c_int, bch_errcode> {
+    let max_err: c_int = -4096;
+    if ret < 0 && ret > max_err {
+        let err: bch_errcode = unsafe { std::mem::transmute(-ret) };
+        Err(err)
+    } else {
+        Ok(ret)
     }
 }
 
