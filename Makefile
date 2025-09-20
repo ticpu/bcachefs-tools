@@ -194,7 +194,7 @@ install_dkms: dkms/dkms.conf
 	$(INSTALL) -m0644 -D libbcachefs/Makefile	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
 	$(INSTALL) -m0644 -D libbcachefs/*.[ch]		-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
 	$(INSTALL) -m0644 -D libbcachefs/vendor/*.[ch]	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/vendor
-	sed -i "s|^#define TRACE_INCLUDE_PATH \\.\\./\\.\\./fs/bcachefs$$|#define TRACE_INCLUDE_PATH $(DKMSDIR)/src/fs/bcachefs|" \
+	sed -i "s|^#define TRACE_INCLUDE_PATH \\.\\./\\.\\./fs/bcachefs$$|#define TRACE_INCLUDE_PATH .|" \
 	  $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/trace.h
 
 .PHONY: clean
