@@ -50,8 +50,7 @@ Architecture: linux-any
 Section: kernel
 Depends: ${misc:Depends},
 	 initramfs-tools | linux-initramfs-tool,
-	 linux-headers-amd64 [amd64],
-	 linux-headers-arm64 [arm64],
+	 linux-headers-generic
 Pre-Depends: bcachefs-tools (= ${binary:Version}),
 Provides: bcachefs-kernel
 Description: bcachefs kernel module DKMS source
