@@ -185,6 +185,23 @@ jobs:
 
 
 
+          If you want to ensure that the packages from this repository are always preferred, do:
+
+          mkdir -p /etc/apt/preferences.d
+          sudo cat > "/etc/apt/preferences.d/apt.bcachefs.org.pref " <<EOP
+          Package: *
+          Pin: origin apt.bcachefs.org
+          Pin-Priority: 1000
+          EOP
+
+
+          Note that yes, you should always prefer `Pin: origin <hostname>`,
+          over `Pin: release o=<origin>`, because pinning by origin
+          will *actually* pin by the full hostname of APT repository,
+          whereas any repository can claim anything in it's `Origin: ` field,
+          and thus pinning by origin label is inherently insecure!
+
+
           For more information, see:
           https://wiki.debian.org/DebianRepository/UseThirdParty
 
