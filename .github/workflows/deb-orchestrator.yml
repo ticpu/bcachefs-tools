@@ -58,6 +58,7 @@ jobs:
       GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
   publish:
     needs: [ source-only, buildd ]
+    if: github.event_name != 'pull_request' && (github.ref_type == 'tag' || (github.ref_type == 'branch' && github.ref_name == 'master'))
     uses: ./.github/workflows/deb-publish.yml
     secrets:
       GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
