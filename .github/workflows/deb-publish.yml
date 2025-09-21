@@ -157,7 +157,9 @@ jobs:
           fi
           REPO_ROOT="$MOUNTPOINT/public_html"
           mkdir -p "$REPO_ROOT"
+          if [ -n "${{ secrets.GPG_SECRET_SUBKEYS }}" ]; then
           cp -f /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc "$REPO_ROOT"
+          fi
           cat > "$REPO_ROOT/README.txt" <<EOR
           To add this repository to your computer, do:
 
