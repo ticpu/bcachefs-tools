@@ -116,7 +116,6 @@ jobs:
           EOT
       - name: Configure sbuild
         timeout-minutes: 1
-        if: steps.gpg.conclusion != 'skipped'
         run: |
           set -xe
           BUILD_DIR="$GITHUB_WORKSPACE/deb-src"
