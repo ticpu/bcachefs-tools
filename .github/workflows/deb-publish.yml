@@ -178,10 +178,13 @@ jobs:
           sudo apt install bcachefs-tools
 
 
-          Or you can use add-apt-repository tool:
+          Or you can use add-apt-repository tool. Stable channel:
 
+            sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-release main"
 
-          sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-release main"
+          If you feel like living dangerously, there's also nightly/snapshot packages:
+
+            sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-release snapshot"
 
 
           Note: this will give you packages for the latest release of bcachefs-tools.
