@@ -54,7 +54,8 @@ pub fn subvolume(argv: Vec<String>) -> Result<()> {
                 };
 
                 if let Some(dirname) = target.parent() {
-                    let fs = unsafe { BcachefsHandle::open(dirname) };
+                    let fs =
+                        BcachefsHandle::open(dirname).context("Failed to open the filesystem")?;
                     fs.create_subvolume(target)
                         .context("Failed to create the subvolume")?;
                 }
@@ -67,7 +68,8 @@ pub fn subvolume(argv: Vec<String>) -> Result<()> {
                     .context("subvolume path does not exist or can not be canonicalized")?;
 
                 if let Some(dirname) = target.parent() {
-                    let fs = unsafe { BcachefsHandle::open(dirname) };
+                    let fs =
+                        BcachefsHandle::open(dirname).context("Failed to open the filesystem")?;
                     fs.delete_subvolume(target)
                         .context("Failed to delete the subvolume")?;
                 }
@@ -85,7 +87,7 @@ pub fn subvolume(argv: Vec<String>) -> Result<()> {
                 } else {
                     dirname
                 };
-                let fs = unsafe { BcachefsHandle::open(dir) };
+                let fs = BcachefsHandle::open(dir).context("Failed to open the filesystem")?;
 
                 fs.snapshot_subvolume(
                     if read_only {

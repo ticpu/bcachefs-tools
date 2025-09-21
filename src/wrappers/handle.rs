@@ -1,13 +1,13 @@
+use std::mem::MaybeUninit;
 use std::path::Path;
 
 use bch_bindgen::c::{
-    bcache_fs_close, bcache_fs_open, bch_ioctl_subvolume, bch_ioctl_subvolume_v2, bch_ioctl_err_msg, bchfs_handle,
-    BCH_IOCTL_SUBVOLUME_CREATE,
-    BCH_IOCTL_SUBVOLUME_CREATE_v2,
-    BCH_IOCTL_SUBVOLUME_DESTROY,
-    BCH_IOCTL_SUBVOLUME_DESTROY_v2,
+    bcache_fs_close, bcache_fs_open_fallible, bch_errcode, bch_ioctl_err_msg, bch_ioctl_subvolume,
+    bch_ioctl_subvolume_v2, bchfs_handle, BCH_IOCTL_SUBVOLUME_CREATE_v2,
+    BCH_IOCTL_SUBVOLUME_DESTROY_v2, BCH_IOCTL_SUBVOLUME_CREATE, BCH_IOCTL_SUBVOLUME_DESTROY,
     BCH_SUBVOL_SNAPSHOT_CREATE,
 };
+use bch_bindgen::errcode::ret_to_result;
 use bch_bindgen::path_to_cstr;
 use errno::Errno;
 
@@ -19,12 +19,12 @@ pub(crate) struct BcachefsHandle {
 
 impl BcachefsHandle {
     /// Opens a bcachefs filesystem and returns its handle
-    /// TODO(raitobezarius): how can this not be faillible?
-    pub(crate) unsafe fn open<P: AsRef<Path>>(path: P) -> Self {
+    pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self, bch_errcode> {
         let path = path_to_cstr(path);
-        Self {
-            inner: bcache_fs_open(path.as_ptr()),
-        }
+        let mut handle: MaybeUninit<bchfs_handle> = MaybeUninit::uninit();
+        ret_to_result(unsafe { bcache_fs_open_fallible(path.as_ptr(), handle.as_mut_ptr()) })?;
+        let inner = unsafe { handle.assume_init() };
+        Ok(Self { inner })
     }
 }
 
