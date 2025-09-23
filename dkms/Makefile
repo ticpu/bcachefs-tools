@@ -1,5 +1,5 @@
 ifneq (${KERNELRELEASE},)
-ccflags-y := -I$(src)/include
+ccflags-y := -I$(src)/include -DCONFIG_BCACHEFS_DKMS
 obj-m += src/fs/bcachefs/
 else
 KDIR ?= /lib/modules/`uname -r`/build
