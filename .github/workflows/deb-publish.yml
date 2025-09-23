@@ -188,7 +188,7 @@ jobs:
 
           If you feel like living dangerously, there's also nightly/snapshot packages:
 
-            sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-release snapshot"
+            sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-snapshot main"
 
 
           If you want to ensure that the packages from this repository are always preferred, do:
