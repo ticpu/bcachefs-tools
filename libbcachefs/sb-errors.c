@@ -70,10 +70,12 @@ static void bch2_sb_errors_to_text(struct printbuf *out, struct bch_sb *sb,
 
 	struct bch_sb_field_error_entry *sorted = kvmalloc_array(nr, sizeof(*sorted), GFP_KERNEL);
 
-	if (sorted)
+	if (sorted) {
+		memcpy(sorted, e->entries, nr * sizeof(e->entries[0]));
 		sort(sorted, nr, sizeof(*sorted), error_entry_cmp, NULL);
-	else
+	} else {
 		sorted = e->entries;
+	}
 
 	if (out->nr_tabstops <= 1)
 		printbuf_tabstop_push(out, 16);
