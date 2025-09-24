@@ -1,4 +1,5 @@
 export BCACHEFS_DKMS=1
+MAKEFLAGS += -j$(nproc --all)
 ifneq (${KERNELRELEASE},)
 ccflags-y := -I$(src)/include
 obj-m += src/fs/bcachefs/
