@@ -25,7 +25,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     container:
       image: debian:unstable-slim
-      options: --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --tmpfs /tmp:exec --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}:exec
+      options: --privileged --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --tmpfs /tmp:exec --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}
     env:
       DEBFULLNAME: apt.bcachefs.org CI bot
       DEBEMAIL: linux-bcachefs@vger.kernel.org
@@ -71,17 +71,30 @@ jobs:
           apt full-upgrade
           apt install \
             ${{ inputs.dist-name }}-keyring \
+            autopkgtest \
             curl \
             devscripts \
+            dosfstools \
+            e2fsprogs \
+            fakemachine \
+            fdisk \
             gpg \
             iproute2 \
+            libarchive13 \
             mmdebstrap \
+            mtools \
+            ovmf \
+            qemu-efi-aarch64 \
+            qemu-utils \
             sbuild \
             sudo \
+            systemd-boot-efi \
             tar \
             uidmap \
             xz-utils \
-            zip
+            zerofree \
+            zip \
+          ;
           apt clean
           USER=`whoami`
           sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
@@ -122,6 +135,7 @@ jobs:
         run: |
           set -xe
           BUILD_DIR="$GITHUB_WORKSPACE/deb-bin/${{ inputs.dist-version }}/${{ inputs.arch }}"
+          echo "BUILD_DIR=$(echo ${BUILD_DIR})" >> $GITHUB_ENV
           mkdir -p "$BUILD_DIR"
           tee -a ~/.sbuildrc > /dev/null <<EOT
           \$verbose = 1;
@@ -138,9 +152,22 @@ jobs:
           EOT
           if [ "${{ inputs.dist-name }}" = "debian" ];
           then
+          MIRROR="http://deb.debian.org/debian"
+          elif [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.arch }}" = "amd64" ];
+          then
+          MIRROR="http://archive.ubuntu.com/ubuntu"
+          elif [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.arch }}" != "amd64" ];
+          then
+          MIRROR="http://ports.ubuntu.com/ubuntu-ports"
+          else
+          exit 1
+          fi
+          echo "MIRROR=$(echo ${MIRROR})" >> $GITHUB_ENV
+          if [ "${{ inputs.dist-name }}" = "debian" ];
+          then
           tee -a ~/.sbuildrc > /dev/null <<EOT
           push @{\$unshare_mmdebstrap_extra_args}, "*", [
-            'http://deb.debian.org/debian',
+            '$MIRROR',
             '--keyring=/usr/share/keyrings/debian-keyring.gpg',
             '--components=main'
           ];
@@ -150,8 +177,8 @@ jobs:
           then
           tee -a ~/.sbuildrc > /dev/null <<EOT
           \$extra_repositories = [
-            'deb http://deb.debian.org/debian ${{ inputs.dist-version }}-updates main',
-            'deb http://deb.debian.org/debian ${{ inputs.dist-version }}-backports main'
+            'deb $MIRROR ${{ inputs.dist-version }}-updates main',
+            'deb $MIRROR ${{ inputs.dist-version }}-backports main'
           ];
           EOT
           fi
@@ -159,33 +186,14 @@ jobs:
           then
           tee -a ~/.sbuildrc > /dev/null <<EOT
           push @{\$unshare_mmdebstrap_extra_args}, "*", [
+            '$MIRROR',
             '--keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg',
             '--components=main,universe'
           ];
-          EOT
-          fi
-          if [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.arch }}" = "amd64" ];
-          then
-          tee -a ~/.sbuildrc > /dev/null <<EOT
-          push @{\$unshare_mmdebstrap_extra_args}, "*", [
-            'http://archive.ubuntu.com/ubuntu',
-          ];
           \$extra_repositories = [
-            'deb http://archive.ubuntu.com/ubuntu ${{ inputs.dist-version }}-updates main universe',
-            'deb http://archive.ubuntu.com/ubuntu ${{ inputs.dist-version }}-security main universe',
-            'deb http://archive.ubuntu.com/ubuntu ${{ inputs.dist-version }}-backports main universe',
-          ];
-          EOT
-          elif [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.arch }}" != "amd64" ];
-          then
-          tee -a ~/.sbuildrc > /dev/null <<EOT
-          push @{\$unshare_mmdebstrap_extra_args}, "*", [
-            'http://ports.ubuntu.com/ubuntu-ports',
-          ];
-          \$extra_repositories = [
-            'deb http://ports.ubuntu.com/ubuntu-ports ${{ inputs.dist-version }}-updates main universe',
-            'deb http://ports.ubuntu.com/ubuntu-ports ${{ inputs.dist-version }}-security main universe',
-            'deb http://ports.ubuntu.com/ubuntu-ports ${{ inputs.dist-version }}-backports main universe',
+            'deb $MIRROR ${{ inputs.dist-version }}-updates main universe',
+            'deb $MIRROR ${{ inputs.dist-version }}-security main universe',
+            'deb $MIRROR ${{ inputs.dist-version }}-backports main universe',
           ];
           EOT
           fi
@@ -268,3 +276,18 @@ jobs:
         with:
           subject-name: artifact-bin-${{ inputs.dist-version }}-${{ inputs.arch }}.tar.zip
           subject-digest: sha256:${{ steps.deb-bin-upload.outputs.artifact-digest }}
+      - name: Build Qemu image for autopkgtest
+        timeout-minutes: 2
+        id: qemu-image
+        if: inputs.dist-name == 'debian' && inputs.arch == 'amd64'
+        run: |
+          set -xe
+          IMAGE="/tmp/autopkgtest-qemu-image.qcow2"
+          echo "IMAGE=$(echo ${IMAGE})" >> $GITHUB_ENV
+          mmdebstrap-autopkgtest-build-qemu --boot=efi --mirror "${{ env.MIRROR }}" "${{ inputs.dist-version }}" "$IMAGE"
+      - name: Run autopkgtest
+        timeout-minutes: 60
+        if: steps.qemu-image.conclusion != 'skipped'
+        run: |
+          set -xe
+          autopkgtest --no-built-binaries --apt-upgrade "$GITHUB_WORKSPACE/deb-src"/*.dsc "${{ env.BUILD_DIR }}"/*.changes -- autopkgtest-virt-qemu --boot=efi "${{ env.IMAGE }}"

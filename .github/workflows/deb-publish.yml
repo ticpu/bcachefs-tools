@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: debian:unstable-slim
-      options: --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --device /dev/fuse --tmpfs /tmp:exec --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}:exec
+      options: --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --device /dev/fuse --tmpfs /tmp --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}
     env:
       SUITE: ${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'release' || 'snapshot' }}
     steps:
