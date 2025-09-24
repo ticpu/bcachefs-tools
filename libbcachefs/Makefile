@@ -1,4 +1,9 @@
 
+ifdef BCACHEFS_DKMS
+	CONFIG_BCACHEFS_FS := m
+	# Enable other features here?
+endif
+
 obj-$(CONFIG_BCACHEFS_FS)	+= bcachefs.o
 
 bcachefs-y		:=	\
