@@ -3,7 +3,6 @@ Maintainer: Roman Lebedev <lebedev.ri@gmail.com>
 Section: utils
 Priority: optional
 Standards-Version: 4.7.0
-Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 13),
                cargo,
                dh-dkms,
@@ -19,6 +18,7 @@ Build-Depends: debhelper-compat (= 13),
                libudev-dev,
                liburcu-dev (>= 0.15),
                libzstd-dev,
+               linux-libc-dev (>= 6.12),
                pkgconf,
                python3-docutils,
                python3:native,
@@ -29,6 +29,8 @@ Build-Depends: debhelper-compat (= 13),
 Homepage: https://bcachefs.org/
 Vcs-Git: git://evilpiepirate.org/bcachefs-tools.git
 Vcs-Browser: https://evilpiepirate.org/git/bcachefs-tools.git
+Rules-Requires-Root: no
+Testsuite: autopkgtest-pkg-dkms
 
 Package: bcachefs-tools
 Architecture: linux-any
@@ -50,7 +52,8 @@ Architecture: linux-any
 Section: kernel
 Depends: ${misc:Depends},
 	 initramfs-tools | linux-initramfs-tool,
-	 linux-headers-generic
+	 linux-headers-amd64 (>= 6.16) [amd64] | linux-headers-cloud-amd64 (>= 6.16) [amd64] | linux-headers-rt-amd64 (>= 6.16) [amd64] |
+	 linux-headers-arm64 (>= 6.16) [arm64] | linux-headers-cloud-arm64 (>= 6.16) [arm64] | linux-headers-rt-arm64 (>= 6.16) [arm64],
 Pre-Depends: bcachefs-tools (= ${binary:Version}),
 Provides: bcachefs-kernel
 Description: bcachefs kernel module DKMS source
