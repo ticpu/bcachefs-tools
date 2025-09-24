@@ -108,3 +108,7 @@ endif
 
 # Silence "note: xyz changed in GCC X.X" messages
 subdir-ccflags-y += $(call cc-disable-warning, psabi)
+
+ifdef BCACHEFS_DKMS
+	subdir-ccflags-y += -I$(src)
+endif
