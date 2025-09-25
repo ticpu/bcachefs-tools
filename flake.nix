@@ -85,7 +85,6 @@
               buildPackages,
               pkg-config,
               rustPlatform,
-              stdenv,
 
               # run time
               keyutils,
@@ -99,8 +98,6 @@
               zstd,
             }:
             let
-              inherit (stdenv) cc hostPlatform;
-
               craneLib = (crane.mkLib pkgs).overrideToolchain (
                 p: p.rust-bin.stable."${rustVersion}".minimal.override { extensions = [ "clippy" ]; }
               );
@@ -113,11 +110,6 @@
                 env = {
                   PKG_CONFIG_SYSTEMD_SYSTEMDSYSTEMUNITDIR = "${placeholder "out"}/lib/systemd/system";
                   PKG_CONFIG_UDEV_UDEVDIR = "${placeholder "out"}/lib/udev";
-
-                  CARGO_BUILD_TARGET = hostPlatform.rust.rustcTargetSpec;
-                  "CARGO_TARGET_${hostPlatform.rust.cargoEnvVarTarget}_LINKER" = "${cc.targetPrefix}cc";
-                  HOST_CC = "${cc.nativePrefix}cc";
-                  TARGET_CC = "${cc.targetPrefix}cc";
                 };
 
                 makeFlags = [
@@ -127,10 +119,6 @@
                 ];
 
                 dontStrip = true;
-
-                depsBuildBuild = [
-                  buildPackages.stdenv.cc
-                ];
 
                 nativeBuildInputs = [
                   pkg-config
