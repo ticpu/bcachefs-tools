@@ -286,8 +286,8 @@ jobs:
           echo "IMAGE=$(echo ${IMAGE})" >> $GITHUB_ENV
           mmdebstrap-autopkgtest-build-qemu --boot=efi --mirror "${{ env.MIRROR }}" "${{ inputs.dist-version }}" "$IMAGE"
       - name: Run autopkgtest
-        timeout-minutes: 60
+        timeout-minutes: 10
         if: steps.qemu-image.conclusion != 'skipped'
         run: |
           set -xe
-          autopkgtest --no-built-binaries --apt-upgrade "$GITHUB_WORKSPACE/deb-src"/*.dsc "${{ env.BUILD_DIR }}"/*.changes -- autopkgtest-virt-qemu --boot=efi "${{ env.IMAGE }}"
+          autopkgtest --no-built-binaries --apt-upgrade "$GITHUB_WORKSPACE/deb-src"/*.dsc "${{ env.BUILD_DIR }}"/*.changes -- autopkgtest-virt-qemu --qemu-options="-smp $(nproc --all)" --boot=efi "${{ env.IMAGE }}"
