@@ -234,6 +234,7 @@
           checks = {
             inherit (config.packages)
               bcachefs-tools
+              bcachefs-tools-aarch64-linux
               bcachefs-tools-fuse
               bcachefs-tools-fuse-i686-linux
               ;
