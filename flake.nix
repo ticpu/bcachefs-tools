@@ -64,10 +64,6 @@
           ...
         }:
         let
-          inherit (builtins) readFile split;
-          inherit (lib.lists) findFirst;
-          inherit (lib.strings) hasPrefix removePrefix substring;
-
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ (import rust-overlay) ];
@@ -76,7 +72,7 @@
           cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
           rustfmtToml = builtins.fromTOML (builtins.readFile ./rustfmt.toml);
 
-          rev = self.shortRev or self.dirtyShortRev or (substring 0 8 self.lastModifiedDate);
+          rev = self.shortRev or self.dirtyShortRev or (lib.substring 0 8 self.lastModifiedDate);
           version = "${cargoToml.package.version}+${rev}";
 
           mkCommon =
