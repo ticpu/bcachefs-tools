@@ -19,28 +19,18 @@ static inline struct nocow_lock_bucket *bucket_nocow_lock(struct bucket_nocow_lo
 #define BUCKET_NOCOW_LOCK_UPDATE	(1 << 0)
 
 bool bch2_bucket_nocow_is_locked(struct bucket_nocow_lock_table *, struct bpos);
-void bch2_bucket_nocow_unlock(struct bucket_nocow_lock_table *, struct bpos, int);
-bool __bch2_bucket_nocow_trylock(struct nocow_lock_bucket *, u64, int);
-void __bch2_bucket_nocow_lock(struct bucket_nocow_lock_table *,
-			      struct nocow_lock_bucket *, u64, int);
 
-static inline void bch2_bucket_nocow_lock(struct bucket_nocow_lock_table *t,
-					  struct bpos bucket, int flags)
+void __bch2_bucket_nocow_unlock(struct bucket_nocow_lock_table *, u64, int);
+
+static inline void bch2_bucket_nocow_unlock(struct bucket_nocow_lock_table *t, struct bpos bucket,
+					    int flags)
 {
-	u64 dev_bucket = bucket_to_u64(bucket);
-	struct nocow_lock_bucket *l = bucket_nocow_lock(t, dev_bucket);
-
-	__bch2_bucket_nocow_lock(t, l, dev_bucket, flags);
+	__bch2_bucket_nocow_unlock(t, bucket_to_u64(bucket), flags);
 }
 
-static inline bool bch2_bucket_nocow_trylock(struct bucket_nocow_lock_table *t,
-					  struct bpos bucket, int flags)
-{
-	u64 dev_bucket = bucket_to_u64(bucket);
-	struct nocow_lock_bucket *l = bucket_nocow_lock(t, dev_bucket);
-
-	return __bch2_bucket_nocow_trylock(l, dev_bucket, flags);
-}
+void bch2_bkey_nocow_unlock(struct bch_fs *, struct bkey_s_c, int);
+bool bch2_bkey_nocow_trylock(struct bch_fs *, struct bkey_ptrs_c, int);
+void bch2_bkey_nocow_lock(struct bch_fs *, struct bkey_ptrs_c, int);
 
 void bch2_nocow_locks_to_text(struct printbuf *, struct bucket_nocow_lock_table *);
 

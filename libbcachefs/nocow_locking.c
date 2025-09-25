@@ -6,6 +6,16 @@
 #include "nocow_locking.h"
 #include "util.h"
 
+#include <linux/prefetch.h>
+
+static bool nocow_bucket_empty(struct nocow_lock_bucket *l)
+{
+	for (unsigned i = 0; i < ARRAY_SIZE(l->b); i++)
+		if (atomic_read(&l->l[i]))
+			return false;
+	return true;
+}
+
 bool bch2_bucket_nocow_is_locked(struct bucket_nocow_lock_table *t, struct bpos bucket)
 {
 	u64 dev_bucket = bucket_to_u64(bucket);
@@ -20,14 +30,12 @@ bool bch2_bucket_nocow_is_locked(struct bucket_nocow_lock_table *t, struct bpos 
 
 #define sign(v)		(v < 0 ? -1 : v > 0 ? 1 : 0)
 
-void bch2_bucket_nocow_unlock(struct bucket_nocow_lock_table *t, struct bpos bucket, int flags)
+void __bch2_bucket_nocow_unlock(struct bucket_nocow_lock_table *t, u64 dev_bucket, int flags)
 {
-	u64 dev_bucket = bucket_to_u64(bucket);
 	struct nocow_lock_bucket *l = bucket_nocow_lock(t, dev_bucket);
 	int lock_val = flags ? 1 : -1;
-	unsigned i;
 
-	for (i = 0; i < ARRAY_SIZE(l->b); i++)
+	for (unsigned i = 0; i < ARRAY_SIZE(l->b); i++)
 		if (l->b[i] == dev_bucket) {
 			int v = atomic_sub_return(lock_val, &l->l[i]);
 
@@ -40,8 +48,8 @@ void bch2_bucket_nocow_unlock(struct bucket_nocow_lock_table *t, struct bpos buc
 	BUG();
 }
 
-bool __bch2_bucket_nocow_trylock(struct nocow_lock_bucket *l,
-				 u64 dev_bucket, int flags)
+static int __bch2_bucket_nocow_trylock(struct bch_fs *c, struct nocow_lock_bucket *l,
+				u64 dev_bucket, int flags)
 {
 	int v, lock_val = flags ? 1 : -1;
 	unsigned i;
@@ -58,32 +66,128 @@ bool __bch2_bucket_nocow_trylock(struct nocow_lock_bucket *l,
 			goto take_lock;
 		}
 
-	return false;
+	return bch_err_throw(c, nocow_trylock_bucket_full);
 got_entry:
 	v = atomic_read(&l->l[i]);
 	if (lock_val > 0 ? v < 0 : v > 0)
-		return false;
+		return bch_err_throw(c, nocow_trylock_contended);
 take_lock:
 	v = atomic_read(&l->l[i]);
 	/* Overflow? */
 	if (v && sign(v + lock_val) != sign(v))
-		return false;
+		return bch_err_throw(c, nocow_trylock_contended);
 
 	atomic_add(lock_val, &l->l[i]);
+	return 0;
+}
+
+static inline bool bch2_bucket_nocow_trylock(struct bch_fs *c, struct bpos bucket, int flags)
+{
+	struct bucket_nocow_lock_table *t = &c->nocow_locks;
+	u64 dev_bucket = bucket_to_u64(bucket);
+	struct nocow_lock_bucket *l = bucket_nocow_lock(t, dev_bucket);
+
+	return !__bch2_bucket_nocow_trylock(c, l, dev_bucket, flags);
+}
+
+void bch2_bkey_nocow_unlock(struct bch_fs *c, struct bkey_s_c k, int flags)
+{
+	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+
+	bkey_for_each_ptr(ptrs, ptr) {
+		struct bch_dev *ca = bch2_dev_have_ref(c, ptr->dev);
+		struct bpos bucket = PTR_BUCKET_POS(ca, ptr);
+
+		bch2_bucket_nocow_unlock(&c->nocow_locks, bucket, flags);
+	}
+}
+
+bool bch2_bkey_nocow_trylock(struct bch_fs *c, struct bkey_ptrs_c ptrs, int flags)
+{
+	bkey_for_each_ptr(ptrs, ptr) {
+		struct bch_dev *ca = bch2_dev_have_ref(c, ptr->dev);
+		struct bpos bucket = PTR_BUCKET_POS(ca, ptr);
+
+		if (unlikely(!bch2_bucket_nocow_trylock(c, bucket, flags))) {
+			bkey_for_each_ptr(ptrs, ptr2) {
+				if (ptr2 == ptr)
+					break;
+
+				struct bch_dev *ca = bch2_dev_have_ref(c, ptr2->dev);
+				struct bpos bucket = PTR_BUCKET_POS(ca, ptr2);
+				bch2_bucket_nocow_unlock(&c->nocow_locks, bucket, flags);
+			}
+			return false;
+		}
+	}
+
 	return true;
 }
 
-void __bch2_bucket_nocow_lock(struct bucket_nocow_lock_table *t,
-			      struct nocow_lock_bucket *l,
-			      u64 dev_bucket, int flags)
+struct bucket_to_lock {
+	u64			b;
+	struct nocow_lock_bucket *l;
+};
+
+static inline int bucket_to_lock_cmp(struct bucket_to_lock l,
+				     struct bucket_to_lock r)
 {
-	if (!__bch2_bucket_nocow_trylock(l, dev_bucket, flags)) {
-		struct bch_fs *c = container_of(t, struct bch_fs, nocow_locks);
+	return cmp_int(l.l, r.l);
+}
+
+void bch2_bkey_nocow_lock(struct bch_fs *c, struct bkey_ptrs_c ptrs, int flags)
+{
+	if (bch2_bkey_nocow_trylock(c, ptrs, flags))
+		return;
+
+	DARRAY_PREALLOCATED(struct bucket_to_lock, 3) buckets;
+	darray_init(&buckets);
+
+	bkey_for_each_ptr(ptrs, ptr) {
+		struct bch_dev *ca = bch2_dev_have_ref(c, ptr->dev);
+		u64 b = bucket_to_u64(PTR_BUCKET_POS(ca, ptr));
+		struct nocow_lock_bucket *l =
+			bucket_nocow_lock(&c->nocow_locks, b);
+		prefetch(l);
+
+		/* XXX allocating memory with btree locks held - rare */
+		darray_push_gfp(&buckets, ((struct bucket_to_lock) { .b = b, .l = l, }),
+				GFP_KERNEL|__GFP_NOFAIL);
+	}
+
+	WARN_ON_ONCE(buckets.nr > NOCOW_LOCK_BUCKET_SIZE);
+
+	bubble_sort(buckets.data, buckets.nr, bucket_to_lock_cmp);
+retake_all:
+	darray_for_each(buckets, i) {
+		int ret = __bch2_bucket_nocow_trylock(c, i->l, i->b, flags);
+		if (!ret)
+			continue;
+
 		u64 start_time = local_clock();
 
-		__closure_wait_event(&l->wait, __bch2_bucket_nocow_trylock(l, dev_bucket, flags));
+		if (ret == -BCH_ERR_nocow_trylock_contended)
+			__closure_wait_event(&i->l->wait,
+					(ret = __bch2_bucket_nocow_trylock(c, i->l, i->b, flags)) != -BCH_ERR_nocow_trylock_contended);
+		if (!ret) {
+			bch2_time_stats_update(&c->times[BCH_TIME_nocow_lock_contended], start_time);
+			continue;
+		}
+
+		BUG_ON(ret != -BCH_ERR_nocow_trylock_bucket_full);
+
+		darray_for_each(buckets, i2) {
+			if (i2 == i)
+				break;
+			__bch2_bucket_nocow_unlock(&c->nocow_locks, i2->b, flags);
+		}
+
+		__closure_wait_event(&i->l->wait, nocow_bucket_empty(i->l));
 		bch2_time_stats_update(&c->times[BCH_TIME_nocow_lock_contended], start_time);
+		goto retake_all;
 	}
+
+	darray_exit(&buckets);
 }
 
 void bch2_nocow_locks_to_text(struct printbuf *out, struct bucket_nocow_lock_table *t)
