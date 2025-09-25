@@ -5,6 +5,7 @@
   # build time
   pkg-config,
   rustPlatform,
+  versionCheckHook,
 
   # run time
   fuse3,
@@ -80,13 +81,8 @@ let
       '';
 
       doInstallCheck = true;
-      installCheckPhase = ''
-        runHook preInstallCheck
-
-        test "$($out/bin/bcachefs version)" = "${version}"
-
-        runHook postInstallCheck
-      '';
+      nativeInstallCheckInputs = [ versionCheckHook ];
+      versionCheckProgramArg = "version";
 
       meta = {
         description = "Userspace tools for bcachefs";
