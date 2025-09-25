@@ -279,7 +279,7 @@ jobs:
       - name: Build Qemu image for autopkgtest
         timeout-minutes: 2
         id: qemu-image
-        if: inputs.dist-name == 'debian' && inputs.arch == 'amd64'
+        if: inputs.dist-name == 'debian' && inputs.dist-version != 'trixie' && inputs.arch == 'amd64'
         run: |
           set -xe
           IMAGE="/tmp/autopkgtest-qemu-image.qcow2"
