@@ -58,9 +58,12 @@ jobs:
           apt full-upgrade
           apt install \
             devscripts \
+            gettext-base \
+            git \
             gnupg \
             gpg-agent \
             openssh-client \
+            pandoc \
             reprepro \
             sshfs \
             tar \
@@ -114,6 +117,11 @@ jobs:
           tee -a ~/.devscripts > /dev/null <<EOT
           DEBSIGN_KEYID=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
+      - name: Fetch our git repository
+        timeout-minutes: 1
+        uses: actions/checkout@v4
+        with:
+          path: 'bcachefs-tools'
       - name: Download all artifacts
         timeout-minutes: 1
         uses: actions/download-artifact@v5
@@ -160,59 +168,10 @@ jobs:
           if [ "${{ steps.gpg.conclusion }}" != "skipped" ]; then
           cp -f /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc "$REPO_ROOT"
           fi
-          cat > "$REPO_ROOT/README.txt" <<EOR
-          To add this repository to your computer, do:
-
-
-          wget -qO- https://apt.bcachefs.org/apt.bcachefs.org.asc | sudo tee /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
-          # Fingerprint: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
-          sudo cat > /etc/apt/sources.list.d/apt.bcachefs.org.sources <<EOS
-          Types: deb deb-src
-          URIs: https://apt.bcachefs.org/unstable/
-          # Or replace unstable with your distro's release name
-          Suites: bcachefs-tools-release
-          Components: main
-          Signed-By: /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
-          EOS
-          sudo apt update
-          sudo apt install bcachefs-tools
-
-
-          Note: this will give you packages for the latest release of bcachefs-tools.
-          If you need packages for the latest git master commit,
-          replace "bcachefs-tools-release" with "bcachefs-tools-snapshot".
-
-          Or you can use add-apt-repository tool. Stable channel:
-
-            sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-release main"
-
-          If you feel like living dangerously, there's also nightly/snapshot packages:
-
-            sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-snapshot main"
-
-
-          If you want to ensure that the packages from this repository are always preferred, do:
-
-          mkdir -p /etc/apt/preferences.d
-          sudo cat > /etc/apt/preferences.d/apt.bcachefs.org.pref <<EOP
-          Package: *
-          Pin: origin apt.bcachefs.org
-          Pin-Priority: 1000
-          EOP
-
-
-          Note that yes, you should always prefer "Pin: origin <hostname>",
-          over "Pin: release o=<origin>", because pinning by origin
-          will *actually* pin by the full hostname of APT repository,
-          whereas any repository can claim anything in it's "Origin: " field,
-          and thus pinning by origin label is inherently insecure!
-
-
-          For more information, see:
-          https://wiki.debian.org/DebianRepository/UseThirdParty
-
-          Source, Debian tarballs and dsc files can be verified using https://github.com/sigstore/rekor.
-          EOR
+          if [ "${{ (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master') && 'true' || 'false' }}" = "true" ]; then
+          export GPG_SIGNING_SUBKEY_FINGERPRINT=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          envsubst < "$GITHUB_WORKSPACE/bcachefs-tools/doc/apt.bcachefs.org-README.md" | pandoc --from=markdown --to=html --output="$REPO_ROOT/.footer/README"
+          fi
           cd "$GITHUB_WORKSPACE/incoming/bin-artifacts"
           for DIST in *
           do
