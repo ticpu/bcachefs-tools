@@ -26,7 +26,12 @@ typedef DARRAY(struct dump_dev) dump_devs;
 static void dump_node(struct bch_fs *c, dump_devs *devs, struct bkey_s_c k)
 {
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+#if 0
 	unsigned bytes = btree_ptr_sectors_written(k) << 9 ?: c->opts.btree_node_size;
+#else
+	/* Less fragile: */
+	unsigned bytes = c->opts.btree_node_size;
+#endif
 
 	bkey_for_each_ptr(ptrs, ptr)
 		range_add(&devs->data[ptr->dev].btree,
