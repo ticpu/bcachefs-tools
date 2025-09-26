@@ -144,8 +144,9 @@ jobs:
           #\$host_arch = '${{ inputs.arch }}';
           \$chroot_mode = 'unshare';
           \$unshare_tmpdir_template = '/tmp/tmp.sbuild.XXXXXXXXXX';
-          EOT
-          tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$run_lintian = 1;
+          \$run_piuparts = 0;
+          \$run_autopkgtest = 0;
           push @{\$unshare_mmdebstrap_extra_args}, "*", [
             '--variant=apt'
           ];
@@ -162,13 +163,22 @@ jobs:
           else
           exit 1
           fi
+          if [ "${{ inputs.dist-name }}" = "debian" ];
+          then
+          KEYRING="/usr/share/keyrings/debian-keyring.gpg"
+          elif [ "${{ inputs.dist-name }}" = "ubuntu" ];
+          then
+          KEYRING="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+          else
+          exit 1
+          fi
           echo "MIRROR=$(echo ${MIRROR})" >> $GITHUB_ENV
           if [ "${{ inputs.dist-name }}" = "debian" ];
           then
           tee -a ~/.sbuildrc > /dev/null <<EOT
           push @{\$unshare_mmdebstrap_extra_args}, "*", [
             '$MIRROR',
-            '--keyring=/usr/share/keyrings/debian-keyring.gpg',
+            '--keyring=$KEYRING',
             '--components=main'
           ];
           EOT
@@ -187,7 +197,7 @@ jobs:
           tee -a ~/.sbuildrc > /dev/null <<EOT
           push @{\$unshare_mmdebstrap_extra_args}, "*", [
             '$MIRROR',
-            '--keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg',
+            '--keyring=$KEYRING',
             '--components=main,universe'
           ];
           \$extra_repositories = [
@@ -279,15 +289,15 @@ jobs:
       - name: Build Qemu image for autopkgtest
         timeout-minutes: 2
         id: qemu-image
-        if: inputs.dist-name == 'debian' && inputs.arch == 'amd64'
+        if: inputs.dist-name == 'debian' && inputs.dist-version != 'trixie' && inputs.arch == 'amd64'
         run: |
           set -xe
           IMAGE="/tmp/autopkgtest-qemu-image.qcow2"
           echo "IMAGE=$(echo ${IMAGE})" >> $GITHUB_ENV
           mmdebstrap-autopkgtest-build-qemu --boot=efi --mirror "${{ env.MIRROR }}" "${{ inputs.dist-version }}" "$IMAGE"
       - name: Run autopkgtest
-        timeout-minutes: 60
+        timeout-minutes: 10
         if: steps.qemu-image.conclusion != 'skipped'
         run: |
           set -xe
-          autopkgtest --no-built-binaries --apt-upgrade "$GITHUB_WORKSPACE/deb-src"/*.dsc "${{ env.BUILD_DIR }}"/*.changes -- autopkgtest-virt-qemu --boot=efi "${{ env.IMAGE }}"
+          autopkgtest --no-built-binaries --apt-upgrade "$GITHUB_WORKSPACE/deb-src"/*.dsc "${{ env.BUILD_DIR }}"/*.changes -- autopkgtest-virt-qemu --qemu-options="-smp $(nproc --all)" --boot=efi "${{ env.IMAGE }}"

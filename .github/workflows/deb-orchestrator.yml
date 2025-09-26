@@ -43,6 +43,7 @@ jobs:
         dist:
           - { name: debian, version: unstable }
           - { name: debian, version: forky    } # Debian 14
+          - { name: debian, version: trixie   } # Debian 13
           - { name: ubuntu, version: questing } # Ubuntu 25.10       (Questing Quokka) Beta
           - { name: ubuntu, version: plucky   } # Ubuntu 25.04       (Plucky Puffin)
     uses: ./.github/workflows/deb-buildd.yml
