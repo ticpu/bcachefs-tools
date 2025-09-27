@@ -56,8 +56,20 @@ jobs:
     secrets:
       GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
       GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+  reprotest:
+    needs: source-only
+    uses: ./.github/workflows/deb-reprotest.yml
+    with:
+      deb-src-artifact-id: ${{ needs.source-only.outputs.deb-src-artifact-id }}
+      runs-on: "ubuntu-latest"
+      arch: amd64
+      dist-name: debian
+      dist-version: unstable
+    secrets:
+      GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
+      GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
   publish:
-    needs: [ source-only, buildd ]
+    needs: [ source-only, buildd, reprotest ]
     if: github.event_name != 'pull_request' && (github.ref_type == 'tag' || (github.ref_type == 'branch' && github.ref_name == 'master'))
     uses: ./.github/workflows/deb-publish.yml
     secrets:
