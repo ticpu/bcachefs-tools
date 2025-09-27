@@ -135,6 +135,8 @@
                   pname = "${prev.pname}-msrv";
                 }
               );
+
+            nixos-test = pkgs.nixosTest (import ./nixos-test.nix self');
           };
 
           devShells.default = pkgs.mkShell {
