@@ -210,7 +210,7 @@ deb: all
 
 .PHONY: rpm
 rpm: clean
-	rpmbuild --build-in-place -bb --define "_version $(subst -,_,$(VERSION))" packaging/bcachefs-tools.spec
+	rpmbuild --build-in-place -bb --define "_version $(subst -,_,$(VERSION))" bcachefs-tools.spec
 
 bcachefs-principles-of-operation.pdf: doc/bcachefs-principles-of-operation.tex
 	pdflatex doc/bcachefs-principles-of-operation.tex
