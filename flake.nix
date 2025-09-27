@@ -93,6 +93,12 @@
                   crossPackages = {
                     "bcachefs-tools" = craneBuild.package;
                     "bcachefs-tools-fuse" = craneBuild.packageFuse;
+                    "bcachefs-module-linux-latest" =
+                      pkgs'.linuxPackages_latest.callPackage craneBuild.package.kernelModule
+                        { };
+                    "bcachefs-module-linux-testing" =
+                      pkgs'.linuxPackages_testing.callPackage craneBuild.package.kernelModule
+                        { };
                   };
                 in
                 (withCrossName crossPackages) // lib.optionalAttrs (crossSystem == localSystem) crossPackages;
@@ -109,6 +115,8 @@
               bcachefs-tools-aarch64-linux
               bcachefs-tools-fuse
               bcachefs-tools-fuse-i686-linux
+              bcachefs-module-linux-latest
+              bcachefs-module-linux-testing
               ;
             inherit (pkgs.callPackage ./crane-build.nix { inherit crane version; })
               # cargo-clippy
