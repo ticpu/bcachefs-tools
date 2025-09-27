@@ -814,6 +814,8 @@ int bch2_accounting_read(struct bch_fs *c)
 	struct journal_keys *keys = &c->journal_keys;
 	struct journal_key *jk = keys->data;
 
+	move_gap(keys, keys->nr);
+
 	while (jk < &darray_top(*keys) &&
 	       __journal_key_cmp(c, BTREE_ID_accounting, 0, POS_MIN, jk) > 0)
 		jk++;
@@ -829,9 +831,6 @@ int bch2_accounting_read(struct bch_fs *c)
 	iter.flags &= ~BTREE_ITER_with_journal;
 	int ret = for_each_btree_key_continue(trans, iter,
 				BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k, ({
-		struct bkey u;
-		struct bkey_s_c k = bch2_btree_path_peek_slot_exact(btree_iter_path(trans, &iter), &u);
-
 		if (k.k->type != KEY_TYPE_accounting)
 			continue;
 
@@ -860,7 +859,7 @@ int bch2_accounting_read(struct bch_fs *c)
 			struct disk_accounting_pos next_acc;
 			memset(&next_acc, 0, sizeof(next_acc));
 			next_acc.type = acc_k.type + 1;
-			struct bpos next = disk_accounting_pos_to_bpos(&next_acc);
+			struct bpos next = bpos_predecessor(disk_accounting_pos_to_bpos(&next_acc));
 			if (jk < end)
 				next = bpos_min(next, journal_key_k(c, jk)->k.p);
 
