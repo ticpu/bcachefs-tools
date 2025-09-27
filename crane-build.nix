@@ -76,8 +76,9 @@ let
         make ''${enableParallelBuilding:+-j''${NIX_BUILD_CORES}} $makeFlags
       '';
       doNotPostBuildInstallCargoBinaries = true;
+      enableParallelInstalling = true;
       installPhaseCommand = ''
-        make ''${enableParallelBuilding:+-j''${NIX_BUILD_CORES}} $makeFlags install
+        make ''${enableParallelInstalling:+-j''${NIX_BUILD_CORES}} $makeFlags install
       '';
 
       doInstallCheck = true;
