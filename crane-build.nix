@@ -30,7 +30,10 @@ let
 
   args = {
     inherit version;
-    src = ./.;
+    src = lib.fileset.toSource {
+      root = ./.;
+      fileset = lib.fileset.fileFilter ({ hasExt, ... }: !hasExt "nix") ./.;
+    };
     strictDeps = true;
 
     env = {
