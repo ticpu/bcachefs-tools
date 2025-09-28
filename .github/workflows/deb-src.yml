@@ -71,7 +71,7 @@ jobs:
             devscripts \
             git \
             git-buildpackage \
-            gpg \
+            gnupg \
             iproute2 \
             mmdebstrap \
             sbuild \

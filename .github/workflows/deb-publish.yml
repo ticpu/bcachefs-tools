@@ -61,7 +61,6 @@ jobs:
             gettext-base \
             git \
             gnupg \
-            gpg-agent \
             openssh-client \
             pandoc \
             reprepro \

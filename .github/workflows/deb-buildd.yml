@@ -79,7 +79,7 @@ jobs:
             e2fsprogs \
             fakemachine \
             fdisk \
-            gpg \
+            gnupg \
             iproute2 \
             libarchive13 \
             mmdebstrap \
