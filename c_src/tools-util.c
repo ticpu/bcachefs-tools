@@ -632,27 +632,27 @@ char *fd_to_dev_model(int fd)
 
 		/* partition? try parent */
 
-		char buf[1024];
-		if (readlink(sysfs_path, buf, sizeof(buf)) < 0)
-			die("readlink error on %s: %m", sysfs_path);
-
-		free(sysfs_path);
-		sysfs_path = strdup(buf);
-
-		*strrchr(sysfs_path, '/') = 0;
-		model_path = mprintf("%s/device/model", sysfs_path);
+		model_path = mprintf("%s/../device/model", sysfs_path);
 		if (!access(model_path, R_OK))
 			goto got_model;
+		free(model_path);
 
-		return strdup("(unknown device)");
-		char *model;
+		/* loop device? try loop/backing_file */
+
+		model_path = mprintf("%s/loop/backing_file", sysfs_path);
+		if (!access(model_path, R_OK))
+			goto got_model;
+		free(model_path);
+
+		free(sysfs_path);
+		return strdup("(unknown model)");
 got_model:
-		model = read_file_str(AT_FDCWD, model_path);
+		char* model = read_file_str(AT_FDCWD, model_path);
 		free(model_path);
 		free(sysfs_path);
 		return model;
 	} else {
-		return strdup("(reg file)");
+		return strdup("(image file)");
 	}
 }
 
