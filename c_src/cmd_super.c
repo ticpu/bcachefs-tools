@@ -58,6 +58,9 @@ static void print_one_member(struct printbuf *out, sb_names sb_names,
 			     struct bch_sb_field_disk_groups *gi,
 			     struct bch_member m, unsigned idx)
 {
+	if (!bch2_member_alive(&m))
+		return;
+
 	struct sb_name *name = sb_dev_to_name(sb_names, idx);
 	prt_printf(out, "Device %u:\t%s\t", idx, name ? name->name : "(not found)");
 
