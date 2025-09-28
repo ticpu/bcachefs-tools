@@ -30,7 +30,10 @@ let
 
   args = {
     inherit version;
-    src = ./.;
+    src = lib.fileset.toSource {
+      root = ./.;
+      fileset = lib.fileset.fileFilter ({ hasExt, ... }: !hasExt "nix") ./.;
+    };
     strictDeps = true;
 
     env = {
@@ -71,18 +74,30 @@ let
     // {
       inherit cargoArtifacts;
 
+      outputs = [
+        "out"
+        "dkms"
+      ];
+
+      makeFlags = args.makeFlags ++ [
+        "DKMSDIR=${placeholder "dkms"}"
+      ];
+
       enableParallelBuilding = true;
       buildPhaseCargoCommand = ''
         make ''${enableParallelBuilding:+-j''${NIX_BUILD_CORES}} $makeFlags
       '';
       doNotPostBuildInstallCargoBinaries = true;
+      enableParallelInstalling = true;
       installPhaseCommand = ''
-        make ''${enableParallelBuilding:+-j''${NIX_BUILD_CORES}} $makeFlags install
+        make ''${enableParallelInstalling:+-j''${NIX_BUILD_CORES}} $makeFlags install install_dkms
       '';
 
       doInstallCheck = true;
       nativeInstallCheckInputs = [ versionCheckHook ];
       versionCheckProgramArg = "version";
+
+      passthru.kernelModule = import ./module-build.nix package;
 
       meta = {
         description = "Userspace tools for bcachefs";
