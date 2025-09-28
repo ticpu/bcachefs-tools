@@ -42,6 +42,12 @@
     }:
     let
       systems = nixpkgs.lib.filter (s: nixpkgs.lib.hasSuffix "-linux" s) nixpkgs.lib.systems.flakeExposed;
+
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      rustfmtToml = builtins.fromTOML (builtins.readFile ./rustfmt.toml);
+
+      rev = self.shortRev or self.dirtyShortRev or (nixpkgs.lib.substring 0 8 self.lastModifiedDate);
+      version = "${cargoToml.package.version}+${rev}";
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [ inputs.treefmt-nix.flakeModule ];
@@ -54,6 +60,8 @@
       };
 
       inherit systems;
+
+      flake.overlays.default = import ./overlay.nix { inherit inputs version; };
 
       perSystem =
         {
@@ -68,12 +76,6 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
-
-          cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-          rustfmtToml = builtins.fromTOML (builtins.readFile ./rustfmt.toml);
-
-          rev = self.shortRev or self.dirtyShortRev or (lib.substring 0 8 self.lastModifiedDate);
-          version = "${cargoToml.package.version}+${rev}";
         in
         {
           packages =
@@ -84,24 +86,17 @@
                   localSystem = system;
                   pkgs' = import nixpkgs {
                     inherit crossSystem localSystem;
-                    overlays = [ (import rust-overlay) ];
+                    overlays = [
+                      (import rust-overlay)
+                      self.overlays.default
+                    ];
                   };
+
                   withCrossName =
                     set: lib.mapAttrs' (name: value: lib.nameValuePair "${name}-${crossSystem}" value) set;
-
-                  craneBuild = pkgs'.callPackage ./crane-build.nix { inherit crane version; };
-                  crossPackages = {
-                    "bcachefs-tools" = craneBuild.package;
-                    "bcachefs-tools-fuse" = craneBuild.packageFuse;
-                    "bcachefs-module-linux-latest" =
-                      pkgs'.linuxPackages_latest.callPackage craneBuild.package.kernelModule
-                        { };
-                    "bcachefs-module-linux-testing" =
-                      pkgs'.linuxPackages_testing.callPackage craneBuild.package.kernelModule
-                        { };
-                  };
                 in
-                (withCrossName crossPackages) // lib.optionalAttrs (crossSystem == localSystem) crossPackages;
+                (withCrossName pkgs'.bcachefsPackages)
+                // lib.optionalAttrs (crossSystem == localSystem) pkgs'.bcachefsPackages;
               packages = lib.mergeAttrsList (map packagesForSystem systems);
             in
             packages
