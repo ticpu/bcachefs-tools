@@ -35,7 +35,8 @@ static void bkey_put_dev_refs(struct bch_fs *c, struct bkey_s_c k)
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
 
 	bkey_for_each_ptr(ptrs, ptr)
-		bch2_dev_put(bch2_dev_have_ref(c, ptr->dev));
+		if (ptr->dev != BCH_SB_MEMBER_INVALID)
+			bch2_dev_put(bch2_dev_have_ref(c, ptr->dev));
 }
 
 static bool bkey_get_dev_refs(struct bch_fs *c, struct bkey_s_c k)
@@ -43,7 +44,8 @@ static bool bkey_get_dev_refs(struct bch_fs *c, struct bkey_s_c k)
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
 
 	bkey_for_each_ptr(ptrs, ptr) {
-		if (unlikely(!bch2_dev_tryget(c, ptr->dev))) {
+		if (ptr->dev != BCH_SB_MEMBER_INVALID &&
+		    unlikely(!bch2_dev_tryget(c, ptr->dev))) {
 			bkey_for_each_ptr(ptrs, ptr2) {
 				if (ptr2 == ptr)
 					break;
@@ -86,15 +88,18 @@ static void trace_io_move_fail2(struct data_update *m,
 			 struct bkey_i *insert,
 			 const char *msg)
 {
-	struct bch_fs *c = m->op.c;
-	struct bkey_s_c old = bkey_i_to_s_c(m->k.k);
-	CLASS(printbuf, buf)();
-	unsigned rewrites_found = 0;
-
 	if (!trace_io_move_fail_enabled())
 		return;
 
+	struct bch_fs *c = m->op.c;
+	struct bkey_s_c old = bkey_i_to_s_c(m->k.k);
+	unsigned rewrites_found = 0;
+
+	CLASS(printbuf, buf)();
+	printbuf_indent_add_nextline(&buf, 2);
+
 	prt_str(&buf, msg);
+	prt_newline(&buf);
 
 	if (insert) {
 		const union bch_extent_entry *entry;
@@ -117,17 +122,17 @@ static void trace_io_move_fail2(struct data_update *m,
 
 	bch2_data_update_opts_to_text(&buf, c, &m->op.opts, &m->data_opts);
 
-	prt_str(&buf, "\nold:    ");
+	prt_str_indented(&buf, "\nold:    ");
 	bch2_bkey_val_to_text(&buf, c, old);
 
-	prt_str(&buf, "\nnew:    ");
+	prt_str_indented(&buf, "\nnew:    ");
 	bch2_bkey_val_to_text(&buf, c, new);
 
-	prt_str(&buf, "\nwrote:  ");
+	prt_str_indented(&buf, "\nwrote:  ");
 	bch2_bkey_val_to_text(&buf, c, wrote);
 
 	if (insert) {
-		prt_str(&buf, "\ninsert: ");
+		prt_str_indented(&buf, "\ninsert: ");
 		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(insert));
 	}
 
@@ -263,6 +268,8 @@ static int __bch2_data_update_index_update(struct btree_trans *trans,
 		bch2_cut_back(new->k.p,		insert);
 		bch2_cut_back(insert->k.p,	&new->k_i);
 
+		bch2_bkey_propagate_incompressible(insert, bkey_i_to_s_c(&new->k_i));
+
 		/*
 		 * @old: extent that we read from
 		 * @insert: key that we're going to update, initialized from
@@ -304,7 +311,9 @@ restart_drop_conflicting_replicas:
 			}
 
 		if (!bkey_val_u64s(&new->k)) {
-			trace_io_move_fail2(m, k, bkey_i_to_s_c(&new->k_i), insert, "new replicas conflicted:");
+			trace_io_move_fail2(m, k,
+					    bkey_i_to_s_c(bch2_keylist_front(&op->insert_keys)),
+					    insert, "new replicas conflicted:");
 			goto nowork;
 		}
 
@@ -745,7 +754,8 @@ static int can_write_extent(struct bch_fs *c, struct data_update *m)
 	struct bch_devs_mask devs = target_rw_devs(c, BCH_DATA_user, target);
 
 	darray_for_each(m->op.devs_have, i)
-		__clear_bit(*i, devs.d);
+		if (*i != BCH_SB_MEMBER_INVALID)
+			__clear_bit(*i, devs.d);
 
 	CLASS(printbuf, buf)();
 
@@ -963,6 +973,16 @@ int bch2_data_update_init(struct btree_trans *trans,
 
 	if (c->opts.nocow_enabled) {
 		if (!bch2_bkey_nocow_trylock(c, ptrs, 0)) {
+			if (!ctxt) {
+				/* We're being called from the promote path:
+				 * there is a btree_trans on the stack that's
+				 * holding locks, but we don't have a pointer to
+				 * it. Ouch - this needs to be fixed.
+				 */
+				ret = bch_err_throw(c, nocow_lock_blocked);
+				goto out_put_dev_refs;
+			}
+
 			bool locked = false;
 			if (ctxt)
 				move_ctxt_wait_event(ctxt,
@@ -992,6 +1012,7 @@ int bch2_data_update_init(struct btree_trans *trans,
 out_nocow_unlock:
 	if (c->opts.nocow_enabled)
 		bch2_bkey_nocow_unlock(c, k, 0);
+out_put_dev_refs:
 	bkey_put_dev_refs(c, k);
 out:
 	bch2_disk_reservation_put(c, &m->op.res);

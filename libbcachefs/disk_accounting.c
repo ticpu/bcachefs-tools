@@ -786,102 +786,10 @@ static struct journal_key *accumulate_and_read_journal_accounting(struct btree_t
 	return ret ? ERR_PTR(ret) : next;
 }
 
-/*
- * At startup time, initialize the in memory accounting from the btree (and
- * journal)
- */
-int bch2_accounting_read(struct bch_fs *c)
+static int accounting_read_mem_fixups(struct btree_trans *trans)
 {
+	struct bch_fs *c = trans->c;
 	struct bch_accounting_mem *acc = &c->accounting;
-	CLASS(btree_trans, trans)(c);
-	CLASS(printbuf, buf)();
-
-	/*
-	 * We might run more than once if we rewind to start topology repair or
-	 * btree node scan - and those might cause us to get different results,
-	 * so we can't just skip if we've already run.
-	 *
-	 * Instead, zero out any accounting we have:
-	 */
-	scoped_guard(percpu_write, &c->mark_lock) {
-		darray_for_each(acc->k, e)
-			percpu_memset(e->v[0], 0, sizeof(u64) * e->nr_counters);
-		for_each_member_device(c, ca)
-			percpu_memset(ca->usage, 0, sizeof(*ca->usage));
-		percpu_memset(c->usage, 0, sizeof(*c->usage));
-	}
-
-	struct journal_keys *keys = &c->journal_keys;
-	struct journal_key *jk = keys->data;
-
-	move_gap(keys, keys->nr);
-
-	while (jk < &darray_top(*keys) &&
-	       __journal_key_cmp(c, BTREE_ID_accounting, 0, POS_MIN, jk) > 0)
-		jk++;
-
-	struct journal_key *end = jk;
-	while (end < &darray_top(*keys) &&
-	       __journal_key_cmp(c, BTREE_ID_accounting, 0, SPOS_MAX, end) > 0)
-		end++;
-
-	struct btree_iter iter;
-	bch2_trans_iter_init(trans, &iter, BTREE_ID_accounting, POS_MIN,
-			     BTREE_ITER_prefetch|BTREE_ITER_all_snapshots);
-	iter.flags &= ~BTREE_ITER_with_journal;
-	int ret = for_each_btree_key_continue(trans, iter,
-				BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k, ({
-		if (k.k->type != KEY_TYPE_accounting)
-			continue;
-
-		while (jk < end &&
-		       __journal_key_cmp(c, BTREE_ID_accounting, 0, k.k->p, jk) > 0)
-			jk = accumulate_and_read_journal_accounting(trans, jk);
-
-		while (jk < end &&
-		       __journal_key_cmp(c, BTREE_ID_accounting, 0, k.k->p, jk) == 0 &&
-		       bversion_cmp(journal_key_k(c, jk)->k.bversion, k.k->bversion) <= 0) {
-			jk->overwritten = true;
-			jk++;
-		}
-
-		if (jk < end &&
-		    __journal_key_cmp(c, BTREE_ID_accounting, 0, k.k->p, jk) == 0)
-			jk = accumulate_and_read_journal_accounting(trans, jk);
-
-		struct disk_accounting_pos acc_k;
-		bpos_to_disk_accounting_pos(&acc_k, k.k->p);
-
-		if (acc_k.type >= BCH_DISK_ACCOUNTING_TYPE_NR)
-			break;
-
-		if (!bch2_accounting_is_mem(&acc_k)) {
-			struct disk_accounting_pos next_acc;
-			memset(&next_acc, 0, sizeof(next_acc));
-			next_acc.type = acc_k.type + 1;
-			struct bpos next = bpos_predecessor(disk_accounting_pos_to_bpos(&next_acc));
-			if (jk < end)
-				next = bpos_min(next, journal_key_k(c, jk)->k.p);
-
-			bch2_btree_iter_set_pos(&iter, next);
-			continue;
-		}
-
-		accounting_read_key(trans, k);
-	}));
-	bch2_trans_iter_exit(&iter);
-	if (ret)
-		return ret;
-
-	while (jk < end)
-		jk = accumulate_and_read_journal_accounting(trans, jk);
-
-	struct journal_key *dst = keys->data;
-	darray_for_each(*keys, i)
-		if (!i->overwritten)
-			*dst++ = *i;
-	keys->gap = keys->nr = dst - keys->data;
-
 	CLASS(printbuf, underflow_err)();
 
 	scoped_guard(percpu_write, &c->mark_lock) {
@@ -902,7 +810,7 @@ int bch2_accounting_read(struct bch_fs *c)
 			 * Remove it, so that if it's re-added it gets re-marked in the
 			 * superblock:
 			 */
-			ret = bch2_is_zero(v, sizeof(v[0]) * i->nr_counters)
+			int ret = bch2_is_zero(v, sizeof(v[0]) * i->nr_counters)
 				? -BCH_ERR_remove_disk_accounting_entry
 				: bch2_disk_accounting_validate_late(trans, &acc_k, v, i->nr_counters);
 
@@ -984,7 +892,7 @@ int bch2_accounting_read(struct bch_fs *c)
 	if (underflow_err.pos) {
 		bool print = bch2_count_fsck_err(c, accounting_key_underflow, &underflow_err);
 		unsigned pos = underflow_err.pos;
-		ret = bch2_run_explicit_recovery_pass(c, &underflow_err,
+		int ret = bch2_run_explicit_recovery_pass(c, &underflow_err,
 						      BCH_RECOVERY_PASS_check_allocations, 0);
 		print |= underflow_err.pos != pos;
 
@@ -994,7 +902,120 @@ int bch2_accounting_read(struct bch_fs *c)
 			return ret;
 	}
 
-	return ret;
+	return 0;
+}
+
+/*
+ * At startup time, initialize the in memory accounting from the btree (and
+ * journal)
+ */
+int bch2_accounting_read(struct bch_fs *c)
+{
+	struct bch_accounting_mem *acc = &c->accounting;
+	CLASS(btree_trans, trans)(c);
+	CLASS(printbuf, buf)();
+
+	/*
+	 * We might run more than once if we rewind to start topology repair or
+	 * btree node scan - and those might cause us to get different results,
+	 * so we can't just skip if we've already run.
+	 *
+	 * Instead, zero out any accounting we have:
+	 */
+	scoped_guard(percpu_write, &c->mark_lock) {
+		darray_for_each(acc->k, e)
+			percpu_memset(e->v[0], 0, sizeof(u64) * e->nr_counters);
+		for_each_member_device(c, ca)
+			percpu_memset(ca->usage, 0, sizeof(*ca->usage));
+		percpu_memset(c->usage, 0, sizeof(*c->usage));
+	}
+
+	struct journal_keys *keys = &c->journal_keys;
+	struct journal_key *jk = keys->data;
+
+	move_gap(keys, keys->nr);
+
+	/* Find the range of accounting keys from the journal: */
+
+	while (jk < &darray_top(*keys) &&
+	       __journal_key_cmp(c, BTREE_ID_accounting, 0, POS_MIN, jk) > 0)
+		jk++;
+
+	struct journal_key *end = jk;
+	while (end < &darray_top(*keys) &&
+	       __journal_key_cmp(c, BTREE_ID_accounting, 0, SPOS_MAX, end) > 0)
+		end++;
+
+	/*
+	 * Iterate over btree and journal accounting simultaneously:
+	 *
+	 * We want to drop unneeded unneeded accounting deltas early - deltas
+	 * that are older than the btree accounting key version, and once we've
+	 * dropped old accounting deltas we can accumulate and compact deltas
+	 * for the same key:
+	 */
+
+	struct btree_iter iter;
+	bch2_trans_iter_init(trans, &iter, BTREE_ID_accounting, POS_MIN,
+			     BTREE_ITER_prefetch|BTREE_ITER_all_snapshots);
+	iter.flags &= ~BTREE_ITER_with_journal;
+	int ret = for_each_btree_key_continue(trans, iter,
+				BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k, ({
+		if (k.k->type != KEY_TYPE_accounting)
+			continue;
+
+		while (jk < end &&
+		       __journal_key_cmp(c, BTREE_ID_accounting, 0, k.k->p, jk) > 0)
+			jk = accumulate_and_read_journal_accounting(trans, jk);
+
+		while (jk < end &&
+		       __journal_key_cmp(c, BTREE_ID_accounting, 0, k.k->p, jk) == 0 &&
+		       bversion_cmp(journal_key_k(c, jk)->k.bversion, k.k->bversion) <= 0) {
+			jk->overwritten = true;
+			jk++;
+		}
+
+		if (jk < end &&
+		    __journal_key_cmp(c, BTREE_ID_accounting, 0, k.k->p, jk) == 0)
+			jk = accumulate_and_read_journal_accounting(trans, jk);
+
+		struct disk_accounting_pos acc_k;
+		bpos_to_disk_accounting_pos(&acc_k, k.k->p);
+
+		if (acc_k.type >= BCH_DISK_ACCOUNTING_TYPE_NR)
+			break;
+
+		if (!bch2_accounting_is_mem(&acc_k)) {
+			struct disk_accounting_pos next_acc;
+			memset(&next_acc, 0, sizeof(next_acc));
+			next_acc.type = acc_k.type + 1;
+			struct bpos next = disk_accounting_pos_to_bpos(&next_acc);
+			if (jk < end)
+				next = bpos_min(next, journal_key_k(c, jk)->k.p);
+
+			/* for_each_btree_key() will still advance iterator: */
+			bch2_btree_iter_set_pos(&iter, bpos_predecessor(next));
+			continue;
+		}
+
+		accounting_read_key(trans, k);
+	}));
+	bch2_trans_iter_exit(&iter);
+	if (ret)
+		return ret;
+
+	while (jk < end)
+		jk = accumulate_and_read_journal_accounting(trans, jk);
+
+	bch2_trans_unlock(trans);
+
+	struct journal_key *dst = keys->data;
+	darray_for_each(*keys, i)
+		if (!i->overwritten)
+			*dst++ = *i;
+	keys->gap = keys->nr = dst - keys->data;
+
+	return accounting_read_mem_fixups(trans);
 }
 
 int bch2_dev_usage_remove(struct bch_fs *c, struct bch_dev *ca)
