@@ -79,7 +79,7 @@ jobs:
             e2fsprogs \
             fakemachine \
             fdisk \
-            gpg \
+            gnupg \
             iproute2 \
             libarchive13 \
             mmdebstrap \
@@ -156,6 +156,13 @@ jobs:
           if [ "${{ inputs.dist-name }}" = "debian" ];
           then
           tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$external_commands = {
+            'chroot-setup-commands' => [ "export LD_PRELOAD=/usr/lib/$(dpkg-architecture -q DEB_BUILD_GNU_TYPE)/libeatmydata.so" ]
+          };
+          \$build_environment = {
+            "LD_PRELOAD" => "/usr/lib/$(dpkg-architecture -q DEB_BUILD_GNU_TYPE)/libeatmydata.so"
+          };
+          \$environment_filter = [Dpkg::BuildInfo::get_build_env_allowed(), '^LD_PRELOAD$'];
           push @{\$unshare_mmdebstrap_extra_args}, "*", [
             '--hook-dir=/usr/share/mmdebstrap/hooks/eatmydata'
           ];

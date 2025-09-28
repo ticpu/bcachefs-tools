@@ -1,0 +1,167 @@
+on:
+  workflow_call:
+    inputs:
+      deb-src-artifact-id:
+        required: true
+        type: string
+      runs-on:
+        required: true
+        type: string
+      arch:
+        required: true
+        type: string
+      dist-name:
+        required: true
+        type: string
+      dist-version:
+        required: true
+        type: string
+    secrets:
+      GPG_SECRET_SUBKEYS:
+      GPG_SIGNING_SUBKEY_FINGERPRINT:
+
+jobs:
+  linux:
+    runs-on: ${{ inputs.runs-on }}
+    container:
+      image: debian:unstable-slim
+      options: --privileged --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --tmpfs /tmp:exec --tmpfs /var/lib/schroot/unpack:exec --tmpfs /var/lib/schroot/union/overlay:exec --tmpfs /var/lib/schroot/session:exec --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    steps:
+      - name: Install necessary packages
+        timeout-minutes: 1
+        run: |
+          set -xe
+          tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io > /dev/null <<EOT
+          force-unsafe-io
+          EOT
+          tee /etc/apt/apt.conf.d/tmpfs > /dev/null <<EOT
+          Dir::Cache::Archives "/tmp/apt/archives";
+          APT::ExtractTemplates::TempDir "/tmp/apt/temp";
+          EOT
+          mkdir -p /tmp/apt/archives
+          tee /etc/apt/apt.conf.d/80retry > /dev/null <<EOT
+          Acquire::Retries "10";
+          EOT
+          tee /etc/apt/apt.conf.d/80recommends > /dev/null <<EOT
+          APT::Install-Recommends "false";
+          EOT
+          tee /etc/apt/apt.conf.d/80suggests > /dev/null <<EOT
+          APT::Install-Suggests "false";
+          EOT
+          tee /etc/apt/apt.conf.d/80forceyes > /dev/null <<EOT
+          APT::Get::Assume-Yes "true";
+          EOT
+          tee /etc/apt/apt.conf.d/80fixmissing > /dev/null <<EOT
+          APT::Get::Fix-Missing "true";
+          EOT
+          rm -rf /var/lib/apt/lists/*
+          rm -rf /etc/apt/sources.list*
+          tee /etc/apt/sources.list > /dev/null <<EOT
+          deb http://deb.debian.org/debian unstable main
+          EOT
+          apt update
+          apt install eatmydata
+          eatmydata apt full-upgrade
+          eatmydata apt install \
+            ${{ inputs.dist-name }}-keyring \
+            curl \
+            dpkg-dev \
+            gnupg \
+            mmdebstrap \
+            reprotest \
+            schroot \
+            tar \
+            uidmap \
+            xz-utils \
+            zip \
+          ;
+          apt clean
+          USER=`whoami`
+          usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
+      - name: Import GPG key
+        timeout-minutes: 1
+        id: gpg
+        if: github.event_name != 'pull_request'
+        uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6.3.0
+        with:
+          gpg_private_key: ${{ secrets.GPG_SECRET_SUBKEYS }}
+          fingerprint: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          trust_level: 5
+      - name: Configure GPG
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          gpg --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc --armor --export ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          rm -f ~/.gnupg/trustedkeys.gpg
+          gpg --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --import /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
+      - name: Download source-only .deb to be built
+        timeout-minutes: 1
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: ${{ inputs.deb-src-artifact-id }}
+          path: deb-src
+      - name: Unpack the downloaded tarball
+        timeout-minutes: 1
+        run: |
+          set -xe
+          cd "$GITHUB_WORKSPACE/deb-src"
+          tar -xf "$GITHUB_WORKSPACE/deb-src/artifact-src.tar"
+          rm "$GITHUB_WORKSPACE/deb-src/artifact-src.tar"
+      - name: Ensure that all incoming source artifacts are signed
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        run: |
+          set -xe
+          cd "$GITHUB_WORKSPACE/deb-src"
+          find . -type f -not -iname '*.sig' -print0 | xargs --null -I'{}' sh -c "\
+               echo 'Processing {}' \
+            && ( \
+                 gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     \
+              || gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig \
+              || (echo 'Processing {}: NOT SIGNED!' && exit 1) \
+            ) \
+            && echo 'Processing {}: ok' \
+          "
+      - name: Create container for reprotest
+        timeout-minutes: 1
+        run: |
+          set -xe
+          mkdir -p /tmp/chroot/unstable-amd64-sbuild
+          eatmydata mmdebstrap \
+            --comp=main \
+            --variant=apt \
+            --skip=output/mknod \
+            --format=directory \
+            --include=eatmydata \
+            --hook-dir=/usr/share/mmdebstrap/hooks/eatmydata \
+            --aptopt='Acquire::Retries "10";' \
+            --aptopt='APT::Install-Recommends "false";' \
+            --aptopt='APT::Install-Suggests "false";' \
+            --aptopt='APT::Get::Assume-Yes "true";' \
+            --aptopt='APT::Get::Fix-Missing "true";' \
+            --dpkgopt='force-unsafe-io' \
+            --dpkgopt='force-confdef' \
+            unstable /tmp/chroot/unstable-amd64-sbuild http://deb.debian.org/debian
+          chroot /tmp/chroot/unstable-amd64-sbuild apt update
+          mkdir -p /etc/schroot/chroot.d
+          tee /etc/schroot/chroot.d/unstable-amd64-sbuild > /dev/null <<EOT
+          [unstable-amd64-sbuild]
+          type=directory
+          directory=/tmp/chroot/unstable-amd64-sbuild
+          union-type=overlay
+          command-prefix=eatmydata
+          EOT
+      - name: Run reprotest
+        timeout-minutes: 10
+        run: |
+          set -xe
+          useradd -U first-user
+          useradd -U second-user
+          cd "$GITHUB_WORKSPACE/deb-src"
+          # FIXME: not reproducible without --vary=-build_path
+          eatmydata reprotest --no-diffoscope --vary=-build_path --vary=user_group.available+=first-user:first-user --vary=user_group.available+=second-user:second-user --vary=domain_host.use_sudo=1 "$GITHUB_WORKSPACE/deb-src"/*.dsc -- schroot unstable-amd64-sbuild

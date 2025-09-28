@@ -71,7 +71,7 @@ jobs:
             devscripts \
             git \
             git-buildpackage \
-            gpg \
+            gnupg \
             iproute2 \
             mmdebstrap \
             sbuild \
@@ -130,6 +130,13 @@ jobs:
           \$unshare_tmpdir_template = '/tmp/tmp.sbuild.XXXXXXXXXX';
           EOT
           tee -a ~/.sbuildrc > /dev/null <<EOT
+          \$external_commands = {
+            'chroot-setup-commands' => [ "export LD_PRELOAD=/usr/lib/$(dpkg-architecture -q DEB_BUILD_GNU_TYPE)/libeatmydata.so" ]
+          };
+          \$build_environment = {
+            "LD_PRELOAD" => "/usr/lib/$(dpkg-architecture -q DEB_BUILD_GNU_TYPE)/libeatmydata.so"
+          };
+          \$environment_filter = [Dpkg::BuildInfo::get_build_env_allowed(), '^LD_PRELOAD$'];
           push @{\$unshare_mmdebstrap_extra_args}, "*", [
             '--include=eatmydata',
             '--hook-dir=/usr/share/mmdebstrap/hooks/eatmydata',
@@ -143,7 +150,8 @@ jobs:
         timeout-minutes: 1
         run: |
           set -xe
-          eatmydata curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain $RUST_VERSION --profile minimal -y
+          eatmydata curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            eatmydata sh -s -- --default-toolchain $RUST_VERSION --profile minimal -y
           . "$HOME/.cargo/env"
       - name: Fetch our git repository
         timeout-minutes: 1
