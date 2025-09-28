@@ -637,6 +637,13 @@ char *fd_to_dev_model(int fd)
 			goto got_model;
 		free(model_path);
 
+		/* loop device? try loop/backing_file */
+
+		model_path = mprintf("%s/loop/backing_file", sysfs_path);
+		if (!access(model_path, R_OK))
+			goto got_model;
+		free(model_path);
+
 		free(sysfs_path);
 		return strdup("(unknown model)");
 got_model:
