@@ -37,7 +37,7 @@ jobs:
       matrix:
         stack:
           - { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "amd64",   host-arch: "amd64" }
-          - { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "ppc64el", host-arch: "ppc64el" }
+          - { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "amd64",   host-arch: "ppc64el" }
           - { runs-on: "ubuntu-24.04-arm", machine-arch: "arm64", build-arch: "arm64",   host-arch: "arm64" }
         dist:
           - { name: debian, version: unstable }
@@ -45,6 +45,19 @@ jobs:
           - { name: debian, version: trixie   } # Debian 13
           - { name: ubuntu, version: questing } # Ubuntu 25.10       (Questing Quokka) Beta
           - { name: ubuntu, version: plucky   } # Ubuntu 25.04       (Plucky Puffin)
+        exclude:
+          - stack: { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "amd64",   host-arch: "ppc64el" }
+            dist: { name: ubuntu, version: questing }
+            # cross-build broken, package conflicts
+          - stack: { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "amd64",   host-arch: "ppc64el" }
+            dist: { name: ubuntu, version: plucky   }
+            # cross-build broken, broken packages
+        # # If someone asks for ubuntu ppc64el packages, these can be reenabled:
+        # include:
+        #   - stack: { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "ppc64el", host-arch: "ppc64el" }
+        #     dist: { name: ubuntu, version: questing }
+        #   - stack: { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "ppc64el", host-arch: "ppc64el" }
+        #     dist: { name: ubuntu, version: plucky   }
     uses: ./.github/workflows/deb-buildd.yml
     with:
       deb-src-artifact-id: ${{ needs.source-only.outputs.deb-src-artifact-id }}
