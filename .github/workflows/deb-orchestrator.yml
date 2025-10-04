@@ -22,9 +22,7 @@ jobs:
       attestations: write
     uses: ./.github/workflows/deb-src.yml
     with:
-      runs-on: ubuntu-latest
-      dist-name: debian
-      dist-version: unstable
+      runs-on: ubuntu-24.04
     secrets:
       GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
       GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
@@ -38,8 +36,9 @@ jobs:
       fail-fast: false
       matrix:
         stack:
-          - { runs-on: "ubuntu-latest",    arch: "amd64" }
-          - { runs-on: "ubuntu-24.04-arm", arch: "arm64" }
+          - { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "amd64",   host-arch: "amd64" }
+          - { runs-on: "ubuntu-24.04",     machine-arch: "amd64", build-arch: "ppc64el", host-arch: "ppc64el" }
+          - { runs-on: "ubuntu-24.04-arm", machine-arch: "arm64", build-arch: "arm64",   host-arch: "arm64" }
         dist:
           - { name: debian, version: unstable }
           - { name: debian, version: forky    } # Debian 14
@@ -50,7 +49,9 @@ jobs:
     with:
       deb-src-artifact-id: ${{ needs.source-only.outputs.deb-src-artifact-id }}
       runs-on: ${{ matrix.stack.runs-on }}
-      arch: ${{ matrix.stack.arch }}
+      machine-arch: ${{ matrix.stack.machine-arch }}
+      build-arch: ${{ matrix.stack.build-arch }}
+      host-arch: ${{ matrix.stack.host-arch }}
       dist-name: ${{ matrix.dist.name }}
       dist-version: ${{ matrix.dist.version }}
     secrets:
@@ -61,7 +62,7 @@ jobs:
     uses: ./.github/workflows/deb-reprotest.yml
     with:
       deb-src-artifact-id: ${{ needs.source-only.outputs.deb-src-artifact-id }}
-      runs-on: "ubuntu-latest"
+      runs-on: "ubuntu-24.04"
       arch: amd64
       dist-name: debian
       dist-version: unstable
@@ -72,6 +73,8 @@ jobs:
     needs: [ source-only, buildd, reprotest ]
     if: github.event_name != 'pull_request' && (github.ref_type == 'tag' || (github.ref_type == 'branch' && github.ref_name == 'master'))
     uses: ./.github/workflows/deb-publish.yml
+    with:
+      runs-on: ubuntu-24.04
     secrets:
       GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
       GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
