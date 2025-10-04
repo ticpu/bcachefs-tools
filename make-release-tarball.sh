@@ -28,7 +28,7 @@ scp bcachefs-tools-$version.tar.zst	evilpiepirate.org:/var/www/htdocs/bcachefs-t
 scp bcachefs-tools-$version.tar.asc	evilpiepirate.org:/var/www/htdocs/bcachefs-tools/
 scp bcachefs-tools-$version.tar.sign	evilpiepirate.org:/var/www/htdocs/bcachefs-tools/
 
-cargo vendor
+cargo-vendor-filterer
 
 mkdir .cargo
 cat > .cargo/config.toml <<-ZZ

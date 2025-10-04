@@ -39,3 +39,6 @@ default-features = false
 
 [profile.release]
 strip = "none"
+
+[package.metadata.vendor-filter]
+platforms = ["*-unknown-linux-*"]
