@@ -34,6 +34,7 @@ stdenv.mkDerivation {
   version = "${kernel.version}-${bcachefs-tools.version}";
 
   __structuredAttrs = true;
+  strictDeps = true;
 
   src = bcachefs-tools.dkms;
 
