@@ -18,13 +18,10 @@ on:
 
 jobs:
   linux:
+    concurrency: apt.bcachefs.org
     runs-on: ${{ inputs.runs-on }}
     env:
       SUITE: ${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'release' || 'snapshot' }}
-    permissions:
-      id-token: write
-      contents: read
-      attestations: write
     steps:
       - name: Configure baseline system
         timeout-minutes: 1
@@ -123,20 +120,6 @@ jobs:
             xz-utils \
             zip
           apt clean
-      - name: Pre-Configure gpg-agent / ssh
-        timeout-minutes: 1
-        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
-        run: |
-          set -xe
-          mkdir -p ~/.gnupg ~/.ssh
-          echo "" >> ~/.gnupg/gpg-agent.conf
-          echo "enable-ssh-support" >> ~/.gnupg/gpg-agent.conf
-          gpgconf --kill gpg-agent
-          gpgconf --launch gpg-agent
-          export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
-          echo "SSH_AUTH_SOCK=$(echo ${SSH_AUTH_SOCK})" >> ~/.env
-          echo "" >> /etc/ssh/ssh_known_hosts
-          echo "${{ secrets.SSH_SERVER_KEYS }}" >> /etc/ssh/ssh_known_hosts
       - name: Import/Configure GPG
         timeout-minutes: 1
         id: gpg
@@ -164,7 +147,6 @@ jobs:
           default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           trusted-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
-          gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
           tee -a ~/.gbp.conf > /dev/null <<EOT
           [buildpackage]
           sign-tags = True
@@ -253,10 +235,18 @@ jobs:
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
-          . ~/.env
           MOUNTPOINT="${{ github.workspace }}/remotefs"
           mkdir -p "$MOUNTPOINT"
           if [ -n "${{ secrets.SSH_HOST }}" ]; then
+          mkdir -p ~/.ssh
+          echo "" >> ~/.gnupg/gpg-agent.conf
+          echo "enable-ssh-support" >> ~/.gnupg/gpg-agent.conf
+          echo "" >> /etc/ssh/ssh_known_hosts
+          echo "${{ secrets.SSH_SERVER_KEYS }}" >> /etc/ssh/ssh_known_hosts
+          gpgconf --kill gpg-agent
+          gpgconf --launch gpg-agent
+          export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
+          gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
           sshfs ${{ secrets.SSH_HOST }}/uploads "$MOUNTPOINT"
           fi
           REPO_ROOT="$MOUNTPOINT/public_html"
