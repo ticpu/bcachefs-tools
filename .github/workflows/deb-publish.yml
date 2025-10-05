@@ -1,5 +1,9 @@
 on:
   workflow_call:
+    inputs:
+      runs-on:
+        required: true
+        type: string
     secrets:
       GPG_SECRET_SUBKEYS:
         required: true
@@ -14,40 +18,88 @@ on:
 
 jobs:
   linux:
-    concurrency: apt.bcachefs.org
-    runs-on: ubuntu-latest
-    container:
-      image: debian:unstable-slim
-      options: --cap-add=SYS_ADMIN --security-opt=apparmor:unconfined --device /dev/fuse --tmpfs /tmp --tmpfs /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}
+    runs-on: ${{ inputs.runs-on }}
     env:
       SUITE: ${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'release' || 'snapshot' }}
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
     steps:
-      - name: Install necessary packages
-        timeout-minutes: 2
+      - name: Configure baseline system
+        timeout-minutes: 1
+        shell: sudo sh "{0}"
         run: |
           set -xe
-          tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io > /dev/null <<EOT
-          force-unsafe-io
-          EOT
-          tee /etc/apt/apt.conf.d/tmpfs > /dev/null <<EOT
-          Dir::Cache::Archives "/tmp/apt/archives";
+          mount -t tmpfs tmpfs ${{ github.workspace }}
+          echo "set man-db/auto-update false" | debconf-communicate
+          dpkg-reconfigure man-db
+          mkdir -p /etc/apt/apt.conf.d
+          mkdir -p /etc/dpkg/dpkg.cfg.d
+          tee /etc/apt/apt.conf.d/99gh > /dev/null <<EOT
           APT::ExtractTemplates::TempDir "/tmp/apt/temp";
-          EOT
-          mkdir -p /tmp/apt/archives
-          tee /etc/apt/apt.conf.d/80retry > /dev/null <<EOT
           Acquire::Retries "10";
-          EOT
-          tee /etc/apt/apt.conf.d/80recommends > /dev/null <<EOT
           APT::Install-Recommends "false";
-          EOT
-          tee /etc/apt/apt.conf.d/80suggests > /dev/null <<EOT
           APT::Install-Suggests "false";
-          EOT
-          tee /etc/apt/apt.conf.d/80forceyes > /dev/null <<EOT
           APT::Get::Assume-Yes "true";
-          EOT
-          tee /etc/apt/apt.conf.d/80fixmissing > /dev/null <<EOT
           APT::Get::Fix-Missing "true";
+          EOT
+          tee /etc/dpkg/dpkg.cfg.d/99gh > /dev/null <<EOT
+          force-unsafe-io
+          force-confdef
+          EOT
+          rm -rf /var/lib/apt/lists/*
+          rm -rf /etc/apt/sources.list*
+          tee /etc/apt/sources.list > /dev/null <<EOT
+          deb http://archive.ubuntu.com/ubuntu noble main universe
+          EOT
+          apt update
+          apt install eatmydata
+          eatmydata apt install \
+            podman \
+          ;
+          apt clean
+      - name: Start the container
+        timeout-minutes: 1
+        shell: sudo eatmydata sh "{0}"
+        run: |
+          set -xe
+          export IMAGE=debian:unstable-slim
+          podman pull ${IMAGE}
+          podman run \
+            --name container \
+            --image-volume=tmpfs \
+            --tmpfs=/run \
+            --tmpfs=/tmp \
+            --tmpfs=/var/tmp \
+            --volume=/home/runner:/home/runner \
+            --volume=${{ github.workspace }}:${{ github.workspace }} \
+            --cap-add=SYS_ADMIN \
+            --security-opt=apparmor:unconfined \
+            --interactive \
+            --tty \
+            --detach \
+            ${IMAGE} \
+            /usr/bin/sh \
+          ;
+      - name: Install necessary packages
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container sh "{0}"
+        run: |
+          set -xe
+          mkdir -p /etc/apt/apt.conf.d
+          mkdir -p /etc/dpkg/dpkg.cfg.d
+          tee /etc/apt/apt.conf.d/99gh > /dev/null <<EOT
+          APT::ExtractTemplates::TempDir "/tmp/apt/temp";
+          Acquire::Retries "10";
+          APT::Install-Recommends "false";
+          APT::Install-Suggests "false";
+          APT::Get::Assume-Yes "true";
+          APT::Get::Fix-Missing "true";
+          EOT
+          tee /etc/dpkg/dpkg.cfg.d/99gh > /dev/null <<EOT
+          force-unsafe-io
+          force-confdef
           EOT
           rm -rf /var/lib/apt/lists/*
           rm -rf /etc/apt/sources.list*
@@ -55,8 +107,9 @@ jobs:
           deb http://deb.debian.org/debian unstable main
           EOT
           apt update
-          apt full-upgrade
-          apt install \
+          apt install eatmydata
+          eatmydata apt full-upgrade
+          eatmydata apt install \
             devscripts \
             gettext-base \
             git \
@@ -71,6 +124,7 @@ jobs:
           apt clean
       - name: Pre-Configure gpg-agent / ssh
         timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
           mkdir -p ~/.gnupg ~/.ssh
@@ -79,34 +133,35 @@ jobs:
           gpgconf --kill gpg-agent
           gpgconf --launch gpg-agent
           export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
-          echo "SSH_AUTH_SOCK=$(echo ${SSH_AUTH_SOCK})" >> $GITHUB_ENV
+          echo "SSH_AUTH_SOCK=$(echo ${SSH_AUTH_SOCK})" >> ~/.env
           echo "" >> /etc/ssh/ssh_known_hosts
           echo "${{ secrets.SSH_SERVER_KEYS }}" >> /etc/ssh/ssh_known_hosts
-      - name: Import GPG key
+      - name: Import/Configure GPG
         timeout-minutes: 1
         id: gpg
         if: github.event_name != 'pull_request'
-        uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6.3.0
-        with:
-          gpg_private_key: ${{ secrets.GPG_SECRET_SUBKEYS }}
-          fingerprint: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
-          trust_level: 5
-      - name: Finish configuring gpg-agent / ssh
-        timeout-minutes: 1
-        if: steps.gpg.conclusion != 'skipped'
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
-          gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
-      - name: Configure GPG
-        timeout-minutes: 1
-        if: steps.gpg.conclusion != 'skipped'
-        run: |
-          set -xe
-          gpg --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc --armor --export ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          gpg --import <<EOT
+          ${{ secrets.GPG_SECRET_SUBKEYS }}
+          EOT
+          gpg \
+            --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc \
+            --armor \
+            --export \
+            ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }} \
+          ;
           rm -f ~/.gnupg/trustedkeys.gpg
-          gpg --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --import /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
+          gpg \
+            --no-default-keyring \
+            --keyring ~/.gnupg/trustedkeys.gpg \
+            --import \
+            /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc \
+          ;
           tee -a ~/.gnupg/gpg.conf > /dev/null <<EOT
           default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          trusted-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
           tee -a ~/.gbp.conf > /dev/null <<EOT
           [buildpackage]
@@ -121,43 +176,83 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: 'bcachefs-tools'
+      - name: Ensure that the download directory does not exist
+        timeout-minutes: 1
+        run: |
+          set -xe
+          rm -rf "${{ github.workspace }}/packed-artifacts"
       - name: Download all artifacts
         timeout-minutes: 1
         uses: actions/download-artifact@v5
         with:
           path: packed-artifacts
-      - name: Unpack all artifacts
-        timeout-minutes: 1
+      - name: Check attestation of all incoming artifact archives
+        timeout-minutes: 2
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -xe
-          SRC_DIR="$GITHUB_WORKSPACE/incoming/src-artifacts"
+          cd "${{ github.workspace }}/packed-artifacts"
+          find . -type f -print0 | xargs --null -I'{}' sh -c "                 \
+            echo '::group::Attestation check for {}' &&                        \
+            (                                                                  \
+              gh attestation verify                                            \
+                {}                                                             \
+                --repo        ${{ github.repository }}                         \
+                --signer-repo ${{ github.repository }}                         \
+                --source-digest ${{ github.sha }}                              \
+                --signer-digest ${{ github.sha }}                              \
+              ||                                                               \
+              (                                                                \
+                echo '::error file={}::NOT ATTESTED!' &&                       \
+                echo '::endgroup::' &&                                         \
+                exit 1                                                         \
+              )                                                                \
+            ) &&                                                               \
+            echo 'ok.' &&                                                      \
+            echo '::endgroup::'                                                \
+          "
+      - name: Unpack all artifacts
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          SRC_DIR="${{ github.workspace }}/incoming/src-artifacts"
           mkdir -p "$SRC_DIR"
-          find "$GITHUB_WORKSPACE/packed-artifacts" -type f -name artifact-src.tar -exec tar -xf {} -C "$SRC_DIR" ';' -delete
-          BIN_DIR="$GITHUB_WORKSPACE/incoming/bin-artifacts"
+          find "${{ github.workspace }}/packed-artifacts" -type f -name artifact-src.tar -exec tar -xf {} -C "$SRC_DIR" ';' -delete
+          BIN_DIR="${{ github.workspace }}/incoming/bin-artifacts"
           mkdir -p "$BIN_DIR"
-          find "$GITHUB_WORKSPACE/packed-artifacts" -type f -name '*.tar' -exec tar -xf {} -C "$BIN_DIR" ';' -delete
-          rm -rf "$GITHUB_WORKSPACE/packed-artifacts"
+          find "${{ github.workspace }}/packed-artifacts" -type f -name 'artifact-bin-*.tar' -exec tar -xf {} -C "$BIN_DIR" ';' -delete
+          rm -rf "${{ github.workspace }}/packed-artifacts"
       - name: Ensure that all incoming artifacts are signed
         timeout-minutes: 1
         if: steps.gpg.conclusion != 'skipped'
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
-          cd "$GITHUB_WORKSPACE/incoming"
-          find . -type f -not -iname '*.sig' -print0 | xargs --null -I'{}' sh -c "\
-               echo 'Processing {}' \
-            && ( \
-                 gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     \
-              || gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig \
-              || (echo 'Processing {}: NOT SIGNED!' && exit 1) \
-            ) \
-            && echo 'Processing {}: ok' \
+          cd "${{ github.workspace }}/incoming"
+          find . -type f -not -iname '*.sig' -print0 | xargs --null -I'{}' sh -c "                     \
+            echo '::group::Signature check for {}' &&                                                  \
+            (                                                                                          \
+              gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     || \
+              gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig || \
+              (                                                                                        \
+                echo '::error file={}::NOT SIGNED!' &&                                                 \
+                echo '::endgroup::' &&                                                                 \
+                exit 1                                                                                 \
+              )                                                                                        \
+            ) &&                                                                                       \
+            echo 'ok.' &&                                                                              \
+            echo '::endgroup::'                                                                        \
           "
       - name: Create and populate repos
         timeout-minutes: 60
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
-          ls -lahR
-          MOUNTPOINT="$GITHUB_WORKSPACE/remotefs"
+          . ~/.env
+          MOUNTPOINT="${{ github.workspace }}/remotefs"
           mkdir -p "$MOUNTPOINT"
           if [ -n "${{ secrets.SSH_HOST }}" ]; then
           sshfs ${{ secrets.SSH_HOST }}/uploads "$MOUNTPOINT"
@@ -169,18 +264,20 @@ jobs:
           fi
           if [ "${{ (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master') && 'true' || 'false' }}" = "true" ]; then
           export GPG_SIGNING_SUBKEY_FINGERPRINT=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
-          envsubst < "$GITHUB_WORKSPACE/bcachefs-tools/doc/apt.bcachefs.org-README.md" | pandoc --from=markdown --to=html --output="$REPO_ROOT/.footer/README"
+          envsubst < "${{ github.workspace }}/bcachefs-tools/doc/apt.bcachefs.org-README.md" | \
+            pandoc --from=markdown --to=html --output="$REPO_ROOT/.footer/README"
           fi
-          cd "$GITHUB_WORKSPACE/incoming/bin-artifacts"
+          cd "${{ github.workspace }}/incoming/bin-artifacts"
           for DIST in *
           do
-          SRCDIR="$GITHUB_WORKSPACE/incoming/bin-artifacts/$DIST"
+          echo "::group::Distribution $DIST"
+          SRCDIR="${{ github.workspace }}/incoming/bin-artifacts/$DIST"
           cd "$SRCDIR"
           REPO="$REPO_ROOT/$DIST"
           mkdir -p "$REPO/conf/distributions"
-          tee "$REPO/conf/distributions/$SUITE.conf" > /dev/null <<EOT
-          Codename: bcachefs-tools-$SUITE
-          Architectures: source amd64 arm64
+          tee "$REPO/conf/distributions/${{ env.SUITE }}.conf" > /dev/null <<EOT
+          Codename: bcachefs-tools-${{ env.SUITE }}
+          Architectures: source amd64 arm64 ppc64el
           Components: main
           Contents:
           Origin: apt.bcachefs.org
@@ -197,12 +294,13 @@ jobs:
           verbose
           ignore longkeyid
           EOT
-          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-$SUITE "$GITHUB_WORKSPACE/incoming/src-artifacts/"*.changes
+          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-${{ env.SUITE }} "${{ github.workspace }}/incoming/src-artifacts/"*.changes
           for f in "$SRCDIR"/*/*.changes
           do
-          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-$SUITE $f
+          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-${{ env.SUITE }} $f
           done
           reprepro --basedir "$REPO" createsymlinks
           reprepro --basedir "$REPO" export
+          echo '::endgroup::'
           done
           umount "$MOUNTPOINT" || /bin/true
