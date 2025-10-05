@@ -164,6 +164,7 @@ jobs:
           default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           trusted-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
+          gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
           tee -a ~/.gbp.conf > /dev/null <<EOT
           [buildpackage]
           sign-tags = True
