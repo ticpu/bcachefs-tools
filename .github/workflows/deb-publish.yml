@@ -69,6 +69,7 @@ jobs:
           podman run \
             --name container \
             --image-volume=tmpfs \
+            --device=/dev/fuse \
             --tmpfs=/run \
             --tmpfs=/tmp \
             --tmpfs=/var/tmp \
