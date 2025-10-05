@@ -31,6 +31,21 @@ endif
 
 export CARGO_ARGS = "--frozen"
 
+# WARNING: split debug info makes the package unreproducible!
+#
+# export CFLAGS += -gsplit-dwarf
+# export RUSTFLAGS += -C split-debuginfo=packed
+#
+# override_dh_dwz:
+# 	# Skipping DWZ since debug info is split.
+
+# WARNING: compressed debug info without split debug info results in
+#          size increase(!), and breaks DWZ.
+#
+# export CFLAGS += -gz=zlib
+# export LDFLAGS += -Wl,--compress-debug-sections=zlib
+# export RUSTFLAGS += -C link-arg=-Wl,--compress-debug-sections=zlib
+
 %:
 	dh $@ --parallel --with dkms
 

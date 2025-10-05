@@ -108,10 +108,12 @@ jobs:
             curl \
             debian-keyring \
             devscripts \
+            gcc \
             git \
             git-buildpackage \
             gnupg \
             iproute2 \
+            libc6-dev \
             mmdebstrap \
             sbuild \
             tar \
@@ -210,6 +212,13 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- --default-toolchain ${{ env.RUST_VERSION }} --profile minimal -y
           . "$HOME/.cargo/env"
+      - name: Install cargo-vendor-filterer
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          . "$HOME/.cargo/env"
+          cargo install --locked cargo-vendor-filterer
       - name: Fetch our git repository
         timeout-minutes: 1
         uses: actions/checkout@v4
