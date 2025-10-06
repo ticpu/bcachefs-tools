@@ -247,14 +247,6 @@ jobs:
           if [ "${{ inputs.dist-name }}" = "debian" ];
           then
           MIRROR="http://deb.debian.org/debian"
-          elif [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.build-arch }}" = "amd64" ];
-          then
-          MIRROR="http://archive.ubuntu.com/ubuntu"
-          elif [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.build-arch }}" != "amd64" ];
-          then
-          MIRROR="http://ports.ubuntu.com/ubuntu-ports"
-          else
-          exit 1
           fi
           if [ "${{ inputs.dist-name }}" = "debian" ];
           then
@@ -287,16 +279,27 @@ jobs:
           fi
           if [ "${{ inputs.dist-name }}" = "ubuntu" ];
           then
+          MIRROR="http://archive.ubuntu.com/ubuntu"
           tee -a ~/.sbuildrc > /dev/null <<EOT
           push @{\$unshare_mmdebstrap_extra_args}, "*", [
-            '$MIRROR',
             '--keyring=$KEYRING',
-            '--components=main,universe'
+            '--components=main,universe',
+            'deb [arch=amd64] $MIRROR ${{ inputs.dist-version }} main universe',
+            'deb [arch=amd64] $MIRROR ${{ inputs.dist-version }}-updates main universe',
+            'deb [arch=amd64] $MIRROR ${{ inputs.dist-version }}-security main universe',
+            'deb [arch=amd64] $MIRROR ${{ inputs.dist-version }}-backports main universe',
           ];
-          \$extra_repositories = [
-            'deb $MIRROR ${{ inputs.dist-version }}-updates main universe',
-            'deb $MIRROR ${{ inputs.dist-version }}-security main universe',
-            'deb $MIRROR ${{ inputs.dist-version }}-backports main universe',
+          EOT
+          fi
+          if [ "${{ inputs.dist-name }}" = "ubuntu" ] && [ "${{ inputs.host-arch }}" != "amd64" ];
+          then
+          MIRROR_PORTS="http://ports.ubuntu.com/ubuntu-ports"
+          tee -a ~/.sbuildrc > /dev/null <<EOT
+          push @{\$unshare_mmdebstrap_extra_args}, "*", [
+            'deb [arch=${{ inputs.host-arch }}] $MIRROR_PORTS ${{ inputs.dist-version }} main universe',
+            'deb [arch=${{ inputs.host-arch }}] $MIRROR_PORTS ${{ inputs.dist-version }}-updates main universe',
+            'deb [arch=${{ inputs.host-arch }}] $MIRROR_PORTS ${{ inputs.dist-version }}-security main universe',
+            'deb [arch=${{ inputs.host-arch }}] $MIRROR_PORTS ${{ inputs.dist-version }}-backports main universe',
           ];
           EOT
           fi
