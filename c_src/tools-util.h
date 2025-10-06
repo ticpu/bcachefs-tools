@@ -18,9 +18,10 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uuid.h>
-#include "libbcachefs/bcachefs.h"
-#include "libbcachefs/bbpos.h"
-#include "libbcachefs/darray.h"
+
+#include "bcachefs.h"
+#include "btree/bbpos.h"
+#include "util/darray.h"
 
 #define noreturn __attribute__((noreturn))
 

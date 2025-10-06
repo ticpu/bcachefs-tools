@@ -21,16 +21,20 @@
 
 #include "libbcachefs.h"
 #include "crypto.h"
-#include "libbcachefs/bcachefs_format.h"
-#include "libbcachefs/btree_cache.h"
-#include "libbcachefs/buckets.h"
-#include "libbcachefs/checksum.h"
-#include "libbcachefs/disk_groups.h"
-#include "libbcachefs/journal_seq_blacklist.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/replicas.h"
-#include "libbcachefs/super-io.h"
 #include "tools-util.h"
+
+#include "bcachefs.h"
+
+#include "alloc/buckets.h"
+#include "alloc/disk_groups.h"
+#include "alloc/replicas.h"
+#include "btree/cache.h"
+
+#include "data/checksum.h"
+
+#include "journal/seq_blacklist.h"
+
+#include "sb/io.h"
 
 #define NSEC_PER_SEC	1000000000L
 

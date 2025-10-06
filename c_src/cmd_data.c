@@ -3,9 +3,9 @@
 #include <stdio.h>
 #include <sys/ioctl.h>
 
-#include "libbcachefs/bcachefs_ioctl.h"
-#include "libbcachefs/btree_cache.h"
-#include "libbcachefs/move.h"
+#include "bcachefs_ioctl.h"
+#include "btree/cache.h"
+#include "data/move.h"
 
 #include "cmds.h"
 #include "libbcachefs.h"

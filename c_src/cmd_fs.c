@@ -7,16 +7,15 @@
 #include "linux/sort.h"
 #include "linux/rcupdate.h"
 
-#include "libbcachefs/bcachefs_ioctl.h"
-#include "libbcachefs/buckets.h"
-#include "libbcachefs/disk_accounting.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/super-io.h"
+#include "bcachefs_ioctl.h"
+#include "opts.h"
+#include "alloc/buckets.h"
+#include "alloc/accounting.h"
+#include "sb/io.h"
+#include "util/darray.h"
 
 #include "cmds.h"
 #include "libbcachefs.h"
-
-#include "libbcachefs/darray.h"
 
 #define FS_USAGE_FIELDS()		\
 	x(replicas)			\

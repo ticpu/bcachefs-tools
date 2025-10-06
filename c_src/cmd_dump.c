@@ -8,15 +8,15 @@
 #include "libbcachefs.h"
 #include "qcow2.h"
 
-#include "libbcachefs/bcachefs.h"
-#include "libbcachefs/btree_cache.h"
-#include "libbcachefs/btree_io.h"
-#include "libbcachefs/btree_iter.h"
-#include "libbcachefs/error.h"
-#include "libbcachefs/extents.h"
-#include "libbcachefs/journal_io.h"
-#include "libbcachefs/sb-members.h"
-#include "libbcachefs/super.h"
+#include "bcachefs.h"
+#include "btree/cache.h"
+#include "btree/io.h"
+#include "btree/iter.h"
+#include "data/extents.h"
+#include "init/error.h"
+#include "init/fs.h"
+#include "journal/io.h"
+#include "sb/members.h"
 
 struct dump_dev {
 	ranges	sb, journal, btree;

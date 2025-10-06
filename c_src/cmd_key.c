@@ -5,10 +5,12 @@
 #include <uuid/uuid.h>
 
 #include "cmds.h"
-#include "libbcachefs/checksum.h"
 #include "crypto.h"
 #include "libbcachefs.h"
 #include "tools-util.h"
+
+#include "data/checksum.h"
+#include "init/fs.h"
 
 static void unlock_usage(void)
 {

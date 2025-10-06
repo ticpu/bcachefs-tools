@@ -34,6 +34,7 @@ fn main() {
                 .map(|p| format!("-I{}", p.display())),
         )
         .clang_arg("-I..")
+        .clang_arg("-I../libbcachefs")
         .clang_arg("-I../c_src")
         .clang_arg("-I../include")
         .clang_arg("-DZSTD_STATIC_LINKING_ONLY")

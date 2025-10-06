@@ -4,12 +4,12 @@
 #include <linux/uuid.h>
 #include <stdbool.h>
 
-#include "libbcachefs/bcachefs.h"
-#include "libbcachefs/bcachefs_format.h"
-#include "libbcachefs/bcachefs_ioctl.h"
-#include "libbcachefs/inode.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/vstructs.h"
+#include "bcachefs.h"
+#include "bcachefs_format.h"
+#include "bcachefs_ioctl.h"
+#include "fs/inode.h"
+#include "util/vstructs.h"
+
 #include "tools-util.h"
 
 /* option parsing */

@@ -77,7 +77,8 @@
 #include <linux/kernel.h>
 #include <linux/uuid.h>
 #include <uapi/linux/magic.h>
-#include "vstructs.h"
+
+#include "util/vstructs.h"
 
 #ifdef __KERNEL__
 typedef uuid_t __uuid_t;
@@ -505,27 +506,27 @@ struct bch_sb_field {
 	x(downgrade,			14)	\
 	x(recovery_passes,		15)
 
-#include "alloc_background_format.h"
-#include "dirent_format.h"
-#include "disk_accounting_format.h"
-#include "disk_groups_format.h"
-#include "extents_format.h"
-#include "ec_format.h"
-#include "inode_format.h"
-#include "journal_seq_blacklist_format.h"
-#include "logged_ops_format.h"
-#include "lru_format.h"
-#include "quota_format.h"
-#include "recovery_passes_format.h"
-#include "reflink_format.h"
-#include "replicas_format.h"
-#include "snapshot_format.h"
-#include "subvolume_format.h"
-#include "sb-counters_format.h"
-#include "sb-downgrade_format.h"
-#include "sb-errors_format.h"
-#include "sb-members_format.h"
-#include "xattr_format.h"
+#include "alloc/accounting_format.h"
+#include "alloc/disk_groups_format.h"
+#include "alloc/lru_format.h"
+#include "alloc/replicas_format.h"
+#include "alloc/format.h"
+#include "data/ec_format.h"
+#include "data/extents_format.h"
+#include "data/reflink_format.h"
+#include "fs/dirent_format.h"
+#include "fs/inode_format.h"
+#include "fs/logged_ops_format.h"
+#include "fs/quota_format.h"
+#include "fs/xattr_format.h"
+#include "init/passes_format.h"
+#include "journal/seq_blacklist_format.h"
+#include "sb/counters_format.h"
+#include "sb/downgrade_format.h"
+#include "sb/errors_format.h"
+#include "sb/members_format.h"
+#include "snapshots/snapshot_format.h"
+#include "snapshots/subvolume_format.h"
 
 enum bch_sb_field_type {
 #define x(f, nr)	BCH_SB_FIELD_##f = nr,

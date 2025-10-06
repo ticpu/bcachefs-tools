@@ -9,13 +9,14 @@
 #include "libbcachefs.h"
 #include "tools-util.h"
 
-#include "libbcachefs/bcachefs.h"
-#include "libbcachefs/btree_iter.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/error.h"
-#include "libbcachefs/journal_io.h"
-#include "libbcachefs/journal_seq_blacklist.h"
-#include "libbcachefs/super.h"
+#include "bcachefs.h"
+#include "btree/iter.h"
+
+#include "init/error.h"
+#include "init/fs.h"
+
+#include "journal/io.h"
+#include "journal/seq_blacklist.h"
 
 #include <linux/fs_parser.h>
 

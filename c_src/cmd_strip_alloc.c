@@ -21,14 +21,15 @@
 
 #include "cmds.h"
 #include "cmd_strip_alloc.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/journal.h"
-#include "libbcachefs/sb-clean.h"
-#include "libbcachefs/super-io.h"
-#include "libbcachefs/util.h"
 
-#include "libbcachefs/darray.h"
+#include "errcode.h"
+#include "opts.h"
+#include "init/fs.h"
+#include "journal/journal.h"
+#include "sb/clean.h"
+#include "sb/io.h"
+#include "util/util.h"
+#include "util/darray.h"
 
 void strip_fs_alloc(struct bch_fs *c)
 {

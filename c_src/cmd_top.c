@@ -7,7 +7,8 @@
 
 #include "cmds.h"
 #include "libbcachefs.h"
-#include "libbcachefs/sb-counters.h"
+
+#include "sb/counters.h"
 
 static const u8 counters_to_stable_map[] = {
 #define x(n, id, ...)	[BCH_COUNTER_##n] = BCH_COUNTER_STABLE_##n,

@@ -14,16 +14,21 @@
 
 #include <blkid.h>
 
-#include "libbcachefs/bcachefs.h"
-#include "libbcachefs/bcachefs_ioctl.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/journal.h"
-#include "libbcachefs/sb-members.h"
-#include "libbcachefs/super-io.h"
 #include "cmds.h"
 #include "libbcachefs.h"
 #include "libbcachefs/opts.h"
 #include "tools-util.h"
+
+#include "bcachefs.h"
+#include "bcachefs_ioctl.h"
+
+#include "init/dev.h"
+#include "init/fs.h"
+
+#include "journal/init.h"
+
+#include "sb/members.h"
+#include "sb/io.h"
 
 static void device_add_usage(void)
 {

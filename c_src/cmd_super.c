@@ -23,11 +23,14 @@
 #include "cmds.h"
 #include "cmd_super.h"
 #include "libbcachefs.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/super-io.h"
-#include "libbcachefs/util.h"
 
-#include "libbcachefs/darray.h"
+#include "bcachefs.h"
+
+#include "sb/io.h"
+#include "sb/members.h"
+
+#include "util/util.h"
+#include "util/darray.h"
 
 #include "src/rust_to_c.h"
 
@@ -189,9 +192,6 @@ int cmd_show_super(int argc, char *argv[])
 	printbuf_exit(&buf);
 	return 0;
 }
-
-#include "libbcachefs/super-io.h"
-#include "libbcachefs/sb-members.h"
 
 typedef DARRAY(struct bch_sb *) probed_sb_list;
 

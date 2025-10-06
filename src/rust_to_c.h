@@ -1,8 +1,8 @@
 #ifndef _BCACHEFS_TOOLS_RUST_TO_C_H
 #define _BCACHEFS_TOOLS_RUST_TO_C_H
 
-#include "libbcachefs/super_types.h"
-#include "libbcachefs/darray.h"
+#include "init/dev_types.h"
+#include "util/darray.h"
 
 struct sb_name {
 	const char		*name;

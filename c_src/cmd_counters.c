@@ -2,7 +2,7 @@
 
 #include "cmds.h"
 #include "libbcachefs.h"
-#include "libbcachefs/super-io.h"
+#include "sb/io.h"
 
 static void reset_counters_usage(void)
 {

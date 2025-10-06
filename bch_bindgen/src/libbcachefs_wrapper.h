@@ -1,19 +1,23 @@
-#include "libbcachefs/super-io.h"
-#include "libbcachefs/checksum.h"
-#include "libbcachefs/bcachefs_format.h"
-#include "libbcachefs/btree_cache.h"
-#include "libbcachefs/btree_iter.h"
-#include "libbcachefs/debug.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/error.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs.h"
-#include "crypto.h"
-#include "include/linux/bio.h"
-#include "include/linux/blkdev.h"
+#include "bcachefs_format.h"
+#include "errcode.h"
+#include "opts.h"
+
+#include "btree/cache.h"
+#include "btree/iter.h"
+#include "data/checksum.h"
+#include "debug/debug.h"
+#include "init/error.h"
+#include "init/fs.h"
+#include "sb/io.h"
+
 #include "cmds.h"
+#include "crypto.h"
+#include "libbcachefs.h"
 #include "raid/raid.h"
 #include "src/rust_to_c.h"
+
+#include "include/linux/bio.h"
+#include "include/linux/blkdev.h"
 
 /* Fix753 is a workaround for https://github.com/rust-lang/rust-bindgen/issues/753
  * Functional macro are not expanded with bindgen, e.g. ioctl are automatically ignored

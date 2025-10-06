@@ -3,13 +3,15 @@
 #include <getopt.h>
 #include <sys/uio.h>
 #include <unistd.h>
+
 #include "cmds.h"
-#include "libbcachefs/error.h"
 #include "libbcachefs.h"
-#include "libbcachefs/recovery_passes.h"
-#include "libbcachefs/super.h"
-#include "libbcachefs/super-io.h"
 #include "tools-util.h"
+
+#include "init/error.h"
+#include "init/fs.h"
+#include "init/passes.h"
+#include "sb/io.h"
 
 static void setnonblocking(int fd)
 {

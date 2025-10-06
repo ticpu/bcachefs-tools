@@ -26,12 +26,13 @@
 #include "posix_to_bcachefs.h"
 #include "libbcachefs.h"
 #include "crypto.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/super-io.h"
-#include "libbcachefs/util.h"
 
-#include "libbcachefs/darray.h"
+#include "errcode.h"
+#include "opts.h"
+#include "init/fs.h"
+#include "sb/io.h"
+#include "util/util.h"
+#include "util/darray.h"
 
 #define OPTS						\
 x(0,	replicas,		required_argument)	\

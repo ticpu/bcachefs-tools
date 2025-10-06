@@ -20,9 +20,11 @@
 
 #include "cmds.h"
 #include "libbcachefs.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/super-io.h"
+
+#include "errcode.h"
+#include "opts.h"
+#include "init/fs.h"
+#include "sb/io.h"
 
 static void set_option_usage(void)
 {

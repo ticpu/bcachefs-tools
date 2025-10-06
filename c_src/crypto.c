@@ -15,8 +15,9 @@
 #include <sodium/crypto_pwhash_scryptsalsa208sha256.h>
 #include <uuid/uuid.h>
 
-#include "libbcachefs/checksum.h"
 #include "crypto.h"
+
+#include "data/checksum.h"
 
 char *read_passphrase(const char *prompt)
 {

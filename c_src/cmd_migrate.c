@@ -22,14 +22,14 @@
 
 #include <linux/dcache.h>
 #include <linux/generic-radix-tree.h>
-#include "libbcachefs/bcachefs.h"
-#include "libbcachefs/btree_update.h"
-#include "libbcachefs/buckets.h"
-#include "libbcachefs/dirent.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/inode.h"
-#include "libbcachefs/replicas.h"
-#include "libbcachefs/super.h"
+
+#include "bcachefs.h"
+#include "alloc/buckets.h"
+#include "alloc/replicas.h"
+#include "btree/update.h"
+#include "fs/dirent.h"
+#include "fs/inode.h"
+#include "init/fs.h"
 
 static char *dev_t_to_path(dev_t dev)
 {

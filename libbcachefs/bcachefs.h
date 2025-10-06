@@ -215,44 +215,53 @@
 #include <linux/unicode.h>
 
 #include "bcachefs_format.h"
-#include "btree_journal_iter_types.h"
-#include "closure.h"
-#include "disk_accounting_types.h"
 #include "errcode.h"
-#include "fast_list.h"
-#include "fifo.h"
-#include "nocow_locking_types.h"
 #include "opts.h"
-#include "sb-errors_types.h"
-#include "seqmutex.h"
-#include "snapshot_types.h"
-#include "time_stats.h"
-#include "util.h"
 
-#include "alloc_types.h"
-#include "async_objs_types.h"
-#include "btree_gc_types.h"
-#include "btree_types.h"
-#include "btree_node_scan_types.h"
-#include "btree_write_buffer_types.h"
-#include "buckets_types.h"
-#include "buckets_waiting_for_journal_types.h"
-#include "clock_types.h"
-#include "disk_groups_types.h"
-#include "ec_types.h"
-#include "enumerated_ref_types.h"
-#include "journal_types.h"
-#include "keylist_types.h"
-#include "quota_types.h"
-#include "rebalance_types.h"
-#include "recovery_passes_types.h"
-#include "replicas_types.h"
-#include "sb-members_types.h"
-#include "subvolume_types.h"
-#include "super_types.h"
-#include "thread_with_file_types.h"
+#include "closure.h"
 
-#include "trace.h"
+#include "util/clock_types.h"
+#include "util/enumerated_ref_types.h"
+#include "util/fast_list.h"
+#include "util/fifo.h"
+#include "util/seqmutex.h"
+#include "util/time_stats.h"
+#include "util/thread_with_file_types.h"
+#include "util/util.h"
+
+#include "alloc/accounting_types.h"
+#include "alloc/buckets_types.h"
+#include "alloc/buckets_waiting_for_journal_types.h"
+#include "alloc/disk_groups_types.h"
+#include "alloc/replicas_types.h"
+#include "alloc/types.h"
+
+#include "btree/check_types.h"
+#include "btree/journal_overlay_types.h"
+#include "btree/types.h"
+#include "btree/node_scan_types.h"
+#include "btree/write_buffer_types.h"
+
+#include "data/ec_types.h"
+#include "data/keylist_types.h"
+#include "data/nocow_locking_types.h"
+#include "data/rebalance_types.h"
+
+#include "debug/async_objs_types.h"
+#include "debug/trace.h"
+
+#include "fs/quota_types.h"
+
+#include "init/passes_types.h"
+#include "init/dev_types.h"
+
+#include "journal/types.h"
+
+#include "sb/errors_types.h"
+#include "sb/members_types.h"
+
+#include "snapshots/snapshot_types.h"
+#include "snapshots/subvolume_types.h"
 
 #define count_event(_c, _name)	this_cpu_inc((_c)->counters[BCH_COUNTER_##_name])
 
@@ -1155,8 +1164,6 @@ static inline int __bch2_err_trace(struct bch_fs *c, int err)
 }
 
 #define bch_err_throw(_c, _err) __bch2_err_trace(_c, -BCH_ERR_##_err)
-
-extern struct wait_queue_head bch2_read_only_wait;
 
 static inline bool bch2_ro_ref_tryget(struct bch_fs *c)
 {

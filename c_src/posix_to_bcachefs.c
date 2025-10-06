@@ -5,14 +5,17 @@
 #include <linux/xattr.h>
 
 #include "posix_to_bcachefs.h"
-#include "libbcachefs/alloc_foreground.h"
-#include "libbcachefs/buckets.h"
-#include "libbcachefs/io_misc.h"
-#include "libbcachefs/io_read.h"
-#include "libbcachefs/io_write.h"
-#include "libbcachefs/namei.h"
-#include "libbcachefs/str_hash.h"
-#include "libbcachefs/xattr.h"
+
+#include "alloc/foreground.h"
+#include "alloc/buckets.h"
+
+#include "data/io_misc.h"
+#include "data/read.h"
+#include "data/write.h"
+
+#include "fs/namei.h"
+#include "fs/str_hash.h"
+#include "fs/xattr.h"
 
 struct hardlink {
 	struct rhash_head	hash;

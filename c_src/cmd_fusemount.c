@@ -12,23 +12,23 @@
 #include "libbcachefs.h"
 #include "tools-util.h"
 
-#include "libbcachefs/bcachefs.h"
-#include "libbcachefs/alloc_foreground.h"
-#include "libbcachefs/btree_iter.h"
-#include "libbcachefs/buckets.h"
-#include "libbcachefs/dirent.h"
-#include "libbcachefs/disk_accounting.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/error.h"
-#include "libbcachefs/namei.h"
-#include "libbcachefs/inode.h"
-#include "libbcachefs/io_read.h"
-#include "libbcachefs/io_write.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/super.h"
+#include "bcachefs.h"
 
-/* mode_to_type(): */
-#include "libbcachefs/fs.h"
+#include "alloc/accounting.h"
+#include "alloc/buckets.h"
+#include "alloc/foreground.h"
+
+#include "btree/iter.h"
+
+#include "data/read.h"
+#include "data/write.h"
+
+#include "fs/dirent.h"
+#include "fs/namei.h"
+#include "fs/inode.h"
+
+#include "init/error.h"
+#include "init/fs.h"
 
 #include <linux/dcache.h>
 

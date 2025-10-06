@@ -24,19 +24,27 @@
 #include "posix_to_bcachefs.h"
 #include "libbcachefs.h"
 #include "crypto.h"
-#include "libbcachefs/alloc_background.h"
-#include "libbcachefs/alloc_foreground.h"
-#include "libbcachefs/btree_update.h"
-#include "libbcachefs/data_update.h"
-#include "libbcachefs/disk_accounting.h"
-#include "libbcachefs/errcode.h"
-#include "libbcachefs/journal_reclaim.h"
-#include "libbcachefs/move.h"
-#include "libbcachefs/opts.h"
-#include "libbcachefs/super-io.h"
-#include "libbcachefs/util.h"
 
-#include "libbcachefs/darray.h"
+#include "bcachefs.h"
+
+#include "alloc/accounting.h"
+#include "alloc/background.h"
+#include "alloc/foreground.h"
+
+#include "btree/update.h"
+
+#include "data/move.h"
+#include "data/update.h"
+
+#include "init/dev.h"
+#include "init/fs.h"
+
+#include "journal/reclaim.h"
+
+#include "sb/io.h"
+
+#include "util/util.h"
+#include "util/darray.h"
 
 static u64 count_input_size(int dirfd)
 {

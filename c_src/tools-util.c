@@ -17,11 +17,12 @@
 #include <blkid.h>
 #include <uuid/uuid.h>
 
+#include "bcachefs_ioctl.h"
+#include "util/util.h"
+
 #include "libbcachefs.h"
-#include "libbcachefs/bcachefs_ioctl.h"
 #include "linux/sort.h"
 #include "tools-util.h"
-#include "libbcachefs/util.h"
 #include "src/rust_to_c.h"
 
 void die(const char *fmt, ...)

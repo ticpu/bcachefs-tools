@@ -39,7 +39,7 @@ CFLAGS+=-std=gnu11 -O2 -g -MMD -Wall -fPIC			\
 	-Wno-deprecated-declarations				\
 	-fno-strict-aliasing					\
 	-fno-delete-null-pointer-checks				\
-	-I. -Ic_src -Iinclude -Iraid				\
+	-I. -Ic_src -Ilibbcachefs -Iinclude -Iraid		\
 	-D_FILE_OFFSET_BITS=64					\
 	-D_GNU_SOURCE						\
 	-D_LGPL_SOURCE						\
@@ -192,10 +192,9 @@ install_dkms: dkms/dkms.conf
 	$(INSTALL) -m0644 -D dkms/Makefile		-t $(DESTDIR)$(DKMSDIR)
 	$(INSTALL) -m0644 -D dkms/dkms.conf		-t $(DESTDIR)$(DKMSDIR)
 	$(INSTALL) -m0644 -D libbcachefs/Makefile	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
-	$(INSTALL) -m0644 -D libbcachefs/*.[ch]		-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
-	$(INSTALL) -m0644 -D libbcachefs/vendor/*.[ch]	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/vendor
+	(cd libbcachefs; find -name '*.[ch]' -exec install -m0644 -D {} $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/{} \; )
 	sed -i "s|^#define TRACE_INCLUDE_PATH \\.\\./\\.\\./fs/bcachefs$$|#define TRACE_INCLUDE_PATH .|" \
-	  $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/trace.h
+	  $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/debug/trace.h
 
 .PHONY: clean
 clean:
@@ -227,13 +226,11 @@ cargo-update-msrv:
 update-bcachefs-sources:
 	git rm -rf --ignore-unmatch libbcachefs
 	mkdir -p libbcachefs/vendor
-	cp $(LINUX_DIR)/fs/bcachefs/*.[ch] libbcachefs/
-	cp $(LINUX_DIR)/fs/bcachefs/vendor/*.[ch] libbcachefs/vendor/
-	cp $(LINUX_DIR)/fs/bcachefs/Makefile libbcachefs/
+	cp -r $(LINUX_DIR)/fs/bcachefs/* libbcachefs/
 	git add libbcachefs/*.[ch]
-	git add libbcachefs/vendor/*.[ch]
+	git add libbcachefs/*/*.[ch]
 	git add libbcachefs/Makefile
-	git rm -f libbcachefs/mean_and_variance_test.c
+	git rm -f libbcachefs/util/mean_and_variance_test.c
 	cp $(LINUX_DIR)/include/linux/xxhash.h include/linux/
 	git add include/linux/xxhash.h
 	cp $(LINUX_DIR)/lib/xxhash.c linux/
