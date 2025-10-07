@@ -192,7 +192,7 @@ static void migrate_usage(void)
 	     "      --encrypted              Enable whole filesystem encryption (chacha20/poly1305)\n"
 	     "      --no_passphrase          Don't encrypt master encryption key\n"
 	     "  -F                           Force, even if metadata file already exists\n"
-	     "  -h                           Display this help and exit\n"
+	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
@@ -200,6 +200,7 @@ static void migrate_usage(void)
 static const struct option migrate_opts[] = {
 	{ "encrypted",		no_argument, NULL, 'e' },
 	{ "no_passphrase",	no_argument, NULL, 'p' },
+	{ "help",		no_argument, NULL, 'h' },
 	{ NULL }
 };
 

@@ -259,6 +259,7 @@ static int cmd_device_offline(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "force",		0, NULL, 'f' },
+		{ "help",		0, NULL, 'h' },
 		{ NULL }
 	};
 	int opt, flags = 0;
