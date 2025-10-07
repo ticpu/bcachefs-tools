@@ -440,6 +440,7 @@ static void list_journal_usage(void)
 	     "                                   Or entries not matching the range bbpos-bbpos\n"
 	     "  -v, --verbose                    Verbose mode\n"
 	     "  -h, --help                       Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 

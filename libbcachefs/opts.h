@@ -527,7 +527,7 @@ enum fsck_err_opts {
 	  OPT_DEVICE|OPT_RUNTIME,					\
 	  OPT_STR(bch2_member_states),					\
 	  BCH_MEMBER_STATE,		BCH_MEMBER_STATE_rw,		\
-	  "state",	"rw,ro,failed,spare")				\
+	  "state",	"Specifies device state")			\
 	x(bucket_size,			u32,				\
 	  OPT_DEVICE|OPT_HUMAN_READABLE|OPT_SB_FIELD_SECTORS,		\
 	  OPT_UINT(0, S64_MAX),						\

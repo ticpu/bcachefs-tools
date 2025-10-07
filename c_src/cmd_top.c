@@ -76,8 +76,9 @@ static void fs_top_usage(void)
 	     "Usage: bcachefs fs top [OPTION]... <mountpoint>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -h, --human-readable              Human readable units\n"
-	     "  -H, --help                        Display this help and exit\n"
+	     "  -h, --human-readable         Human readable units\n"
+	     "  -H, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 

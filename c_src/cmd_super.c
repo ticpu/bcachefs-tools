@@ -44,6 +44,7 @@ static void show_super_usage(void)
 	     "      --field-only=fiel)      print superblock section only, no header\n"
 	     "  -l, --layout                print superblock layout\n"
 	     "  -h, --help                  display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }
@@ -122,8 +123,8 @@ int cmd_show_super(int argc, char *argv[])
 	static const struct option longopts[] = {
 		{ "fields",			1, NULL, 'f' },
 		{ "field-only",			1, NULL, 'F' },
-		{ "layout",			0, NULL, 'l' },
-		{ "help",			0, NULL, 'h' },
+		{ "layout",			no_argument, NULL, 'l' },
+		{ "help",			no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	unsigned fields = 0;
@@ -387,6 +388,7 @@ static void recover_super_usage(void)
 	     "  -y, --yes                   Recover without prompting\n"
 	     "  -v, --verbose               Increase logging level\n"
 	     "  -h, --help                  display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }

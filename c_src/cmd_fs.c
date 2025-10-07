@@ -597,11 +597,12 @@ static void fs_usage_usage(void)
 	     "Usage: bcachefs fs usage [OPTION]... <mountpoint>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -f, --fields=FIELDS               List of accounting sections to print\n"
-	     "                                    replicas,btree,compression,rebalance_work,devices\n"
-	     "  -a                                Print all accounting fields\n"
-	     "  -h, --human-readable              Human readable units\n"
-	     "  -H, --help                        Display this help and exit\n"
+	     "  -f, --fields=FIELDS          List of accounting sections to print:\n"
+	     "                                 replicas, btree, compression, rebalance_work, devices\n"
+	     "  -a                           Print all accounting fields\n"
+	     "  -h, --human-readable         Human readable units\n"
+	     "  -H, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
@@ -664,8 +665,8 @@ int fs_usage(void)
 	     "Usage: bcachefs fs <CMD> [OPTIONS]\n"
 	     "\n"
 	     "Commands:\n"
-	     "  usage                   Display detailed filesystem usage\n"
-	     "  top                     Show runtime performance information\n"
+	     "  usage                        Display detailed filesystem usage\n"
+	     "  top                          Show runtime performance information\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	return 0;

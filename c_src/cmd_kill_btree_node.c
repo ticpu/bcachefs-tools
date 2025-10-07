@@ -20,9 +20,10 @@ static void kill_btree_node_usage(void)
 	     "Usage: bcachefs kill_btree_node [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -n, --node btree:level:idx            Node to kill\n"
-	     "  -d, --dev  dev                        Device index (default: kill all replicas)\n"
-	     "  -h                                    Display this help and exit\n"
+	     "  -n, --node btree:level:idx   Node to kill\n"
+	     "  -d, --dev  dev               Device index (default: kill all replicas)\n"
+	     "  -h, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 

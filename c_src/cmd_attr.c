@@ -126,9 +126,10 @@ static void setattr_usage(void)
 	     "Options:");
 
 	bch2_opts_usage(OPT_INODE);
-	puts("      --remove-all            Remove all file options\n"
-	     "                              To remove specific options, use: --option=-\n"
-	     "      -h                      Display this help and exit\n"
+	puts("      --remove-all             Remove all file options\n"
+	     "                               To remove specific options, use: --option=-\n"
+	     "  -h, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
@@ -138,6 +139,14 @@ int cmd_setattr(int argc, char *argv[])
 	bool remove_all = false;
 
 	for (i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--help") == 0) {
+			setattr_usage();
+			exit(EXIT_SUCCESS);
+		}
+		if (strcmp(argv[i], "-h") == 0) {
+			setattr_usage();
+			exit(EXIT_SUCCESS);
+		}
 		if (strcmp(argv[i], "--remove-all") == 0) {
 			remove_all = true;
 			bch_remove_arg_from_argv(&argc, argv, i);

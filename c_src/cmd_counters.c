@@ -11,6 +11,7 @@ static void reset_counters_usage(void)
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help                  display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }
@@ -18,7 +19,7 @@ static void reset_counters_usage(void)
 int cmd_reset_counters(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",			0, NULL, 'h' },
+		{ "help",			no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	int opt;
