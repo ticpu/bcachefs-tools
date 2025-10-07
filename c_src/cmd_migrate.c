@@ -188,11 +188,12 @@ static void migrate_usage(void)
 	     "Usage: bcachefs migrate [OPTION]...\n"
 	     "\n"
 	     "Options:\n"
-	     "  -f fs                  Root of filesystem to migrate(s)\n"
-	     "      --encrypted        Enable whole filesystem encryption (chacha20/poly1305)\n"
-	     "      --no_passphrase    Don't encrypt master encryption key\n"
-	     "  -F                     Force, even if metadata file already exists\n"
-	     "  -h                     Display this help and exit\n"
+	     "  -f fs                        Root of filesystem to migrate(s)\n"
+	     "      --encrypted              Enable whole filesystem encryption (chacha20/poly1305)\n"
+	     "      --no_passphrase          Don't encrypt master encryption key\n"
+	     "  -F                           Force, even if metadata file already exists\n"
+	     "  -h                           Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
@@ -383,9 +384,10 @@ static void migrate_superblock_usage(void)
 	     "Usage: bcachefs migrate-superblock [OPTION]...\n"
 	     "\n"
 	     "Options:\n"
-	     "  -d, --dev    device     Device to create superblock for\n"
-	     "  -o, --offset offset     Offset of existing superblock\n"
-	     "  -h, --help              Display this help and exit\n"
+	     "  -d, --dev    device          Device to create superblock for\n"
+	     "  -o, --offset offset          Offset of existing superblock\n"
+	     "  -h, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 

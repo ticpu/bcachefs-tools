@@ -11,6 +11,7 @@ static void reset_counters_usage(void)
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help                  display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }

@@ -77,6 +77,7 @@ static void strip_alloc_usage(void)
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help              Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 

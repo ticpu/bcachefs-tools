@@ -61,27 +61,27 @@ static void format_usage(void)
 
 	bch2_opts_usage(OPT_FORMAT|OPT_FS);
 
-	puts("      --replicas=#            Sets both data and metadata replicas\n"
-	     "      --encrypted             Enable whole filesystem encryption (chacha20/poly1305)\n"
-	     "      --passphrase_file=file  File containing passphrase used for encryption/decryption\n"
-	     "      --no_passphrase         Don't encrypt master encryption key\n"
+	puts("      --replicas=#             Sets both data and metadata replicas\n"
+	     "      --encrypted              Enable whole filesystem encryption (chacha20/poly1305)\n"
+	     "      --passphrase_file=file   File containing passphrase used for encryption/decryption\n"
+	     "      --no_passphrase          Don't encrypt master encryption key\n"
 	     "  -L, --fs_label=label\n"
 	     "  -U, --uuid=uuid\n"
 	     "      --superblock_size=size\n"
-	     "      --version=version       Create filesystem with specified on disk format version instead of the latest\n"
-	     "      --source=path           Initialize the bcachefs filesystem from this root directory\n"
+	     "      --version=version        Create filesystem with specified on disk format version instead of the latest\n"
+	     "      --source=path            Initialize the bcachefs filesystem from this root directory\n"
 	     "\n"
 	     "Device specific options:");
 
 	bch2_opts_usage(OPT_FORMAT|OPT_DEVICE);
 
-	puts("      --fs_size=size          Size of filesystem on device\n"
-	     "  -l, --label=label           Disk label\n"
+	puts("      --fs_size=size           Size of filesystem on device\n"
+	     "  -l, --label=label            Disk label\n"
 	     "\n"
 	     "  -f, --force\n"
-	     "  -q, --quiet                 Only print errors\n"
-	     "  -v, --verbose               Verbose filesystem initialization\n"
-	     "  -h, --help                  Display this help and exit\n"
+	     "  -q, --quiet                  Only print errors\n"
+	     "  -v, --verbose                Verbose filesystem initialization\n"
+	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Device specific options must come before corresponding devices, e.g.\n"
 	     "  bcachefs format --label cache /dev/sdb /dev/sdc\n"

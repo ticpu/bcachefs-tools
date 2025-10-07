@@ -869,7 +869,7 @@ struct bch_opts bch2_parse_opts(struct bch_opt_strs strs)
 void bch2_opts_usage(unsigned opt_types)
 {
 	const struct bch_option *opt;
-	unsigned i, c = 0, helpcol = 30;
+	unsigned i, c = 0, helpcol = 32;
 
 	for (opt = bch2_opt_table;
 	     opt < bch2_opt_table + bch2_opts_nr;
@@ -899,13 +899,14 @@ void bch2_opts_usage(unsigned opt_types)
 		if (opt->help) {
 			const char *l = opt->help;
 
-			if (c >= helpcol)
+			if (c > helpcol) {
 				newline(c);
+			}
 
 			while (1) {
 				const char *n = strchrnul(l, '\n');
 
-				while (c < helpcol) {
+				while (c < helpcol-1) {
 					putchar(' ');
 					c++;
 				}

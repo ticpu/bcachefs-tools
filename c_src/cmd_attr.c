@@ -126,9 +126,10 @@ static void setattr_usage(void)
 	     "Options:");
 
 	bch2_opts_usage(OPT_INODE);
-	puts("      --remove-all            Remove all file options\n"
-	     "                              To remove specific options, use: --option=-\n"
-	     "      -h                      Display this help and exit\n"
+	puts("      --remove-all             Remove all file options\n"
+	     "                               To remove specific options, use: --option=-\n"
+	     "  -h                           Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 

@@ -19,7 +19,8 @@ static void data_rereplicate_usage(void)
 	     "of any degraded data\n"
 	     "\n"
 	     "Options:\n"
-	     "  -h, --help                  display this help and exit\n"
+	     "  -h, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }
@@ -63,8 +64,9 @@ static void data_scrub_usage(void)
 	     "Check data for errors, fix from another replica if possible\n"
 	     "\n"
 	     "Options:\n"
-	     "  -m, --metadata              check metadata only\n"
-	     "  -h, --help                  display this help and exit\n"
+	     "  -m, --metadata               Check metadata only\n"
+	     "  -h, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }
@@ -271,10 +273,11 @@ static void data_job_usage(void)
 	     "job: one of scrub, rereplicate, migrate, rewrite_old_nodes, or drop_extra_replicas\n"
 	     "\n"
 	     "Options:\n"
-	     "  -b, --btree   btree              btree to operate on\n"
-	     "  -s, --start   inode:offset       start position\n"
-	     "  -e, --end     inode:offset       end position\n"
-	     "  -h, --help                       display this help and exit\n"
+	     "  -b, --btree btree            Btree to operate on\n"
+	     "  -s, --start inode:offset     Start position\n"
+	     "  -e, --end   inode:offset     End position\n"
+	     "  -h, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }
@@ -339,9 +342,9 @@ static int data_usage(void)
 	     "Usage: bcachefs data <CMD> [OPTIONS]\n"
 	     "\n"
 	     "Commands:\n"
-	     "  rereplicate                     Rereplicate degraded data\n"
-	     "  scrub                           Verify checksums and correct errors, if possible\n"
-	     "  job                             Kick off low level data jobs\n"
+	     "  rereplicate                  Rereplicate degraded data\n"
+	     "  scrub                        Verify checksums and correct errors, if possible\n"
+	     "  job                          Kick off low level data jobs\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	return 0;

@@ -35,6 +35,7 @@ static void set_option_usage(void)
 	bch2_opts_usage(OPT_MOUNT|OPT_RUNTIME);
 	puts("  -d, --dev-idx               index for device specific options\n"
 	     "  -h, --help                  display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }

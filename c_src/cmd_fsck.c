@@ -204,15 +204,16 @@ static void fsck_usage(void)
 	     "Usage: bcachefs fsck [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -p                      Automatic repair (no questions)\n"
-	     "  -n                      Don't repair, only check for errors\n"
-	     "  -y                      Assume \"yes\" to all questions\n"
-	     "  -f                      Force checking even if filesystem is marked clean\n"
-	     "  -r, --ratelimit_errors  Don't display more than 10 errors of a given type\n"
-	     "  -k, --kernel            Use the in-kernel fsck implementation\n"
+	     "  -p                           Automatic repair (no questions)\n"
+	     "  -n                           Don't repair, only check for errors\n"
+	     "  -y                           Assume \"yes\" to all questions\n"
+	     "  -f                           Force checking even if filesystem is marked clean\n"
+	     "  -r, --ratelimit_errors       Don't display more than 10 errors of a given type\n"
+	     "  -k, --kernel                 Use the in-kernel fsck implementation\n"
 	     "  -K, --no-kernel\n"
-	     "  -v                      Be verbose\n"
-	     "  -h, --help              Display this help and exit\n"
+	     "  -v                           Be verbose\n"
+	     "  -h, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 
@@ -383,9 +384,10 @@ static void recovery_pass_usage(void)
 	     "Currently only supports unmounted/offline filesystems\n"
 	     "\n"
 	     "Options:\n"
-	     "  -s, --set               Schedule a recovery pass in the superblock\n"
-	     "  -u, --unset             Deschedule a recovery pass\n"
-	     "  -h, --help              Display this help and exit\n"
+	     "  -s, --set                    Schedule a recovery pass in the superblock\n"
+	     "  -u, --unset                  Deschedule a recovery pass\n"
+	     "  -h, --help                   Display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 

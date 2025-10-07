@@ -44,6 +44,7 @@ static void show_super_usage(void)
 	     "      --field-only=fiel)      print superblock section only, no header\n"
 	     "  -l, --layout                print superblock layout\n"
 	     "  -h, --help                  display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }
@@ -387,6 +388,7 @@ static void recover_super_usage(void)
 	     "  -y, --yes                   Recover without prompting\n"
 	     "  -v, --verbose               Increase logging level\n"
 	     "  -h, --help                  display this help and exit\n"
+	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
 }
