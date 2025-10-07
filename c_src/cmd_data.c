@@ -340,6 +340,7 @@ static int data_usage(void)
 	     "\n"
 	     "Commands:\n"
 	     "  rereplicate                     Rereplicate degraded data\n"
+	     "  scrub                           Verify checksums and correct errors, if possible\n"
 	     "  job                             Kick off low level data jobs\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
