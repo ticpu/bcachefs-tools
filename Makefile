@@ -230,6 +230,7 @@ update-bcachefs-sources:
 	git add libbcachefs/*.[ch]
 	git add libbcachefs/*/*.[ch]
 	git add libbcachefs/Makefile
+	git add libbcachefs/Kconfig
 	git rm -f libbcachefs/util/mean_and_variance_test.c
 	cp $(LINUX_DIR)/include/linux/xxhash.h include/linux/
 	git add include/linux/xxhash.h

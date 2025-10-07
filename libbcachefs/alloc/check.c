@@ -28,10 +28,7 @@ static struct bkey_s_c bch2_get_key_or_hole(struct btree_iter *iter, struct bpos
 	if (k.k->type) {
 		return k;
 	} else {
-		struct btree_iter iter2;
-		struct bpos next;
-
-		bch2_trans_copy_iter(&iter2, iter);
+		CLASS(btree_iter_copy, iter2)(iter);
 
 		struct btree_path *path = btree_iter_path(iter->trans, iter);
 		if (!bpos_eq(path->l[0].b->key.k.p, SPOS_MAX))
@@ -44,13 +41,11 @@ static struct bkey_s_c bch2_get_key_or_hole(struct btree_iter *iter, struct bpos
 		 * open interval:
 		 */
 		k = bch2_btree_iter_peek_max(&iter2, end);
-		next = iter2.pos;
-		bch2_trans_iter_exit(&iter2);
-
-		BUG_ON(next.offset >= iter->pos.offset + U32_MAX);
-
 		if (bkey_err(k))
 			return k;
+
+		struct bpos next = iter2.pos;
+		BUG_ON(next.offset >= iter->pos.offset + U32_MAX);
 
 		bkey_init(hole);
 		hole->p = iter->pos;
@@ -695,7 +690,6 @@ int bch2_check_alloc_to_lru_refs(struct bch_fs *c)
 int bch2_dev_freespace_init(struct bch_fs *c, struct bch_dev *ca,
 			    u64 bucket_start, u64 bucket_end)
 {
-	struct btree_iter iter;
 	struct bkey_s_c k;
 	struct bkey hole;
 	struct bpos end = POS(ca->dev_idx, bucket_end);
@@ -706,7 +700,7 @@ int bch2_dev_freespace_init(struct bch_fs *c, struct bch_dev *ca,
 	BUG_ON(bucket_end > ca->mi.nbuckets);
 
 	CLASS(btree_trans, trans)(c);
-	bch2_trans_iter_init(trans, &iter, BTREE_ID_alloc,
+	CLASS(btree_iter, iter)(trans, BTREE_ID_alloc,
 		POS(ca->dev_idx, max_t(u64, ca->mi.first_bucket, bucket_start)),
 		BTREE_ITER_prefetch);
 	/*
@@ -774,8 +768,6 @@ bkey_err:
 		if (ret)
 			break;
 	}
-
-	bch2_trans_iter_exit(&iter);
 
 	if (ret < 0) {
 		bch_err_msg(ca, ret, "initializing free space");

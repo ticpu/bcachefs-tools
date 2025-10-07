@@ -288,7 +288,6 @@ int bch2_check_fix_ptrs(struct btree_trans *trans,
 	struct extent_ptr_decoded p = { 0 };
 	bool do_update = false;
 	CLASS(printbuf, buf)();
-	int ret = 0;
 
 	/* We don't yet do btree key updates correctly for when we're RW */
 	BUG_ON(test_bit(BCH_FS_rw, &c->flags));
@@ -297,10 +296,7 @@ int bch2_check_fix_ptrs(struct btree_trans *trans,
 		try(bch2_check_fix_ptr(trans, k, p, entry_c, &do_update));
 
 	if (do_update) {
-		struct bkey_i *new = bch2_bkey_make_mut_noupdate(trans, k);
-		ret = PTR_ERR_OR_ZERO(new);
-		if (ret)
-			return ret;
+		struct bkey_i *new = errptr_try(bch2_bkey_make_mut_noupdate(trans, k));
 
 		scoped_guard(rcu)
 			bch2_bkey_drop_ptrs(bkey_i_to_s(new), ptr, !bch2_dev_exists(c, ptr->dev));
@@ -381,25 +377,19 @@ found:
 		}
 
 		if (!(flags & BTREE_TRIGGER_is_root)) {
-			struct btree_iter iter;
-			bch2_trans_node_iter_init(trans, &iter, btree, new->k.p, 0, level,
-						  BTREE_ITER_intent|BTREE_ITER_all_snapshots);
-			ret =   bch2_btree_iter_traverse(&iter) ?:
-				bch2_trans_update(trans, &iter, new,
-						  BTREE_UPDATE_internal_snapshot_node|
-						  BTREE_TRIGGER_norun);
-			bch2_trans_iter_exit(&iter);
-			if (ret)
-				return ret;
+			CLASS(btree_node_iter, iter)(trans, btree, new->k.p, 0, level,
+						     BTREE_ITER_intent|BTREE_ITER_all_snapshots);
+
+			try(bch2_btree_iter_traverse(&iter));
+			try(bch2_trans_update(trans, &iter, new,
+					      BTREE_UPDATE_internal_snapshot_node|
+					      BTREE_TRIGGER_norun));
 
 			if (level)
 				bch2_btree_node_update_key_early(trans, btree, level - 1, k, new);
 		} else {
-			struct jset_entry *e = bch2_trans_jset_entry_alloc(trans,
-					       jset_u64s(new->k.u64s));
-			ret = PTR_ERR_OR_ZERO(e);
-			if (ret)
-				return ret;
+			struct jset_entry *e = errptr_try(bch2_trans_jset_entry_alloc(trans,
+							       jset_u64s(new->k.u64s)));
 
 			journal_entry_set(e,
 					  BCH_JSET_ENTRY_btree_root,
@@ -645,30 +635,27 @@ static int bch2_trigger_pointer(struct btree_trans *trans,
 	}
 
 	if (flags & BTREE_TRIGGER_transactional) {
-		struct bkey_i_alloc_v4 *a = bch2_trans_start_alloc_update(trans, bucket, 0);
-		return PTR_ERR_OR_ZERO(a) ?:
-			__mark_pointer(trans, ca, k, &p, *sectors, bp.v.data_type, &a->v, insert) ?:
-			bch2_bucket_backpointer_mod(trans, k, &bp, insert);
+		struct bkey_i_alloc_v4 *a = errptr_try(bch2_trans_start_alloc_update(trans, bucket, 0));
+		try(__mark_pointer(trans, ca, k, &p, *sectors, bp.v.data_type, &a->v, insert));
+		try(bch2_bucket_backpointer_mod(trans, k, &bp, insert));
 	}
 
 	if (flags & BTREE_TRIGGER_gc) {
 		struct bucket *g = gc_bucket(ca, bucket.offset);
 		if (bch2_fs_inconsistent_on(!g, c, "reference to invalid bucket on device %u\n  %s",
 					    p.ptr.dev,
-					    (bch2_bkey_val_to_text(&buf, c, k), buf.buf))) {
+					    (bch2_bkey_val_to_text(&buf, c, k), buf.buf)))
 			return bch_err_throw(c, trigger_pointer);
+
+		struct bch_alloc_v4 old, new;
+
+		scoped_guard(bucket_lock, g) {
+			old = new = bucket_m_to_alloc(*g);
+			try(__mark_pointer(trans, ca, k, &p, *sectors, bp.v.data_type, &new, insert));
+			alloc_to_bucket(g, new);
 		}
 
-		bucket_lock(g);
-		struct bch_alloc_v4 old = bucket_m_to_alloc(*g), new = old;
-		int ret = __mark_pointer(trans, ca, k, &p, *sectors, bp.v.data_type, &new, insert);
-		alloc_to_bucket(g, new);
-		bucket_unlock(g);
-
-		if (ret)
-			return ret;
-
-		return bch2_alloc_key_to_dev_counters(trans, ca, &old, &new, flags);
+		try(bch2_alloc_key_to_dev_counters(trans, ca, &old, &new, flags));
 	}
 
 	return 0;
@@ -930,7 +917,7 @@ static int __bch2_trans_mark_metadata_bucket(struct btree_trans *trans,
 				    unsigned sectors)
 {
 	struct bch_fs *c = trans->c;
-	struct btree_iter iter;
+	CLASS(btree_iter_uninit, iter)(trans);
 	int ret = 0;
 
 	struct bkey_i_alloc_v4 *a =
@@ -955,9 +942,7 @@ static int __bch2_trans_mark_metadata_bucket(struct btree_trans *trans,
 
 		/* Always print, this is always fatal */
 		bch2_print_str(c, KERN_ERR, buf.buf);
-		if (!ret)
-			ret = bch_err_throw(c, metadata_bucket_inconsistency);
-		goto err;
+		return ret ?: bch_err_throw(c, metadata_bucket_inconsistency);
 	}
 
 	if (a->v.data_type	!= type ||
@@ -966,8 +951,7 @@ static int __bch2_trans_mark_metadata_bucket(struct btree_trans *trans,
 		a->v.dirty_sectors	= sectors;
 		ret = bch2_trans_update(trans, &iter, &a->k_i, 0);
 	}
-err:
-	bch2_trans_iter_exit(&iter);
+
 	return ret;
 }
 
@@ -980,34 +964,33 @@ static int bch2_mark_metadata_bucket(struct btree_trans *trans, struct bch_dev *
 	struct bucket *g = gc_bucket(ca, b);
 	if (bch2_fs_inconsistent_on(!g, c, "reference to invalid bucket on device %u when marking metadata type %s",
 				    ca->dev_idx, bch2_data_type_str(data_type)))
-		goto err;
+		return bch_err_throw(c, metadata_bucket_inconsistency);
 
-	bucket_lock(g);
-	struct bch_alloc_v4 old = bucket_m_to_alloc(*g);
+	struct bch_alloc_v4 old, new;
 
-	if (bch2_fs_inconsistent_on(g->data_type &&
-			g->data_type != data_type, c,
-			"different types of data in same bucket: %s, %s",
-			bch2_data_type_str(g->data_type),
-			bch2_data_type_str(data_type)))
-		goto err_unlock;
+	scoped_guard(bucket_lock, g) {
+		old = bucket_m_to_alloc(*g);
 
-	if (bch2_fs_inconsistent_on((u64) g->dirty_sectors + sectors > ca->mi.bucket_size, c,
-			"bucket %u:%llu gen %u data type %s sector count overflow: %u + %u > bucket size",
-			ca->dev_idx, b, g->gen,
-			bch2_data_type_str(g->data_type ?: data_type),
-			g->dirty_sectors, sectors))
-		goto err_unlock;
+		if (bch2_fs_inconsistent_on(g->data_type &&
+				g->data_type != data_type, c,
+				"different types of data in same bucket: %s, %s",
+				bch2_data_type_str(g->data_type),
+				bch2_data_type_str(data_type)))
+			return bch_err_throw(c, metadata_bucket_inconsistency);
 
-	g->data_type = data_type;
-	g->dirty_sectors += sectors;
-	struct bch_alloc_v4 new = bucket_m_to_alloc(*g);
-	bucket_unlock(g);
+		if (bch2_fs_inconsistent_on((u64) g->dirty_sectors + sectors > ca->mi.bucket_size, c,
+				"bucket %u:%llu gen %u data type %s sector count overflow: %u + %u > bucket size",
+				ca->dev_idx, b, g->gen,
+				bch2_data_type_str(g->data_type ?: data_type),
+				g->dirty_sectors, sectors))
+			return bch_err_throw(c, metadata_bucket_inconsistency);
+
+		g->data_type = data_type;
+		g->dirty_sectors += sectors;
+		new = bucket_m_to_alloc(*g);
+	}
+
 	return bch2_alloc_key_to_dev_counters(trans, ca, &old, &new, flags);
-err_unlock:
-	bucket_unlock(g);
-err:
-	return bch_err_throw(c, metadata_bucket_inconsistency);
 }
 
 int bch2_trans_mark_metadata_bucket(struct btree_trans *trans,

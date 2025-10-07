@@ -493,7 +493,7 @@ static int test_snapshots(struct bch_fs *c, u64 nr)
 	if (snapids[0] > snapids[1])
 		swap(snapids[0], snapids[1]);
 
-	ret = test_snapshot_filter(c, snapids[0], snapids[1]);
+	int ret = test_snapshot_filter(c, snapids[0], snapids[1]);
 	bch_err_msg(c, ret, "from test_snapshot_filter");
 	return ret;
 }
@@ -611,10 +611,7 @@ static int __do_delete(struct btree_trans *trans, struct bpos pos)
 {
 	CLASS(btree_iter, iter)(trans, BTREE_ID_xattrs, pos,
 				BTREE_ITER_intent);
-	struct bkey_s_c k = bch2_btree_iter_peek_max(&iter, POS(0, U64_MAX));
-	int ret = bkey_err(k);
-	if (ret)
-		return ret;
+	struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_max(&iter, POS(0, U64_MAX)));
 
 	if (!k.k)
 		return 0;
@@ -629,10 +626,7 @@ static int rand_delete(struct bch_fs *c, u64 nr)
 	for (u64 i = 0; i < nr; i++) {
 		struct bpos pos = SPOS(0, test_rand(), U32_MAX);
 
-		try(commit_do(trans, NULL, NULL, 0,
-			      __do_delete(trans, pos)));
-		if (ret)
-			return ret;
+		try(commit_do(trans, NULL, NULL, 0, __do_delete(trans, pos)));
 	}
 
 	return 0;

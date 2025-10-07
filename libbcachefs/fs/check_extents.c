@@ -171,16 +171,14 @@ static int overlapping_extents_found(struct btree_trans *trans,
 {
 	struct bch_fs *c = trans->c;
 	CLASS(printbuf, buf)();
-	struct btree_iter iter2 = {};
-	struct bkey_s_c k1, k2;
-	int ret;
+	int ret = 0;
 
 	BUG_ON(bkey_le(pos1, bkey_start_pos(&pos2)));
 
 	CLASS(btree_iter, iter1)(trans, btree, pos1,
 				 BTREE_ITER_all_snapshots|
 				 BTREE_ITER_not_extents);
-	k1 = bkey_try(bch2_btree_iter_peek_max(&iter1, POS(pos1.inode, U64_MAX)));
+	struct bkey_s_c k1 = bkey_try(bch2_btree_iter_peek_max(&iter1, POS(pos1.inode, U64_MAX)));
 
 	prt_newline(&buf);
 	bch2_bkey_val_to_text(&buf, c, k1);
@@ -193,23 +191,16 @@ static int overlapping_extents_found(struct btree_trans *trans,
 
 		bch_err(c, "%s: error finding first overlapping extent when repairing, got%s",
 			__func__, buf.buf);
-		ret = bch_err_throw(c, internal_fsck_err);
-		goto err;
+		return bch_err_throw(c, internal_fsck_err);
 	}
 
-	bch2_trans_copy_iter(&iter2, &iter1);
+	CLASS(btree_iter_copy, iter2)(&iter1);
 
-	while (1) {
+	struct bkey_s_c k2;
+	do {
 		bch2_btree_iter_advance(&iter2);
-
-		k2 = bch2_btree_iter_peek_max(&iter2, POS(pos1.inode, U64_MAX));
-		ret = bkey_err(k2);
-		if (ret)
-			goto err;
-
-		if (bpos_ge(k2.k->p, pos2.p))
-			break;
-	}
+		k2 = bkey_try(bch2_btree_iter_peek_max(&iter2, POS(pos1.inode, U64_MAX)));
+	} while (bpos_lt(k2.k->p, pos2.p));
 
 	prt_newline(&buf);
 	bch2_bkey_val_to_text(&buf, c, k2);
@@ -218,8 +209,7 @@ static int overlapping_extents_found(struct btree_trans *trans,
 	    pos2.size != k2.k->size) {
 		bch_err(c, "%s: error finding seconding overlapping extent when repairing%s",
 			__func__, buf.buf);
-		ret = bch_err_throw(c, internal_fsck_err);
-		goto err;
+		return bch_err_throw(c, internal_fsck_err);
 	}
 
 	prt_printf(&buf, "\noverwriting %s extent",
@@ -246,7 +236,7 @@ static int overlapping_extents_found(struct btree_trans *trans,
 		bch_info(c, "repair ret %s", bch2_err_str(ret));
 
 		if (ret)
-			goto err;
+			return ret;
 
 		*fixed = true;
 
@@ -270,8 +260,6 @@ static int overlapping_extents_found(struct btree_trans *trans,
 		}
 	}
 fsck_err:
-err:
-	bch2_trans_iter_exit(&iter2);
 	return ret;
 }
 
@@ -283,7 +271,6 @@ static int check_overlapping_extents(struct btree_trans *trans,
 			      bool *fixed)
 {
 	struct bch_fs *c = trans->c;
-	int ret = 0;
 
 	/* transaction restart, running again */
 	if (bpos_eq(extent_ends->last_pos, k.k->p))
@@ -301,19 +288,16 @@ static int check_overlapping_extents(struct btree_trans *trans,
 				  i->snapshot, &i->seen))
 			continue;
 
-		ret = overlapping_extents_found(trans, iter->btree_id,
-						SPOS(iter->pos.inode,
-						     i->offset,
-						     i->snapshot),
-						&i->seen,
-						*k.k, fixed, i);
-		if (ret)
-			goto err;
+		try(overlapping_extents_found(trans, iter->btree_id,
+					      SPOS(iter->pos.inode,
+						   i->offset,
+						   i->snapshot),
+					      &i->seen,
+					      *k.k, fixed, i));
 	}
 
 	extent_ends->last_pos = k.k->p;
-err:
-	return ret;
+	return 0;
 }
 
 static int check_extent_overbig(struct btree_trans *trans, struct btree_iter *iter,
@@ -350,36 +334,21 @@ static int check_extent(struct btree_trans *trans, struct btree_iter *iter,
 	int ret = 0;
 
 	ret = bch2_check_key_has_snapshot(trans, iter, k);
-	if (ret) {
-		ret = ret < 0 ? ret : 0;
-		goto out;
-	}
-
-	if (inode->last_pos.inode != k.k->p.inode && inode->have_inodes) {
-		ret = check_i_sectors(trans, inode);
-		if (ret)
-			goto err;
-	}
-
-	ret = bch2_snapshots_seen_update(c, s, iter->btree_id, k.k->p);
 	if (ret)
-		goto err;
+		return ret < 0 ? ret : 0;
 
-	struct inode_walker_entry *extent_i = bch2_walk_inode(trans, inode, k);
-	ret = PTR_ERR_OR_ZERO(extent_i);
-	if (ret)
-		goto err;
+	if (inode->last_pos.inode != k.k->p.inode && inode->have_inodes)
+		try(check_i_sectors(trans, inode));
 
-	ret = bch2_check_key_has_inode(trans, iter, inode, extent_i, k);
-	if (ret)
-		goto err;
+	try(bch2_snapshots_seen_update(c, s, iter->btree_id, k.k->p));
 
-	if (k.k->type != KEY_TYPE_whiteout) {
-		ret = check_overlapping_extents(trans, s, extent_ends, k, iter,
-						&inode->recalculate_sums);
-		if (ret)
-			goto err;
-	}
+	struct inode_walker_entry *extent_i = errptr_try(bch2_walk_inode(trans, inode, k));
+
+	try(bch2_check_key_has_inode(trans, iter, inode, extent_i, k));
+
+	if (k.k->type != KEY_TYPE_whiteout)
+		try(check_overlapping_extents(trans, s, extent_ends, k, iter,
+					      &inode->recalculate_sums));
 
 	if (!bkey_extent_whiteout(k.k)) {
 		/*
@@ -402,14 +371,12 @@ static int check_extent(struct btree_trans *trans, struct btree_iter *iter,
 					"extent type past end of inode %llu:%u, i_size %llu\n%s",
 					i->inode.bi_inum, i->inode.bi_snapshot, i->inode.bi_size,
 					(bch2_bkey_val_to_text(&buf, c, k), buf.buf))) {
-				ret =   snapshots_seen_add_inorder(c, s, i->inode.bi_snapshot) ?:
-					bch2_fpunch_snapshot(trans,
-							     SPOS(i->inode.bi_inum,
-								  last_block,
-								  i->inode.bi_snapshot),
-							     POS(i->inode.bi_inum, U64_MAX));
-				if (ret)
-					goto err;
+				try(snapshots_seen_add_inorder(c, s, i->inode.bi_snapshot));
+				try(bch2_fpunch_snapshot(trans,
+							 SPOS(i->inode.bi_inum,
+							      last_block,
+							      i->inode.bi_snapshot),
+							 POS(i->inode.bi_inum, U64_MAX)));
 
 				iter->k.type = KEY_TYPE_whiteout;
 				break;
@@ -417,14 +384,10 @@ static int check_extent(struct btree_trans *trans, struct btree_iter *iter,
 		}
 	}
 
-	ret = check_extent_overbig(trans, iter, k) ?:
-		bch2_bkey_drop_stale_ptrs(trans, iter, k);
-	if (ret)
-		goto err;
+	try(check_extent_overbig(trans, iter, k));
+	try(bch2_bkey_drop_stale_ptrs(trans, iter, k));
 
-	ret = bch2_trans_commit(trans, res, NULL, BCH_TRANS_COMMIT_no_enospc);
-	if (ret)
-		goto err;
+	try(bch2_trans_commit(trans, res, NULL, BCH_TRANS_COMMIT_no_enospc));
 
 	if (bkey_extent_is_allocation(k.k)) {
 		for (struct inode_walker_entry *i = extent_i ?: &darray_last(inode->inodes);
@@ -439,15 +402,9 @@ static int check_extent(struct btree_trans *trans, struct btree_iter *iter,
 		}
 	}
 
-	if (k.k->type != KEY_TYPE_whiteout) {
-		ret = extent_ends_at(c, extent_ends, s, k);
-		if (ret)
-			goto err;
-	}
-out:
-err:
+	if (k.k->type != KEY_TYPE_whiteout)
+		try(extent_ends_at(c, extent_ends, s, k));
 fsck_err:
-	bch_err_fn(c, ret);
 	return ret;
 }
 

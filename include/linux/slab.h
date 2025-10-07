@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/log2.h>
 #include <linux/overflow.h>
@@ -112,10 +113,14 @@ static inline void *kmalloc_array(size_t n, size_t size, gfp_t flags)
 #define kfree(p)			free((void *) p)
 #define kzfree(p)			free((void *) p)
 
+DEFINE_FREE(kfree, void *, if (!IS_ERR_OR_NULL(_T)) kfree(_T))
+
 #define kvmalloc(size, flags)		kmalloc(size, flags)
 #define kvmalloc_noprof(size, flags)	kmalloc(size, flags)
 #define kvzalloc(size, flags)		kzalloc(size, flags)
 #define kvfree(p)			kfree(p)
+
+DEFINE_FREE(kvfree, void *, if (!IS_ERR_OR_NULL(_T)) kvfree(_T))
 
 static inline struct page *alloc_pages_noprof(gfp_t flags, unsigned int order)
 {

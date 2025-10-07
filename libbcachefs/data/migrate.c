@@ -105,16 +105,13 @@ static int bch2_dev_btree_drop_key(struct btree_trans *trans,
 				   struct bkey_buf *last_flushed,
 				   unsigned flags, struct printbuf *err)
 {
-	struct btree_iter iter;
+	CLASS(btree_iter_uninit, iter)(trans);
 	struct btree *b = bch2_backpointer_get_node(trans, bp, &iter, last_flushed);
 	int ret = PTR_ERR_OR_ZERO(b);
 	if (ret)
 		return ret == -BCH_ERR_backpointer_to_overwritten_btree_node ? 0 : ret;
 
-	ret = drop_btree_ptrs(trans, &iter, b, dev_idx, flags, err);
-
-	bch2_trans_iter_exit(&iter);
-	return ret;
+	return drop_btree_ptrs(trans, &iter, b, dev_idx, flags, err);
 }
 
 static int bch2_dev_usrdata_drop(struct bch_fs *c,
@@ -151,24 +148,20 @@ static int bch2_dev_metadata_drop(struct bch_fs *c,
 				  unsigned dev_idx,
 				  unsigned flags, struct printbuf *err)
 {
-	struct btree_iter iter;
-	struct closure cl;
 	struct btree *b;
-	struct bkey_buf k;
-	unsigned id;
-	int ret;
+	int ret = 0;
 
 	/* don't handle this yet: */
 	if (flags & BCH_FORCE_IF_METADATA_LOST)
 		return bch_err_throw(c, remove_with_metadata_missing_unimplemented);
 
-	CLASS(btree_trans, trans)(c);
+	struct bkey_buf k;
 	bch2_bkey_buf_init(&k);
-	closure_init_stack(&cl);
 
-	for (id = 0; id < btree_id_nr_alive(c); id++) {
-		bch2_trans_node_iter_init(trans, &iter, id, POS_MIN, 0, 0,
-					  BTREE_ITER_prefetch);
+	CLASS(btree_trans, trans)(c);
+
+	for (unsigned id = 0; id < btree_id_nr_alive(c) && !ret; id++) {
+		CLASS(btree_node_iter, iter)(trans, id, POS_MIN, 0, 0, BTREE_ITER_prefetch);
 retry:
 		ret = 0;
 		while (bch2_trans_begin(trans),
@@ -180,11 +173,6 @@ retry:
 				goto next;
 
 			ret = drop_btree_ptrs(trans, &iter, b, dev_idx, flags, err);
-			if (bch2_err_matches(ret, BCH_ERR_transaction_restart)) {
-				ret = 0;
-				continue;
-			}
-
 			if (ret)
 				break;
 next:
@@ -192,16 +180,9 @@ next:
 		}
 		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 			goto retry;
-
-		bch2_trans_iter_exit(&iter);
-
-		if (ret)
-			goto err;
 	}
 
 	bch2_btree_interior_updates_flush(c);
-	ret = 0;
-err:
 	bch2_bkey_buf_exit(&k, c);
 
 	BUG_ON(bch2_err_matches(ret, BCH_ERR_transaction_restart));
@@ -213,7 +194,7 @@ static int data_drop_bp(struct btree_trans *trans, unsigned dev_idx,
 			struct bkey_s_c_backpointer bp, struct bkey_buf *last_flushed,
 			unsigned flags, struct printbuf *err)
 {
-	struct btree_iter iter;
+	CLASS(btree_iter_uninit, iter)(trans);
 	struct bkey_s_c k = bch2_backpointer_get_key(trans, bp, &iter, BTREE_ITER_intent,
 						     last_flushed);
 	int ret = bkey_err(k);
@@ -223,7 +204,7 @@ static int data_drop_bp(struct btree_trans *trans, unsigned dev_idx,
 		return ret;
 
 	if (!k.k || !bch2_bkey_has_device_c(k, dev_idx))
-		goto out;
+		return 0;
 
 	/*
 	 * XXX: pass flags arg to invalidate_stripe_to_dev and handle it
@@ -231,14 +212,11 @@ static int data_drop_bp(struct btree_trans *trans, unsigned dev_idx,
 	 */
 
 	if (bkey_is_btree_ptr(k.k))
-		ret = bch2_dev_btree_drop_key(trans, bp, dev_idx, last_flushed, flags, err);
+		return bch2_dev_btree_drop_key(trans, bp, dev_idx, last_flushed, flags, err);
 	else if (k.k->type == KEY_TYPE_stripe)
-		ret = bch2_invalidate_stripe_to_dev(trans, &iter, k, dev_idx, flags, err);
+		return bch2_invalidate_stripe_to_dev(trans, &iter, k, dev_idx, flags, err);
 	else
-		ret = bch2_dev_usrdata_drop_key(trans, &iter, k, dev_idx, flags, err);
-out:
-	bch2_trans_iter_exit(&iter);
-	return ret;
+		return bch2_dev_usrdata_drop_key(trans, &iter, k, dev_idx, flags, err);
 }
 
 int bch2_dev_data_drop_by_backpointers(struct bch_fs *c, unsigned dev_idx, unsigned flags,
