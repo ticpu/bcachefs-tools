@@ -257,7 +257,7 @@ jobs:
           root_dir: $APTLY_ROOT
           gpg_disable_verify: false
           EOT
-          if [ "${{ steps.gpg.conclusion }}" == "skipped" ]; then
+          if [ "${{ steps.gpg.conclusion }}" = "skipped" ]; then
           tee -a ~/.aptly.conf <<EOT
           gpg_disable_sign: true
           EOT
@@ -268,6 +268,7 @@ jobs:
           fi
           if [ "${{ (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master') && 'true' || 'false' }}" = "true" ]; then
           export GPG_SIGNING_SUBKEY_FINGERPRINT=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          mkdir -p "$PUBLIC_ROOT/.footer"
           envsubst < "${{ github.workspace }}/bcachefs-tools/doc/apt.bcachefs.org-README.md" | \
             pandoc --from=markdown --to=html --output="$PUBLIC_ROOT/.footer/README"
           fi
@@ -278,14 +279,14 @@ jobs:
           REPO_NAME="$DIST-${{ env.SUITE }}"
           REPO_SUITE="bcachefs-tools-${{ env.SUITE }}"
           SNAPSHOT_NAME="$REPO_NAME-$SNAPSHOT_DATE"
-          aptly repo show $REPO_NAME &>/dev/null || \
+          (aptly repo show $REPO_NAME > /dev/null 2>&1) || \
             aptly repo create -distribution=$REPO_SUITE -component=main $REPO_NAME
           aptly repo include -repo=$REPO_NAME \
             "${{ github.workspace }}/incoming/src-artifacts" \
             "${{ github.workspace }}/incoming/bin-artifacts/$DIST" \
           ;
           aptly snapshot create $SNAPSHOT_NAME from repo $REPO_NAME
-          aptly publish show $REPO_SUITE $DIST &>/dev/null || \
+          (aptly publish show $REPO_SUITE $DIST > /dev/null 2>&1) || \
             aptly publish snapshot -acquire-by-hash -origin="apt.bcachefs.org" -label="apt.bcachefs.org Packages" $SNAPSHOT_NAME $DIST
           aptly publish switch $REPO_SUITE $DIST $SNAPSHOT_NAME
           echo '::endgroup::'
