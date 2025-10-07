@@ -19,7 +19,7 @@ static void reset_counters_usage(void)
 int cmd_reset_counters(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",			0, NULL, 'h' },
+		{ "help",			no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	int opt;

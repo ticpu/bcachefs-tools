@@ -28,7 +28,7 @@ static void data_rereplicate_usage(void)
 static int cmd_data_rereplicate(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",		0, NULL, 'h' },
+		{ "help",		no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	int opt;

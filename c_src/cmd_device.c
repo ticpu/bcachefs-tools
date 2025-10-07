@@ -151,10 +151,10 @@ static void device_remove_usage(void)
 static int cmd_device_remove(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "by-id",              0, NULL, 'i' },
-		{ "force",		0, NULL, 'f' },
-		{ "force-metadata",	0, NULL, 'F' },
-		{ "help",		0, NULL, 'h' },
+		{ "by-id",              no_argument, NULL, 'i' },
+		{ "force",		no_argument, NULL, 'f' },
+		{ "force-metadata",	no_argument, NULL, 'F' },
+		{ "help",		no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	struct bchfs_handle fs;
@@ -217,7 +217,7 @@ static void device_online_usage(void)
 static int cmd_device_online(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",		0, NULL, 'h' },
+		{ "help",		no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	int opt;
@@ -258,8 +258,8 @@ static void device_offline_usage(void)
 static int cmd_device_offline(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "force",		0, NULL, 'f' },
-		{ "help",		0, NULL, 'h' },
+		{ "force",		no_argument, NULL, 'f' },
+		{ "help",		no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	int opt, flags = 0;
@@ -476,7 +476,7 @@ static void device_resize_usage(void)
 static int cmd_device_resize(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",			0, NULL, 'h' },
+		{ "help",			no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	u64 size;
@@ -584,7 +584,7 @@ static void device_resize_journal_usage(void)
 static int cmd_device_resize_journal(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",			0, NULL, 'h' },
+		{ "help",			no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	u64 size;

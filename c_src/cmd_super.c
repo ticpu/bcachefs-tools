@@ -123,8 +123,8 @@ int cmd_show_super(int argc, char *argv[])
 	static const struct option longopts[] = {
 		{ "fields",			1, NULL, 'f' },
 		{ "field-only",			1, NULL, 'F' },
-		{ "layout",			0, NULL, 'l' },
-		{ "help",			0, NULL, 'h' },
+		{ "layout",			no_argument, NULL, 'l' },
+		{ "help",			no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	unsigned fields = 0;
