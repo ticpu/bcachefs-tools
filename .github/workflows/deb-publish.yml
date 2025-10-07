@@ -108,13 +108,13 @@ jobs:
           apt install eatmydata
           eatmydata apt full-upgrade
           eatmydata apt install \
+            aptly \
             devscripts \
             gettext-base \
             git \
             gnupg \
             openssh-client \
             pandoc \
-            reprepro \
             sshfs \
             tar \
             xz-utils \
@@ -231,10 +231,11 @@ jobs:
             echo '::endgroup::'                                                                        \
           "
       - name: Create and populate repos
-        timeout-minutes: 60
+        timeout-minutes: 10
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
+          SNAPSHOT_DATE=`date -u +%Y%m%d%H%M%S`
           MOUNTPOINT="${{ github.workspace }}/remotefs"
           mkdir -p "$MOUNTPOINT"
           if [ -n "${{ secrets.SSH_HOST }}" ]; then
@@ -249,50 +250,44 @@ jobs:
           gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
           sshfs ${{ secrets.SSH_HOST }}/uploads "$MOUNTPOINT"
           fi
-          REPO_ROOT="$MOUNTPOINT/public_html"
-          mkdir -p "$REPO_ROOT"
+          rm -f ~/.aptly.conf
+          APTLY_ROOT="$MOUNTPOINT/aptly"
+          PUBLIC_ROOT="$APTLY_ROOT/public"
+          tee -a ~/.aptly.conf <<EOT
+          root_dir: $APTLY_ROOT
+          gpg_disable_verify: false
+          EOT
+          if [ "${{ steps.gpg.conclusion }}" == "skipped" ]; then
+          tee -a ~/.aptly.conf <<EOT
+          gpg_disable_sign: true
+          EOT
+          fi
+          mkdir -p "$PUBLIC_ROOT"
           if [ "${{ steps.gpg.conclusion }}" != "skipped" ]; then
-          cp -f /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc "$REPO_ROOT"
+          cp -f /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc "$PUBLIC_ROOT"
           fi
           if [ "${{ (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master') && 'true' || 'false' }}" = "true" ]; then
           export GPG_SIGNING_SUBKEY_FINGERPRINT=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           envsubst < "${{ github.workspace }}/bcachefs-tools/doc/apt.bcachefs.org-README.md" | \
-            pandoc --from=markdown --to=html --output="$REPO_ROOT/.footer/README"
+            pandoc --from=markdown --to=html --output="$PUBLIC_ROOT/.footer/README"
           fi
           cd "${{ github.workspace }}/incoming/bin-artifacts"
           for DIST in *
           do
           echo "::group::Distribution $DIST"
-          SRCDIR="${{ github.workspace }}/incoming/bin-artifacts/$DIST"
-          cd "$SRCDIR"
-          REPO="$REPO_ROOT/$DIST"
-          mkdir -p "$REPO/conf/distributions"
-          tee "$REPO/conf/distributions/${{ env.SUITE }}.conf" > /dev/null <<EOT
-          Codename: bcachefs-tools-${{ env.SUITE }}
-          Architectures: source amd64 arm64 ppc64el
-          Components: main
-          Contents:
-          Origin: apt.bcachefs.org
-          Label: apt.bcachefs.org Packages
-          Description: bcachefs APT repository
-          SignWith: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
-          Signed-By: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
-          Uploaders: uploaders
-          EOT
-          tee "$REPO/conf/uploaders" > /dev/null <<EOT
-          allow * by key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
-          EOT
-          tee "$REPO/conf/options" > /dev/null <<EOT
-          verbose
-          ignore longkeyid
-          EOT
-          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-${{ env.SUITE }} "${{ github.workspace }}/incoming/src-artifacts/"*.changes
-          for f in "$SRCDIR"/*/*.changes
-          do
-          reprepro --basedir "$REPO" --ignore=wrongdistribution include bcachefs-tools-${{ env.SUITE }} $f
-          done
-          reprepro --basedir "$REPO" createsymlinks
-          reprepro --basedir "$REPO" export
+          REPO_NAME="$DIST-${{ env.SUITE }}"
+          REPO_SUITE="bcachefs-tools-${{ env.SUITE }}"
+          SNAPSHOT_NAME="$REPO_NAME-$SNAPSHOT_DATE"
+          aptly repo show $REPO_NAME &>/dev/null || \
+            aptly repo create -distribution=$REPO_SUITE -component=main $REPO_NAME
+          aptly repo include -repo=$REPO_NAME \
+            "${{ github.workspace }}/incoming/src-artifacts" \
+            "${{ github.workspace }}/incoming/bin-artifacts/$DIST" \
+          ;
+          aptly snapshot create $SNAPSHOT_NAME from repo $REPO_NAME
+          aptly publish show $REPO_SUITE $DIST &>/dev/null || \
+            aptly publish snapshot -acquire-by-hash -origin="apt.bcachefs.org" -label="apt.bcachefs.org Packages" $SNAPSHOT_NAME $DIST
+          aptly publish switch $REPO_SUITE $DIST $SNAPSHOT_NAME
           echo '::endgroup::'
           done
           umount "$MOUNTPOINT" || /bin/true
