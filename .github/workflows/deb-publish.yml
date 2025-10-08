@@ -236,7 +236,7 @@ jobs:
         run: |
           set -xe
           SNAPSHOT_DATE=`date -u +%Y%m%d%H%M%S`
-          MOUNTPOINT="${{ github.workspace }}/remotefs"
+          MOUNTPOINT="/home/aptbcachefsorg/uploads"
           mkdir -p "$MOUNTPOINT"
           if [ -n "${{ secrets.SSH_HOST }}" ]; then
           mkdir -p ~/.ssh
@@ -256,6 +256,10 @@ jobs:
           tee -a ~/.aptly.conf <<EOT
           root_dir: $APTLY_ROOT
           gpg_disable_verify: false
+          filesystem_publish_endpoints:
+              public:
+                  root_dir: $APTLY_ROOT/public
+                  link_method: symlink
           EOT
           if [ "${{ steps.gpg.conclusion }}" = "skipped" ]; then
           tee -a ~/.aptly.conf <<EOT
@@ -287,8 +291,8 @@ jobs:
           ;
           aptly snapshot create $SNAPSHOT_NAME from repo $REPO_NAME
           (aptly publish show $REPO_SUITE $DIST > /dev/null 2>&1) || \
-            aptly publish snapshot -acquire-by-hash -origin="apt.bcachefs.org" -label="apt.bcachefs.org Packages" $SNAPSHOT_NAME $DIST
-          aptly publish switch $REPO_SUITE $DIST $SNAPSHOT_NAME
+            aptly publish snapshot -acquire-by-hash -origin="apt.bcachefs.org" -label="apt.bcachefs.org Packages" $SNAPSHOT_NAME filesystem:public:$DIST
+          aptly publish switch $REPO_SUITE filesystem:public:$DIST $SNAPSHOT_NAME
           echo '::endgroup::'
           done
           umount "$MOUNTPOINT" || /bin/true
