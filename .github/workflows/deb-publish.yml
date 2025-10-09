@@ -267,6 +267,7 @@ jobs:
           EOT
           fi
           mkdir -p "$PUBLIC_ROOT"
+          ln -sr "$PUBLIC_ROOT" "$PUBLIC_ROOT"/dists || /bin/true
           if [ "${{ steps.gpg.conclusion }}" != "skipped" ]; then
           cp -f /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc "$PUBLIC_ROOT"
           fi
@@ -275,6 +276,11 @@ jobs:
           mkdir -p "$PUBLIC_ROOT/.footer"
           envsubst < "${{ github.workspace }}/bcachefs-tools/doc/apt.bcachefs.org-README.md" | \
             pandoc --from=markdown --to=html --output="$PUBLIC_ROOT/.footer/README"
+          tee "$PUBLIC_ROOT/.footer/README.html" <<EOT
+          <!--# block name="empty" --><!--# endblock -->
+          <!--# include file="README" stub="empty" -->
+          </body></html>
+          EOT
           fi
           cd "${{ github.workspace }}/incoming/bin-artifacts"
           for DIST in *
@@ -285,7 +291,7 @@ jobs:
           SNAPSHOT_NAME="$REPO_NAME-$SNAPSHOT_DATE"
           (aptly repo show $REPO_NAME > /dev/null 2>&1) || \
             aptly repo create -distribution=$REPO_SUITE -component=main $REPO_NAME
-          aptly repo include -repo=$REPO_NAME \
+          aptly repo include -repo=$REPO_NAME -no-remove-files \
             "${{ github.workspace }}/incoming/src-artifacts" \
             "${{ github.workspace }}/incoming/bin-artifacts/$DIST" \
           ;
