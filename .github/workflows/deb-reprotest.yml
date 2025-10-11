@@ -23,6 +23,8 @@ on:
 jobs:
   linux:
     runs-on: ${{ inputs.runs-on }}
+    env:
+      CONTAINER_DISTRO: trixie
     permissions:
       id-token: write
       contents: read
@@ -67,7 +69,7 @@ jobs:
         shell: sudo eatmydata sh "{0}"
         run: |
           set -xe
-          export IMAGE=debian:unstable-slim
+          export IMAGE=debian:${{ env.CONTAINER_DISTRO }}-slim
           podman pull ${IMAGE}
           podman run \
             --name container \
@@ -109,7 +111,9 @@ jobs:
           rm -rf /var/lib/apt/lists/*
           rm -rf /etc/apt/sources.list*
           tee /etc/apt/sources.list > /dev/null <<EOT
-          deb http://deb.debian.org/debian unstable main
+          deb http://deb.debian.org/debian ${{ env.CONTAINER_DISTRO }} main
+          deb http://deb.debian.org/debian ${{ env.CONTAINER_DISTRO }}-updates main
+          deb http://deb.debian.org/debian ${{ env.CONTAINER_DISTRO }}-backports main
           EOT
           apt update
           apt install eatmydata
