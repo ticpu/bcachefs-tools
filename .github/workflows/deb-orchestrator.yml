@@ -26,6 +26,22 @@ jobs:
     secrets:
       GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
       GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+  obs:
+    needs: source-only
+    if: github.event_name != 'pull_request' && (github.ref_type == 'tag' || (github.ref_type == 'branch' && github.ref_name == 'master'))
+    uses: ./.github/workflows/obs.yml
+    with:
+      deb-src-artifact-id: ${{ needs.source-only.outputs.deb-src-artifact-id }}
+      runs-on: "ubuntu-24.04"
+      arch: amd64
+      dist-name: debian
+      dist-version: unstable
+    secrets:
+      GPG_SECRET_SUBKEYS: ${{ secrets.GPG_SECRET_SUBKEYS }}
+      GPG_SIGNING_SUBKEY_FINGERPRINT: ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+      GPG_AUTH_SUBKEY_KEYGRIP: ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }}
+      OBS_SNAPSHOT_REPO_URL: ${{ secrets.OBS_SNAPSHOT_REPO_URL }}
+      OBS_RELEASE_REPO_URL: ${{ secrets.OBS_RELEASE_REPO_URL }}
   buildd:
     needs: source-only
     permissions:

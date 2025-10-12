@@ -17,9 +17,11 @@
 
 Name:           bcachefs-tools
 # define with i.e. --define '_version 1.0'
-Version:        %{_version}
+Version:        0%{?_version}
 Release:        0%{?dist}
 Summary:        Userspace tools for bcachefs
+
+%global MSRV 1.77
 
 # --- rust ---
 # Apache-2.0
@@ -36,24 +38,36 @@ Summary:        Userspace tools for bcachefs
 # BSD-3-Clause
 License:        GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-only AND BSD-3-Clause AND (Apache-2.0 AND (Apache-2.0 OR MIT) AND (Apache-2.0 with LLVM-exception OR Apache-2.0 OR MIT) AND MIT AND MPL-2.0 AND (Unlicense OR MIT))
 URL:            https://bcachefs.org/
+%if 0%{?_version} == 0
+Source:         bcachefs-tools_%{version}.tar.xz
+Source1:        bcachefs-tools_%{version}.tar.xz.sig
+Source2:        apt.bcachefs.org.keyring
+Source3:        cargo.config
+Source99:       %{dkmsname}.rpmlintrc
+%else
 Source:         https://evilpiepirate.org/%{name}/%{name}-vendored-%{version}.tar.zst
+%endif
 
 BuildRequires:  findutils
 BuildRequires:  gcc
 BuildRequires:  jq
 BuildRequires:  make
 BuildRequires:  tar
-BuildRequires:  zstd
-
-BuildRequires:  cargo
-
-%if 0%{?suse_version}
-BuildRequires:  rust
+%if 0%{?_version} == 0
+BuildRequires:  xz
 %else
-BuildRequires:  rustc
+BuildRequires:  zstd
 %endif
 
-BuildRequires:  libaio-devel
+BuildRequires:  cargo >= %{MSRV}
+
+%if 0%{?suse_version}
+BuildRequires:  rust >= %{MSRV}
+%else
+BuildRequires:  rustc >= %{MSRV}
+%endif
+
+BuildRequires:  libaio-devel >= 0.3.111
 BuildRequires:  libattr-devel
 BuildRequires:  pkgconfig(blkid)
 BuildRequires:  pkgconfig(fuse3) >= 3.7
@@ -61,7 +75,7 @@ BuildRequires:  pkgconfig(libkeyutils)
 BuildRequires:  pkgconfig(liblz4)
 BuildRequires:  pkgconfig(libsodium)
 BuildRequires:  pkgconfig(libudev)
-BuildRequires:  pkgconfig(liburcu)
+BuildRequires:  pkgconfig(liburcu) >= 0.15
 BuildRequires:  pkgconfig(libzstd)
 BuildRequires:  pkgconfig(udev)
 BuildRequires:  pkgconfig(uuid)
@@ -161,11 +175,25 @@ fi
 
 
 %build
+%if 0%{?_version} == 0
+export CARGO_HOME=$PWD/.cargo
+export CARGO_ARGS="--frozen"
+rm -rf $PWD/.cargo
+mkdir -p $PWD/.cargo
+cp %{_sourcedir}/cargo.config $PWD/.cargo/config.toml
+%endif
 %set_build_flags
 %make_build %{make_opts}
 
 
 %install
+%if 0%{?_version} == 0
+export CARGO_HOME=$PWD/.cargo
+export CARGO_ARGS="--frozen"
+rm -rf $PWD/.cargo
+mkdir -p $PWD/.cargo
+cp %{_sourcedir}/cargo.config $PWD/.cargo/config.toml
+%endif
 %set_build_flags
 %make_install %{make_opts}
 
@@ -174,5 +202,7 @@ rm -rfv %{buildroot}/%{_datadir}/initramfs-tools
 
 
 %changelog
+* Sun Oct 12 2025 Roman Lebedev <lebedev.ri@gmail.com>
+- OBS support
 * Sat Sep 27 2025 Neal Gompa <neal@gompa.dev>
 - Initial package based on Fedora package
