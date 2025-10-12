@@ -114,7 +114,6 @@ jobs:
             aptly \
             devscripts \
             gettext-base \
-            git \
             gnupg \
             openssh-client \
             pandoc \
@@ -158,11 +157,6 @@ jobs:
           tee -a ~/.devscripts > /dev/null <<EOT
           DEBSIGN_KEYID=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           EOT
-      - name: Fetch our git repository
-        timeout-minutes: 1
-        uses: actions/checkout@v4
-        with:
-          path: 'bcachefs-tools'
       - name: Ensure that the download directory does not exist
         timeout-minutes: 1
         run: |
@@ -277,7 +271,8 @@ jobs:
           if [ "${{ (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master') && 'true' || 'false' }}" = "true" ]; then
           export GPG_SIGNING_SUBKEY_FINGERPRINT=${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
           mkdir -p "$PUBLIC_ROOT/.footer"
-          envsubst < "${{ github.workspace }}/bcachefs-tools/doc/apt.bcachefs.org-README.md" | \
+          tar -xvf "${{ github.workspace }}/incoming/src-artifacts"/*.tar.xz -C "${{ github.workspace }}" --wildcards '*/doc/apt.bcachefs.org-README.md' --strip-components=2
+          envsubst < "${{ github.workspace }}/apt.bcachefs.org-README.md" | \
             pandoc --from=markdown --to=html --output="$PUBLIC_ROOT/.footer/README"
           tee "$PUBLIC_ROOT/.footer/README.html" <<EOT
           <!--# block name="empty" --><!--# endblock -->
