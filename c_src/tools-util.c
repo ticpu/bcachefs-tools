@@ -648,10 +648,12 @@ char *fd_to_dev_model(int fd)
 		free(sysfs_path);
 		return strdup("(unknown model)");
 got_model:
-		char* model = read_file_str(AT_FDCWD, model_path);
-		free(model_path);
-		free(sysfs_path);
-		return model;
+		{
+			char *model = read_file_str(AT_FDCWD, model_path);
+			free(model_path);
+			free(sysfs_path);
+			return model;
+		}
 	} else {
 		return strdup("(image file)");
 	}
