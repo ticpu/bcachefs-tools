@@ -253,6 +253,7 @@ jobs:
           tee -a ~/.aptly.conf <<EOT
           root_dir: $APTLY_ROOT
           gpg_disable_verify: false
+          skip_contents_publishing: true
           filesystem_publish_endpoints:
               public:
                   root_dir: $APTLY_ROOT/public
