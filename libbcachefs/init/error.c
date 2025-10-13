@@ -728,45 +728,28 @@ void bch2_free_fsck_errs(struct bch_fs *c)
 	__bch2_flush_fsck_errs(c, false);
 }
 
-int bch2_inum_offset_err_msg_trans(struct btree_trans *trans, struct printbuf *out,
-				    subvol_inum inum, u64 offset)
+int bch2_inum_offset_err_msg_trans_norestart(struct btree_trans *trans, struct printbuf *out,
+					     u32 subvol, struct bpos pos)
 {
-	u32 restart_count = trans->restart_count;
 	int ret = 0;
+	if (subvol)
+		ret = bch2_inum_to_path(trans, (subvol_inum) { subvol, pos.inode }, out);
+	else if (pos.snapshot)
+		ret = bch2_inum_snapshot_to_path(trans, pos.inode, pos.snapshot, NULL, out);
 
-	if (inum.subvol) {
-		ret = bch2_inum_to_path(trans, inum, out);
-		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
-			return ret;
-	}
-	if (!inum.subvol || ret)
-		prt_printf(out, "inum %llu:%llu", inum.subvol, inum.inum);
-	prt_printf(out, " offset %llu: ", offset);
-
-	return trans_was_restarted(trans, restart_count);
-}
-
-void bch2_inum_offset_err_msg(struct bch_fs *c, struct printbuf *out,
-			      subvol_inum inum, u64 offset)
-{
-	CLASS(btree_trans, trans)(c);
-	lockrestart_do(trans, bch2_inum_offset_err_msg_trans(trans, out, inum, offset));
-}
-
-int bch2_inum_snap_offset_err_msg_trans(struct btree_trans *trans, struct printbuf *out,
-					struct bpos pos)
-{
-	int ret = bch2_inum_snapshot_to_path(trans, pos.inode, pos.snapshot, NULL, out);
-	if (ret)
+	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 		return ret;
 
-	prt_printf(out, " offset %llu: ", pos.offset << 8);
+	if (!subvol && !pos.snapshot)
+		prt_printf(out, "inum %llu", pos.inode);
+	else if (ret)
+		prt_printf(out, "inum %u:%llu", subvol, pos.inode);
+	prt_printf(out, " offset %llu: ", pos.offset << 9);
 	return 0;
 }
 
-void bch2_inum_snap_offset_err_msg(struct bch_fs *c, struct printbuf *out,
-				  struct bpos pos)
+void bch2_inum_offset_err_msg_trans(struct btree_trans *trans, struct printbuf *out,
+				    u32 subvol, struct bpos pos)
 {
-	CLASS(btree_trans, trans)(c);
-	lockrestart_do(trans, bch2_inum_snap_offset_err_msg_trans(trans, out, pos));
+	lockrestart_do(trans, bch2_inum_offset_err_msg_trans_norestart(trans, out, subvol, pos));
 }
