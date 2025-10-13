@@ -18,17 +18,24 @@ on:
         type: string
     secrets:
       GPG_SECRET_SUBKEYS:
+        required: true
       GPG_SIGNING_SUBKEY_FINGERPRINT:
+        required: true
+      GPG_AUTH_SUBKEY_KEYGRIP:
+        required: true
+      OBS_SNAPSHOT_REPO_URL:
+        required: true
+      OBS_RELEASE_REPO_URL:
+        required: true
 
 jobs:
   linux:
     runs-on: ${{ inputs.runs-on }}
     env:
       CONTAINER_DISTRO: trixie
-    permissions:
-      id-token: write
-      contents: read
-      attestations: write
+      DEBFULLNAME: apt.bcachefs.org CI bot
+      DEBEMAIL: linux-bcachefs@vger.kernel.org
+      SUITE: ${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'RELEASE' || 'SNAPSHOT' }}
     steps:
       - name: Configure baseline system
         timeout-minutes: 1
@@ -119,15 +126,13 @@ jobs:
           apt install eatmydata
           eatmydata apt full-upgrade
           eatmydata apt install \
-            ${{ inputs.dist-name }}-keyring \
+            ca-certificates \
             curl \
-            dpkg-dev \
+            git \
+            git-lfs \
             gnupg \
-            mmdebstrap \
-            reprotest \
-            schroot \
+            openssh-client \
             tar \
-            uidmap \
             xz-utils \
             zip \
           ;
@@ -225,56 +230,64 @@ jobs:
             echo 'ok.' &&                                                                              \
             echo '::endgroup::'                                                                        \
           "
-      - name: Create container for reprotest
+      - name: Update OBS Repo
         timeout-minutes: 1
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
-          mkdir -p /tmp/chroot/unstable-amd64-sbuild
-          mmdebstrap \
-            --comp=main \
-            --variant=apt \
-            --skip=output/mknod \
-            --format=directory \
-            --include=eatmydata \
-            --hook-dir=/usr/share/mmdebstrap/hooks/eatmydata \
-            --aptopt='Acquire::Retries "10";' \
-            --aptopt='APT::Install-Recommends "false";' \
-            --aptopt='APT::Install-Suggests "false";' \
-            --aptopt='APT::Get::Assume-Yes "true";' \
-            --aptopt='APT::Get::Fix-Missing "true";' \
-            --dpkgopt='force-unsafe-io' \
-            --dpkgopt='force-confdef' \
-            unstable \
-            /tmp/chroot/unstable-amd64-sbuild \
-            http://deb.debian.org/debian \
-          ;
-          chroot /tmp/chroot/unstable-amd64-sbuild apt update
-          mkdir -p /etc/schroot/chroot.d
-          tee /etc/schroot/chroot.d/unstable-amd64-sbuild > /dev/null <<EOT
-          [unstable-amd64-sbuild]
-          type=directory
-          directory=/tmp/chroot/unstable-amd64-sbuild
-          union-type=overlay
-          command-prefix=eatmydata
+          git config --global user.email "${{ env.DEBFULLNAME }}"
+          git config --global user.name "${{ env.DEBEMAIL }}"
+          git config --global user.signingkey "${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"
+          git config --global commit.gpgsign true
+          git lfs install
+          mkdir -p ~/.ssh
+          echo "" >> ~/.ssh/config
+          echo "StrictHostKeyChecking=accept-new" >> ~/.ssh/config
+          echo "" >> ~/.gnupg/gpg-agent.conf
+          echo "enable-ssh-support" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent
+          gpgconf --launch gpg-agent
+          export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
+          gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
+          OBS_REPO_URL="${{ secrets[format('OBS_{0}_REPO_URL', env.SUITE)] }}"
+          OBS_REPO_DIR="${{ github.workspace }}/bcachefs-obs"
+          git clone "$OBS_REPO_URL" "$OBS_REPO_DIR"
+          cd "$OBS_REPO_DIR"
+          git config --global --add safe.directory .
+          git rm -rf --ignore-unmatch -- .
+          tee .gitattributes > /dev/null <<EOT
+          *.tar.xz filter=lfs diff=lfs merge=lfs -text
           EOT
-      - name: Run reprotest
-        timeout-minutes: 10
-        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
-        run: |
-          set -xe
-          useradd -U first-user
-          useradd -U second-user
-          cd "${{ github.workspace }}/deb-src"
-          # FIXME: not reproducible without --vary=-build_path
-          reprotest \
-            --no-diffoscope \
-            --vary=-build_path \
-            --vary=user_group.available+=first-user:first-user \
-            --vary=user_group.available+=second-user:second-user \
-            --vary=domain_host.use_sudo=1 \
-            "${{ github.workspace }}/deb-src"/*.dsc \
-            -- \
-            schroot \
-            unstable-amd64-sbuild \
-          ;
+          git add .gitattributes
+          cp /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc apt.bcachefs.org.keyring
+          for suffix in .dsc .tar.xz .tar.xz.sig; do
+          cp "${{ github.workspace }}/deb-src/"*$suffix .
+          done
+          tee dkms-bcachefs.rpmlintrc > /dev/null <<EOT
+          addFilter("dkms-bcachefs.noarch: E: devel-file-in-non-devel-package")
+          EOT
+          tar -xvf *.tar.xz -C "$OBS_REPO_DIR" --wildcards '*/bcachefs-tools.spec' --strip-components=1
+          tar -xvf *.tar.xz -C "$OBS_REPO_DIR" --wildcards '*/debian/cargo.config' --strip-components=2
+          rm -f "${{ github.workspace }}/_service"
+          tee -a "${{ github.workspace }}/_service" > /dev/null <<EOT
+          <services>
+            <service name="set_version" mode="buildtime" />
+          EOT
+          for FILENAME in *; do
+          CHECKSUM="$(sha256sum "$FILENAME" | awk '{print $1}')"
+          tee -a "${{ github.workspace }}/_service" > /dev/null <<EOT
+            <service name="verify_file">
+              <param name="file">$FILENAME</param>
+              <param name="verifier">sha256</param>
+              <param name="checksum">$CHECKSUM</param>
+            </service>
+          EOT
+          done
+          tee -a "${{ github.workspace }}/_service" > /dev/null <<EOT
+          </services>
+          EOT
+          mv "${{ github.workspace }}/_service" "$OBS_REPO_DIR"
+          VER="$(basename --suffix=.tar.xz $(ls *.tar.xz))"
+          git add .
+          git commit --message="Update to $VER"
+          git push
