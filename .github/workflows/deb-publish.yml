@@ -228,7 +228,7 @@ jobs:
             echo '::endgroup::'                                                                        \
           "
       - name: Create and populate repos
-        timeout-minutes: 10
+        timeout-minutes: 60
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
@@ -281,24 +281,45 @@ jobs:
           </body></html>
           EOT
           fi
+          setup_env() {
+            REPO_NAME="$DIST-${{ env.SUITE }}"
+            REPO_SUITE="bcachefs-tools-${{ env.SUITE }}"
+            SNAPSHOT_NAME="$REPO_NAME-$SNAPSHOT_DATE"
+            PUBLISH_PREFIX="filesystem:public:$DIST"
+          }
           cd "${{ github.workspace }}/incoming/bin-artifacts"
+          echo "::group::Adding packages to repositories"
           for DIST in *
           do
-          echo "::group::Distribution $DIST"
-          REPO_NAME="$DIST-${{ env.SUITE }}"
-          REPO_SUITE="bcachefs-tools-${{ env.SUITE }}"
-          SNAPSHOT_NAME="$REPO_NAME-$SNAPSHOT_DATE"
-          PUBLISH_PREFIX="filesystem:public:$DIST"
+          echo "::group::Adding packages to repositories: $DIST"
+          setup_env
           (aptly repo show $REPO_NAME > /dev/null 2>&1) || \
             aptly repo create -distribution=$REPO_SUITE -component=main $REPO_NAME
           aptly repo include -repo=$REPO_NAME -no-remove-files \
             "${{ github.workspace }}/incoming/src-artifacts" \
             "${{ github.workspace }}/incoming/bin-artifacts/$DIST" \
           ;
+          echo '::endgroup::'
+          done
+          echo '::endgroup::'
+          echo "::group::Creating snapshots of repositories"
+          for DIST in *
+          do
+          echo "::group::Creating snapshots of repositories: $DIST"
+          setup_env
           aptly snapshot create $SNAPSHOT_NAME from repo $REPO_NAME
+          echo '::endgroup::'
+          done
+          echo '::endgroup::'
+          echo "::group::Publishing repository snapshots"
+          for DIST in *
+          do
+          echo "::group::Publishing repository snapshots: $DIST"
+          setup_env
           (aptly publish show $REPO_SUITE $PUBLISH_PREFIX > /dev/null 2>&1) || \
             aptly publish snapshot -acquire-by-hash -origin="apt.bcachefs.org" -label="apt.bcachefs.org Packages" $SNAPSHOT_NAME $PUBLISH_PREFIX
           aptly publish switch $REPO_SUITE $PUBLISH_PREFIX $SNAPSHOT_NAME
           echo '::endgroup::'
           done
+          echo '::endgroup::'
           umount "$MOUNTPOINT" || /bin/true
