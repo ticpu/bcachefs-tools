@@ -283,7 +283,7 @@ static void write_data(struct bch_fs *c,
 	bch2_bio_map(&op.wbio.bio, buf, len);
 
 	struct bch_inode_opts opts;
-	bch2_inode_opts_get(c, &opts);
+	bch2_inode_opts_get(c, &opts, false);
 
 	bch2_write_op_init(&op, c, opts);
 	op.write_point	= writepoint_hashed(0);

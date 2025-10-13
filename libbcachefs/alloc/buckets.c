@@ -278,6 +278,26 @@ fsck_err:
 	return ret;
 }
 
+static bool should_drop_ptr(struct bch_fs *c, struct bkey_s_c k,
+			    struct extent_ptr_decoded p,
+			    const union bch_extent_entry *entry)
+{
+	struct bch_dev *ca = bch2_dev_rcu_noerror(c, p.ptr.dev);
+	if (!ca)
+		return true;
+
+	struct bucket *g = PTR_GC_BUCKET(ca, &p.ptr);
+	enum bch_data_type data_type = bch2_bkey_ptr_data_type(k, p, entry);
+
+	if (p.ptr.cached) {
+		return !g->gen_valid || gen_cmp(p.ptr.gen, g->gen);
+	} else {
+		return gen_cmp(p.ptr.gen, g->gen) < 0 ||
+			gen_cmp(g->gen, p.ptr.gen) > BUCKET_GC_GEN_MAX ||
+			(g->data_type && g->data_type != data_type);
+	}
+}
+
 int bch2_check_fix_ptrs(struct btree_trans *trans,
 			enum btree_id btree, unsigned level, struct bkey_s_c k,
 			enum btree_iter_update_trigger_flags flags)
@@ -296,10 +316,14 @@ int bch2_check_fix_ptrs(struct btree_trans *trans,
 		try(bch2_check_fix_ptr(trans, k, p, entry_c, &do_update));
 
 	if (do_update) {
-		struct bkey_i *new = errptr_try(bch2_bkey_make_mut_noupdate(trans, k));
+		struct bkey_i *new =
+			errptr_try(bch2_trans_kmalloc(trans, bkey_bytes(k.k) +
+						      sizeof(struct bch_extent_rebalance)));
+		bkey_reassemble(new, k);
 
 		scoped_guard(rcu)
-			bch2_bkey_drop_ptrs(bkey_i_to_s(new), ptr, !bch2_dev_exists(c, ptr->dev));
+			bch2_bkey_drop_ptrs(bkey_i_to_s(new), p, entry,
+					    !bch2_dev_exists(c, p.ptr.dev));
 
 		if (level) {
 			/*
@@ -310,33 +334,17 @@ int bch2_check_fix_ptrs(struct btree_trans *trans,
 			struct bkey_ptrs ptrs = bch2_bkey_ptrs(bkey_i_to_s(new));
 			scoped_guard(rcu)
 				bkey_for_each_ptr(ptrs, ptr) {
-					struct bch_dev *ca = bch2_dev_rcu(c, ptr->dev);
-					ptr->gen = PTR_GC_BUCKET(ca, ptr)->gen;
+					struct bch_dev *ca = bch2_dev_rcu_noerror(c, ptr->dev);
+					if (ca)
+						ptr->gen = PTR_GC_BUCKET(ca, ptr)->gen;
 				}
 		} else {
+			scoped_guard(rcu)
+				bch2_bkey_drop_ptrs(bkey_i_to_s(new), p, entry,
+					should_drop_ptr(c, bkey_i_to_s_c(new), p, entry));
+
 			struct bkey_ptrs ptrs;
 			union bch_extent_entry *entry;
-
-			rcu_read_lock();
-restart_drop_ptrs:
-			ptrs = bch2_bkey_ptrs(bkey_i_to_s(new));
-			bkey_for_each_ptr_decode(bkey_i_to_s(new).k, ptrs, p, entry) {
-				struct bch_dev *ca = bch2_dev_rcu(c, p.ptr.dev);
-				struct bucket *g = PTR_GC_BUCKET(ca, &p.ptr);
-				enum bch_data_type data_type = bch2_bkey_ptr_data_type(bkey_i_to_s_c(new), p, entry);
-
-				if ((p.ptr.cached &&
-				     (!g->gen_valid || gen_cmp(p.ptr.gen, g->gen) > 0)) ||
-				    (!p.ptr.cached &&
-				     gen_cmp(p.ptr.gen, g->gen) < 0) ||
-				    gen_cmp(g->gen, p.ptr.gen) > BUCKET_GC_GEN_MAX ||
-				    (g->data_type &&
-				     g->data_type != data_type)) {
-					bch2_bkey_drop_ptr(bkey_i_to_s(new), &entry->ptr);
-					goto restart_drop_ptrs;
-				}
-			}
-			rcu_read_unlock();
 again:
 			ptrs = bch2_bkey_ptrs(bkey_i_to_s(new));
 			bkey_extent_entry_for_each(ptrs, entry) {
@@ -375,6 +383,10 @@ found:
 			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(new));
 			bch_info(c, "new key %s", buf.buf);
 		}
+
+		struct bch_inode_opts opts;
+		try(bch2_bkey_get_io_opts(trans, NULL, k, &opts));
+		try(bch2_bkey_set_needs_rebalance(c, &opts, new, SET_NEEDS_REBALANCE_opt_change, 0));
 
 		if (!(flags & BTREE_TRIGGER_is_root)) {
 			CLASS(btree_node_iter, iter)(trans, btree, new->k.p, 0, level,
@@ -1171,24 +1183,22 @@ int __bch2_disk_reservation_add(struct bch_fs *c, struct disk_reservation *res,
 	preempt_disable();
 	pcpu = this_cpu_ptr(c->pcpu);
 
-	if (sectors <= pcpu->sectors_available)
-		goto out;
+	if (unlikely(sectors > pcpu->sectors_available)) {
+		old = atomic64_read(&c->sectors_available);
+		do {
+			get = min((u64) sectors + SECTORS_CACHE, old);
 
-	old = atomic64_read(&c->sectors_available);
-	do {
-		get = min((u64) sectors + SECTORS_CACHE, old);
+			if (unlikely(get < sectors)) {
+				preempt_enable();
+				return disk_reservation_recalc_sectors_available(c,
+								res, sectors, flags);
+			}
+		} while (!atomic64_try_cmpxchg(&c->sectors_available,
+					       &old, old - get));
 
-		if (unlikely(get < sectors)) {
-			preempt_enable();
-			return disk_reservation_recalc_sectors_available(c,
-							res, sectors, flags);
-		}
-	} while (!atomic64_try_cmpxchg(&c->sectors_available,
-				       &old, old - get));
+		pcpu->sectors_available		+= get;
+	}
 
-	pcpu->sectors_available		+= get;
-
-out:
 	pcpu->sectors_available		-= sectors;
 	this_cpu_add(*c->online_reserved, sectors);
 	res->sectors			+= sectors;
@@ -1245,10 +1255,8 @@ int bch2_dev_buckets_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets)
 
 	bucket_gens = bch2_kvmalloc(struct_size(bucket_gens, b, nbuckets),
 				    GFP_KERNEL|__GFP_ZERO);
-	if (!bucket_gens) {
-		ret = bch_err_throw(c, ENOMEM_bucket_gens);
-		goto err;
-	}
+	if (!bucket_gens)
+		return bch_err_throw(c, ENOMEM_bucket_gens);
 
 	bucket_gens->first_bucket = ca->mi.first_bucket;
 	bucket_gens->nbuckets	= nbuckets;
@@ -1269,11 +1277,12 @@ int bch2_dev_buckets_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets)
 					  ca->mi.nbuckets, nbuckets) ?:
 		bch2_bucket_bitmap_resize(ca, &ca->bucket_backpointer_empty,
 					  ca->mi.nbuckets, nbuckets);
+	if (ret)
+		goto err;
 
 	rcu_assign_pointer(ca->bucket_gens, bucket_gens);
 	bucket_gens	= old_bucket_gens;
-
-	nbuckets = ca->mi.nbuckets;
+	nbuckets	= ca->mi.nbuckets;
 
 	ret = 0;
 err:

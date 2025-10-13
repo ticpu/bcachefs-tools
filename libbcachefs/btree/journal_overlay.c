@@ -9,7 +9,7 @@
 #include "btree/cache.h"
 #include "btree/journal_overlay.h"
 
-#include "journal/io.h"
+#include "journal/read.h"
 
 #include <linux/sort.h>
 
@@ -569,13 +569,14 @@ static void btree_and_journal_iter_prefetch(struct btree_and_journal_iter *_iter
 	struct btree_and_journal_iter iter = *_iter;
 	struct bch_fs *c = iter.trans->c;
 	unsigned level = iter.journal.level;
-	struct bkey_buf tmp;
 	unsigned nr = test_bit(BCH_FS_started, &c->flags)
 		? (level > 1 ? 0 :  2)
 		: (level > 1 ? 1 : 16);
 
 	iter.prefetch = false;
 	iter.fail_if_too_many_whiteouts = true;
+
+	struct bkey_buf tmp __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&tmp);
 
 	while (nr--) {
@@ -584,11 +585,9 @@ static void btree_and_journal_iter_prefetch(struct btree_and_journal_iter *_iter
 		if (!k.k)
 			break;
 
-		bch2_bkey_buf_reassemble(&tmp, c, k);
+		bch2_bkey_buf_reassemble(&tmp, k);
 		bch2_btree_node_prefetch(iter.trans, NULL, tmp.k, iter.journal.btree_id, level - 1);
 	}
-
-	bch2_bkey_buf_exit(&tmp, c);
 }
 
 struct bkey_s_c bch2_btree_and_journal_iter_peek(struct bch_fs *c, struct btree_and_journal_iter *iter)

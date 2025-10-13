@@ -360,9 +360,6 @@ int bch2_dirent_create(struct btree_trans *trans, subvol_inum dir,
 int bch2_dirent_read_target(struct btree_trans *trans, subvol_inum dir,
 			    struct bkey_s_c_dirent d, subvol_inum *target)
 {
-	struct bch_subvolume s;
-	int ret = 0;
-
 	if (d.v->d_type == DT_SUBVOL &&
 	    le32_to_cpu(d.v->d_parent_subvol) != dir.subvol)
 		return 1;
@@ -373,12 +370,13 @@ int bch2_dirent_read_target(struct btree_trans *trans, subvol_inum dir,
 	} else {
 		target->subvol	= le32_to_cpu(d.v->d_child_subvol);
 
-		ret = bch2_subvolume_get(trans, target->subvol, true, &s);
+		struct bch_subvolume s;
+		try(bch2_subvolume_get(trans, target->subvol, true, &s));
 
 		target->inum	= le64_to_cpu(s.inode);
 	}
 
-	return ret;
+	return 0;
 }
 
 int bch2_dirent_rename(struct btree_trans *trans,
@@ -624,7 +622,7 @@ int bch2_readdir(struct bch_fs *c, subvol_inum inum,
 		 struct bch_hash_info *hash_info,
 		 struct dir_context *ctx)
 {
-	struct bkey_buf sk;
+	struct bkey_buf sk __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&sk);
 
 	CLASS(btree_trans, trans)(c);
@@ -636,7 +634,7 @@ int bch2_readdir(struct bch_fs *c, subvol_inum inum,
 				continue;
 
 			/* dir_emit() can fault and block: */
-			bch2_bkey_buf_reassemble(&sk, c, k);
+			bch2_bkey_buf_reassemble(&sk, k);
 			struct bkey_s_c_dirent dirent = bkey_i_to_s_c_dirent(sk.k);
 
 			subvol_inum target;
@@ -650,8 +648,6 @@ int bch2_readdir(struct bch_fs *c, subvol_inum inum,
 
 			ret2 ?: (bch2_trans_unlock(trans), bch2_dir_emit(ctx, dirent, target));
 		}));
-
-	bch2_bkey_buf_exit(&sk, c);
 
 	return ret < 0 ? ret : 0;
 }

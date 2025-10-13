@@ -265,6 +265,23 @@ out:
 
 /* truncate: */
 
+void bch2_zero_pagecache_posteof(struct bch_inode_info *inode)
+{
+	truncate_pagecache(&inode->v, inode->v.i_size);
+
+	if (!(inode->v.i_size & (PAGE_SIZE - 1)))
+		return;
+
+	struct folio *f = filemap_lock_folio(inode->v.i_mapping, inode->v.i_size >> PAGE_SHIFT);
+	if (IS_ERR_OR_NULL(f))
+		return;
+
+	folio_zero_segment(f, inode->v.i_size - folio_pos(f), folio_size(f));
+
+	folio_unlock(f);
+	folio_put(f);
+}
+
 static inline int range_has_data(struct bch_fs *c, u32 subvol,
 				 struct bpos start,
 				 struct bpos end)
@@ -417,6 +434,8 @@ static int bch2_extend(struct mnt_idmap *idmap,
 {
 	struct address_space *mapping = inode->v.i_mapping;
 
+	bch2_zero_pagecache_posteof(inode);
+
 	/*
 	 * sync appends:
 	 *
@@ -452,7 +471,7 @@ int bchfs_truncate(struct mnt_idmap *idmap,
 	}
 
 	inode_dio_wait(&inode->v);
-	bch2_pagecache_block_get(inode);
+	guard(bch2_pagecache_block)(inode);
 
 	ret = bch2_inode_find_by_inum(c, inode_inum(inode), &inode_u);
 	if (ret)
@@ -534,7 +553,6 @@ int bchfs_truncate(struct mnt_idmap *idmap,
 
 	ret = bch2_setattr_nonsize(idmap, inode, iattr);
 err:
-	bch2_pagecache_block_put(inode);
 	return bch2_err_class(ret);
 }
 
@@ -757,8 +775,10 @@ static noinline long bchfs_fallocate(struct bch_inode_info *inode, int mode,
 	bool truncated_last_page = false;
 	int ret, ret2 = 0;
 
-	if (!(mode & FALLOC_FL_KEEP_SIZE) && end > inode->v.i_size)
+	if (!(mode & FALLOC_FL_KEEP_SIZE) && end > inode->v.i_size) {
 		try(inode_newsize_ok(&inode->v, end));
+		bch2_zero_pagecache_posteof(inode);
+	}
 
 	if (mode & FALLOC_FL_ZERO_RANGE) {
 		ret = bch2_truncate_folios(inode, offset, end);
@@ -811,7 +831,7 @@ long bch2_fallocate_dispatch(struct file *file, int mode,
 
 	inode_lock(&inode->v);
 	inode_dio_wait(&inode->v);
-	bch2_pagecache_block_get(inode);
+	guard(bch2_pagecache_block)(inode);
 
 	ret = file_modified(file);
 	if (ret)
@@ -828,7 +848,6 @@ long bch2_fallocate_dispatch(struct file *file, int mode,
 	else
 		ret = bch_err_throw(c, unsupported_fallocate_mode);
 err:
-	bch2_pagecache_block_put(inode);
 	inode_unlock(&inode->v);
 	enumerated_ref_put(&c->writes, BCH_WRITE_REF_fallocate);
 
@@ -901,6 +920,8 @@ loff_t bch2_remap_file_range(struct file *file_src, loff_t pos_src,
 		goto err;
 
 	aligned_len = round_up((u64) len, block_bytes(c));
+
+	bch2_zero_pagecache_posteof(dst);
 
 	ret = bch2_write_invalidate_inode_pages_range(dst->v.i_mapping,
 				pos_dst, pos_dst + len - 1);

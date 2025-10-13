@@ -448,9 +448,6 @@ static noinline int bch2_trans_update_get_key_cache(struct btree_trans *trans,
 	if (!key_cache_path ||
 	    !key_cache_path->should_be_locked ||
 	    !bpos_eq(key_cache_path->pos, iter->pos)) {
-		struct bkey_cached *ck;
-		int ret;
-
 		if (!iter->key_cache_path)
 			iter->key_cache_path =
 				bch2_path_get(trans, path->btree_id, path->pos, 1, 0,
@@ -462,11 +459,9 @@ static noinline int bch2_trans_update_get_key_cache(struct btree_trans *trans,
 						iter->flags & BTREE_ITER_intent,
 						_THIS_IP_);
 
-		ret = bch2_btree_path_traverse(trans, iter->key_cache_path, BTREE_ITER_cached);
-		if (unlikely(ret))
-			return ret;
+		try(bch2_btree_path_traverse(trans, iter->key_cache_path, BTREE_ITER_cached));
 
-		ck = (void *) trans->paths[iter->key_cache_path].l[0].b;
+		struct bkey_cached *ck = (void *) trans->paths[iter->key_cache_path].l[0].b;
 
 		if (test_bit(BKEY_CACHED_DIRTY, &ck->flags)) {
 			trace_and_count(trans->c, trans_restart_key_cache_raced, trans, _RET_IP_);

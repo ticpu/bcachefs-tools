@@ -5,9 +5,10 @@
 #include "btree/bbpos.h"
 #include "btree/bkey_buf.h"
 #include "btree/cache.h"
-#include "btree/io.h"
 #include "btree/iter.h"
 #include "btree/locking.h"
+#include "btree/read.h"
+#include "btree/write.h"
 
 #include "debug/debug.h"
 
@@ -300,11 +301,11 @@ void bch2_btree_node_update_key_early(struct btree_trans *trans,
 {
 	struct bch_fs *c = trans->c;
 	struct btree *b;
-	struct bkey_buf tmp;
+	struct bkey_buf tmp __cleanup(bch2_bkey_buf_exit);
 	int ret;
 
 	bch2_bkey_buf_init(&tmp);
-	bch2_bkey_buf_reassemble(&tmp, c, old);
+	bch2_bkey_buf_reassemble(&tmp, old);
 
 	b = bch2_btree_node_get_noiter(trans, tmp.k, btree, level, true);
 	if (!IS_ERR_OR_NULL(b)) {
@@ -318,8 +319,6 @@ void bch2_btree_node_update_key_early(struct btree_trans *trans,
 
 		six_unlock_read(&b->c.lock);
 	}
-
-	bch2_bkey_buf_exit(&tmp, c);
 }
 
 __flatten

@@ -10,12 +10,15 @@
 
 #include "bcachefs.h"
 #include "btree/cache.h"
-#include "btree/io.h"
 #include "btree/iter.h"
+
 #include "data/extents.h"
+
 #include "init/error.h"
 #include "init/fs.h"
-#include "journal/io.h"
+
+#include "journal/read.h"
+
 #include "sb/members.h"
 
 struct dump_dev {

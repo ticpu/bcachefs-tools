@@ -12,7 +12,6 @@
 
 #include "btree/bkey_buf.h"
 #include "btree/cache.h"
-#include "btree/io.h"
 #include "btree/key_cache.h"
 #include "btree/update.h"
 #include "btree/interior.h"
@@ -1237,24 +1236,16 @@ static int invalidate_one_bp(struct btree_trans *trans,
 			     struct bkey_s_c_backpointer bp,
 			     struct bkey_buf *last_flushed)
 {
-	struct btree_iter extent_iter;
-	struct bkey_s_c extent_k = bkey_try(
-		bch2_backpointer_get_key(trans, bp, &extent_iter, 0, last_flushed));
-
-	if (!extent_k.k)
+	CLASS(btree_iter_uninit, iter)(trans);
+	struct bkey_s_c k = bkey_try(bch2_backpointer_get_key(trans, bp, &iter, 0, last_flushed));
+	if (!k.k)
 		return 0;
 
-	struct bkey_i *n =
-		bch2_bkey_make_mut(trans, &extent_iter, &extent_k,
-				   BTREE_UPDATE_internal_snapshot_node);
-	int ret = PTR_ERR_OR_ZERO(n);
-	if (ret)
-		goto err;
+	struct bkey_i *n = errptr_try(bch2_bkey_make_mut(trans, &iter, &k,
+						BTREE_UPDATE_internal_snapshot_node));
 
 	bch2_bkey_drop_device(bkey_i_to_s(n), ca->dev_idx);
-err:
-	bch2_trans_iter_exit(&extent_iter);
-	return ret;
+	return 0;
 }
 
 static int invalidate_one_bucket_by_bps(struct btree_trans *trans,
@@ -1373,9 +1364,8 @@ static void bch2_do_invalidates_work(struct work_struct *work)
 	CLASS(btree_trans, trans)(c);
 	int ret = 0;
 
-	struct bkey_buf last_flushed;
+	struct bkey_buf last_flushed __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&last_flushed);
-	bkey_init(&last_flushed.k->k);
 
 	ret = bch2_btree_write_buffer_tryflush(trans);
 	if (ret)
@@ -1412,7 +1402,6 @@ restart_err:
 	}
 	bch2_trans_iter_exit(&iter);
 err:
-	bch2_bkey_buf_exit(&last_flushed, c);
 	enumerated_ref_put(&ca->io_ref[WRITE], BCH_DEV_WRITE_REF_do_invalidates);
 	enumerated_ref_put(&c->writes, BCH_WRITE_REF_invalidate);
 }
@@ -1474,24 +1463,19 @@ int bch2_dev_remove_alloc(struct bch_fs *c, struct bch_dev *ca)
 static int __bch2_bucket_io_time_reset(struct btree_trans *trans, unsigned dev,
 				size_t bucket_nr, int rw)
 {
-	struct bch_fs *c = trans->c;
-	int ret = 0;
-
-	struct btree_iter iter;
+	CLASS(btree_iter_uninit, iter)(trans);
 	struct bkey_i_alloc_v4 *a =
 		errptr_try(bch2_trans_start_alloc_update_noupdate(trans, &iter, POS(dev, bucket_nr)));
 
-	u64 now = bch2_current_io_time(c, rw);
+	u64 now = bch2_current_io_time(trans->c, rw);
 	if (a->v.io_time[rw] == now)
-		goto out;
+		return 0;
 
 	a->v.io_time[rw] = now;
 
-	ret =   bch2_trans_update(trans, &iter, &a->k_i, 0) ?:
-		bch2_trans_commit(trans, NULL, NULL, 0);
-out:
-	bch2_trans_iter_exit(&iter);
-	return ret;
+	try(bch2_trans_update(trans, &iter, &a->k_i, 0));
+	try(bch2_trans_commit(trans, NULL, NULL, 0));
+	return 0;
 }
 
 int bch2_bucket_io_time_reset(struct btree_trans *trans, unsigned dev,

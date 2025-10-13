@@ -13,7 +13,7 @@
 #include "data/extents.h"
 
 #include "journal/journal.h"
-#include "journal/io.h"
+#include "journal/read.h"
 #include "journal/reclaim.h"
 
 #include "init/error.h"
@@ -645,10 +645,6 @@ int bch2_btree_write_buffer_maybe_flush(struct btree_trans *trans,
 					struct bkey_buf *last_flushed)
 {
 	struct bch_fs *c = trans->c;
-	struct bkey_buf tmp;
-	int ret = 0;
-
-	bch2_bkey_buf_init(&tmp);
 
 	if (!bkey_and_val_eq(referring_k, bkey_i_to_s_c(last_flushed->k))) {
 		if (trace_write_buffer_maybe_flush_enabled()) {
@@ -658,26 +654,25 @@ int bch2_btree_write_buffer_maybe_flush(struct btree_trans *trans,
 			trace_write_buffer_maybe_flush(trans, _RET_IP_, buf.buf);
 		}
 
-		bch2_bkey_buf_reassemble(&tmp, c, referring_k);
+		struct bkey_buf tmp __cleanup(bch2_bkey_buf_exit);
+		bch2_bkey_buf_init(&tmp);
+		bch2_bkey_buf_reassemble(&tmp, referring_k);
 
 		if (bkey_is_btree_ptr(referring_k.k)) {
 			bch2_trans_unlock(trans);
 			bch2_btree_interior_updates_flush(c);
 		}
 
-		ret = bch2_btree_write_buffer_flush_sync(trans);
-		if (ret)
-			goto err;
+		try(bch2_btree_write_buffer_flush_sync(trans));
 
-		bch2_bkey_buf_copy(last_flushed, c, tmp.k);
+		bch2_bkey_buf_copy(last_flushed, tmp.k);
 
 		/* can we avoid the unconditional restart? */
 		trace_and_count(c, trans_restart_write_buffer_flush, trans, _RET_IP_);
-		ret = bch_err_throw(c, transaction_restart_write_buffer_flush);
+		return bch_err_throw(c, transaction_restart_write_buffer_flush);
 	}
-err:
-	bch2_bkey_buf_exit(&tmp, c);
-	return ret;
+
+	return 0;
 }
 
 static void bch2_btree_write_buffer_flush_work(struct work_struct *work)

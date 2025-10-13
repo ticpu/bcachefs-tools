@@ -56,10 +56,12 @@ struct per_snapshot_io_opts {
 	DARRAY(struct snapshot_io_opts_entry) d;
 };
 
-static inline void per_snapshot_io_opts_init(struct per_snapshot_io_opts *io_opts, struct bch_fs *c)
+static inline struct per_snapshot_io_opts per_snapshot_io_opts_init(struct bch_fs *c)
 {
-	memset(io_opts, 0, sizeof(*io_opts));
-	bch2_inode_opts_get(c, &io_opts->fs_io_opts);
+	return (struct per_snapshot_io_opts) {
+		/* io_opts->fs_io_opts will be initialized when we know the key type */
+		.fs_io_opts.change_cookie = atomic_read(&c->opt_change_cookie) - 1,
+	};
 }
 
 static inline void per_snapshot_io_opts_exit(struct per_snapshot_io_opts *io_opts)
@@ -67,17 +69,20 @@ static inline void per_snapshot_io_opts_exit(struct per_snapshot_io_opts *io_opt
 	darray_exit(&io_opts->d);
 }
 
-struct bch_inode_opts *bch2_extent_get_apply_io_opts(struct btree_trans *,
-			  struct per_snapshot_io_opts *, struct bpos,
-			  struct btree_iter *, struct bkey_s_c,
-			  enum set_needs_rebalance_ctx);
+DEFINE_CLASS(per_snapshot_io_opts, struct per_snapshot_io_opts,
+	     per_snapshot_io_opts_exit(&_T),
+	     per_snapshot_io_opts_init(c),
+	     struct bch_fs *c);
 
-int bch2_extent_get_io_opts_one(struct btree_trans *, struct bch_inode_opts *,
-				struct btree_iter *, struct bkey_s_c,
-				enum set_needs_rebalance_ctx);
-int bch2_extent_get_apply_io_opts_one(struct btree_trans *, struct bch_inode_opts *,
-				      struct btree_iter *, struct bkey_s_c,
-				      enum set_needs_rebalance_ctx);
+int bch2_update_rebalance_opts(struct btree_trans *,
+			       struct bch_inode_opts *,
+			       struct btree_iter *,
+			       struct bkey_s_c,
+			       enum set_needs_rebalance_ctx);
+
+int bch2_bkey_get_io_opts(struct btree_trans *,
+			  struct per_snapshot_io_opts *, struct bkey_s_c,
+			  struct bch_inode_opts *opts);
 
 int bch2_set_rebalance_needs_scan_trans(struct btree_trans *, u64);
 int bch2_set_rebalance_needs_scan(struct bch_fs *, u64 inum);

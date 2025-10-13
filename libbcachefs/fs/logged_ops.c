@@ -42,23 +42,20 @@ static int resume_logged_op(struct btree_trans *trans, struct btree_iter *iter,
 	CLASS(printbuf, buf)();
 	int ret = 0;
 
+	struct bkey_buf sk __cleanup(bch2_bkey_buf_exit);
+	bch2_bkey_buf_init(&sk);
+	bch2_bkey_buf_reassemble(&sk, k);
+
 	fsck_err_on(test_bit(BCH_FS_clean_recovery, &c->flags),
 		    trans, logged_op_but_clean,
 		    "filesystem marked as clean but have logged op\n%s",
-		    (bch2_bkey_val_to_text(&buf, c, k),
-		     buf.buf));
-
-	struct bkey_buf sk;
-	bch2_bkey_buf_init(&sk);
-	bch2_bkey_buf_reassemble(&sk, c, k);
+		    (bch2_bkey_val_to_text(&buf, c, k), buf.buf));
 
 	const struct bch_logged_op_fn *fn = logged_op_fn(sk.k->k.type);
 	if (fn)
 		fn->resume(trans, sk.k);
 
 	ret = bch2_logged_op_finish(trans, sk.k);
-
-	bch2_bkey_buf_exit(&sk, c);
 fsck_err:
 	return ret ?: trans_was_restarted(trans, restart_count);
 }

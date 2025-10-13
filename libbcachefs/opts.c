@@ -527,8 +527,6 @@ void bch2_opts_to_text(struct printbuf *out,
 int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, u64 inum, enum bch_opt_id id, u64 v,
 			  bool change)
 {
-	int ret = 0;
-
 	switch (id) {
 	case Opt_state:
 		if (ca)
@@ -537,9 +535,7 @@ int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, u64 inum, enum b
 
 	case Opt_compression:
 	case Opt_background_compression:
-		ret = bch2_check_set_has_compressed_data(c, v);
-		if (ret)
-			return ret;
+		try(bch2_check_set_has_compressed_data(c, v));
 		break;
 	case Opt_erasure_code:
 		if (v)
@@ -556,22 +552,16 @@ int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, u64 inum, enum b
 	     id == Opt_compression ||
 	     id == Opt_background_compression ||
 	     id == Opt_data_checksum ||
-	     id == Opt_data_replicas)) {
-		ret = bch2_set_rebalance_needs_scan(c, inum);
-		if (ret)
-			return ret;
-	}
+	     id == Opt_data_replicas))
+		try(bch2_set_rebalance_needs_scan(c, inum));
 
-	return ret;
+	return 0;
 }
 
 int bch2_opts_hooks_pre_set(struct bch_fs *c)
 {
-	for (unsigned i = 0; i < bch2_opts_nr; i++) {
-		int ret = bch2_opt_hook_pre_set(c, NULL, 0, i, bch2_opt_get_by_id(&c->opts, i), false);
-		if (ret)
-			return ret;
-	}
+	for (unsigned i = 0; i < bch2_opts_nr; i++)
+		try(bch2_opt_hook_pre_set(c, NULL, 0, i, bch2_opt_get_by_id(&c->opts, i), false));
 
 	return 0;
 }
@@ -822,7 +812,7 @@ bool bch2_opt_set_sb(struct bch_fs *c, struct bch_dev *ca,
 
 /* io opts: */
 
-void bch2_inode_opts_get(struct bch_fs *c, struct bch_inode_opts *ret)
+void bch2_inode_opts_get(struct bch_fs *c, struct bch_inode_opts *ret, bool metadata)
 {
 	memset(ret, 0, sizeof(*ret));
 
@@ -832,7 +822,13 @@ void bch2_inode_opts_get(struct bch_fs *c, struct bch_inode_opts *ret)
 
 	ret->change_cookie = atomic_read(&c->opt_change_cookie);
 
-	bch2_io_opts_fixups(ret);
+	if (metadata) {
+		ret->background_target	= c->opts.metadata_target ?: c->opts.foreground_target;
+		ret->data_replicas	= c->opts.metadata_replicas;
+		ret->data_checksum	= c->opts.metadata_checksum;
+	} else {
+		bch2_io_opts_fixups(ret);
+	}
 }
 
 bool bch2_opt_is_inode_opt(enum bch_opt_id id)

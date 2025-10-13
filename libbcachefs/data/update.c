@@ -36,31 +36,30 @@ static const char * const bch2_data_update_type_strs[] = {
 	NULL
 };
 
-static void bkey_put_dev_refs(struct bch_fs *c, struct bkey_s_c k)
+static void bkey_put_dev_refs(struct bch_fs *c, struct bkey_s_c k, unsigned ptrs_held)
 {
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
-
-	bkey_for_each_ptr(ptrs, ptr)
-		if (ptr->dev != BCH_SB_MEMBER_INVALID)
-			bch2_dev_put(bch2_dev_have_ref(c, ptr->dev));
-}
-
-static bool bkey_get_dev_refs(struct bch_fs *c, struct bkey_s_c k)
-{
-	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+	unsigned ptr_bit = 1;
 
 	bkey_for_each_ptr(ptrs, ptr) {
-		if (ptr->dev != BCH_SB_MEMBER_INVALID &&
-		    unlikely(!bch2_dev_tryget(c, ptr->dev))) {
-			bkey_for_each_ptr(ptrs, ptr2) {
-				if (ptr2 == ptr)
-					break;
-				bch2_dev_put(bch2_dev_have_ref(c, ptr2->dev));
-			}
-			return false;
-		}
+		if (ptrs_held & ptr_bit)
+			bch2_dev_put(bch2_dev_have_ref(c, ptr->dev));
+		ptr_bit <<= 1;
 	}
-	return true;
+}
+
+static unsigned bkey_get_dev_refs(struct bch_fs *c, struct bkey_s_c k)
+{
+	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+	unsigned ptrs_held = 0, ptr_bit = 1;
+
+	bkey_for_each_ptr(ptrs, ptr) {
+		if (likely(bch2_dev_tryget(c, ptr->dev)))
+			ptrs_held |= ptr_bit;
+		ptr_bit <<= 1;
+	}
+
+	return ptrs_held;
 }
 
 noinline_for_stack
@@ -397,7 +396,7 @@ restart_drop_extra_replicas:
 						k.k->p, bkey_start_pos(&insert->k)) ?:
 			bch2_insert_snapshot_whiteouts(trans, m->btree_id,
 						k.k->p, insert->k.p) ?:
-			bch2_inum_snapshot_opts_get(trans, k.k->p.inode, k.k->p.snapshot, &opts) ?:
+			bch2_bkey_get_io_opts(trans, NULL, k, &opts) ?:
 			bch2_bkey_set_needs_rebalance(c, &opts, insert,
 						      SET_NEEDS_REBALANCE_foreground,
 						      m->op.opts.change_cookie) ?:
@@ -497,9 +496,9 @@ void bch2_data_update_exit(struct data_update *update)
 
 	if (c->opts.nocow_enabled)
 		bch2_bkey_nocow_unlock(c, k, 0);
-	bkey_put_dev_refs(c, k);
+	bkey_put_dev_refs(c, k, update->ptrs_held);
 	bch2_disk_reservation_put(c, &update->op.res);
-	bch2_bkey_buf_exit(&update->k, c);
+	bch2_bkey_buf_exit(&update->k);
 }
 
 static noinline_for_stack
@@ -676,7 +675,7 @@ int bch2_extent_drop_ptrs(struct btree_trans *trans,
 	while (data_opts->kill_ptrs) {
 		unsigned i = 0, drop = __fls(data_opts->kill_ptrs);
 
-		bch2_bkey_drop_ptrs_noerror(bkey_i_to_s(n), ptr, i++ == drop);
+		bch2_bkey_drop_ptrs_noerror(bkey_i_to_s(n), p, entry, i++ == drop);
 		data_opts->kill_ptrs ^= 1U << drop;
 	}
 
@@ -747,7 +746,7 @@ static int can_write_extent(struct bch_fs *c, struct data_update *m)
 {
 	if ((m->op.flags & BCH_WRITE_alloc_nowait) &&
 	    unlikely(c->open_buckets_nr_free <= bch2_open_buckets_reserved(m->op.watermark)))
-		return bch_err_throw(c, data_update_done_would_block);
+		return bch_err_throw(c, data_update_fail_would_block);
 
 	unsigned target = m->op.flags & BCH_WRITE_only_specified_devs
 		? m->op.target
@@ -784,16 +783,12 @@ static int can_write_extent(struct bch_fs *c, struct data_update *m)
 			break;
 	}
 
-	if (nr_replicas < m->op.nr_replicas) {
+	if (!nr_replicas) {
 		prt_printf(&buf, "\nnr_replicas %u < %u", nr_replicas, m->op.nr_replicas);
 		trace_data_update_done_no_rw_devs(c, buf.buf);
+		return bch_err_throw(c, data_update_fail_no_rw_devs);
 	}
 
-	if (!nr_replicas)
-		return bch_err_throw(c, data_update_done_no_rw_devs);
-
-	if (nr_replicas < m->op.nr_replicas)
-		return bch_err_throw(c, insufficient_devices);
 	return 0;
 }
 
@@ -814,18 +809,18 @@ int bch2_data_update_init(struct btree_trans *trans,
 		ret = bch2_check_key_has_snapshot(trans, iter, k);
 		if (bch2_err_matches(ret, BCH_ERR_recovery_will_run)) {
 			/* Can't repair yet, waiting on other recovery passes */
-			return bch_err_throw(c, data_update_done_no_snapshot);
+			return bch_err_throw(c, data_update_fail_no_snapshot);
 		}
 		if (ret < 0)
 			return ret;
 		if (ret) /* key was deleted */
 			return bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc) ?:
-				bch_err_throw(c, data_update_done_no_snapshot);
+				bch_err_throw(c, data_update_fail_no_snapshot);
 		ret = 0;
 	}
 
 	bch2_bkey_buf_init(&m->k);
-	bch2_bkey_buf_reassemble(&m->k, c, k);
+	bch2_bkey_buf_reassemble(&m->k, k);
 	m->type		= data_opts.btree_insert_flags & BCH_WATERMARK_copygc
 		? BCH_DATA_UPDATE_copygc
 		: BCH_DATA_UPDATE_rebalance;
@@ -967,10 +962,7 @@ int bch2_data_update_init(struct btree_trans *trans,
 		}
 	}
 
-	if (!bkey_get_dev_refs(c, k)) {
-		ret = bch_err_throw(c, data_update_done_no_dev_refs);
-		goto out;
-	}
+	m->ptrs_held = bkey_get_dev_refs(c, k);
 
 	if (c->opts.nocow_enabled) {
 		if (!bch2_bkey_nocow_trylock(c, ptrs, 0)) {
@@ -981,7 +973,7 @@ int bch2_data_update_init(struct btree_trans *trans,
 				 * it. Ouch - this needs to be fixed.
 				 */
 				ret = bch_err_throw(c, nocow_lock_blocked);
-				goto out_put_dev_refs;
+				goto out;
 			}
 
 			bool locked = false;
@@ -1013,9 +1005,9 @@ int bch2_data_update_init(struct btree_trans *trans,
 out_nocow_unlock:
 	if (c->opts.nocow_enabled)
 		bch2_bkey_nocow_unlock(c, k, 0);
-out_put_dev_refs:
-	bkey_put_dev_refs(c, k);
 out:
+	bkey_put_dev_refs(c, k, m->ptrs_held);
+	m->ptrs_held = 0;
 	bch2_disk_reservation_put(c, &m->op.res);
 	return ret;
 }

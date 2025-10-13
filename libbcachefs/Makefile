@@ -19,19 +19,20 @@ bcachefs-y		:=			\
 	alloc/replicas.o			\
 	btree/bkey.o				\
 	btree/bkey_methods.o			\
-	btree/bkey_sort.o			\
 	btree/bset.o				\
 	btree/cache.o				\
 	btree/check.o				\
-	btree/io.o				\
+	btree/commit.o				\
+	btree/interior.o			\
 	btree/iter.o				\
 	btree/journal_overlay.o			\
 	btree/key_cache.o			\
 	btree/locking.o				\
 	btree/node_scan.o			\
-	btree/commit.o				\
+	btree/read.o				\
+	btree/sort.o				\
 	btree/update.o				\
-	btree/interior.o			\
+	btree/write.o				\
 	btree/write_buffer.o			\
 	data/checksum.o				\
 	data/compress.o				\
@@ -75,11 +76,12 @@ bcachefs-y		:=			\
 	init/recovery.o				\
 	init/passes.o				\
 	journal/init.o				\
-	journal/io.o				\
 	journal/journal.o			\
+	journal/read.o				\
 	journal/reclaim.o			\
 	journal/sb.o				\
 	journal/seq_blacklist.o			\
+	journal/write.o				\
 	opts.o					\
 	sb/clean.o				\
 	sb/counters.o				\
@@ -107,6 +109,7 @@ bcachefs-y		:=			\
 	util/varint.o				\
 	vendor/closure.o			\
 	vendor/min_heap.o			\
+	vfs/fiemap.o				\
 	vfs/fs.o				\
 	vfs/ioctl.o				\
 	vfs/io.o				\

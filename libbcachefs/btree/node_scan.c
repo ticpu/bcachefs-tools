@@ -5,12 +5,10 @@
 #include "alloc/buckets.h"
 
 #include "btree/cache.h"
-#include "btree/io.h"
 #include "btree/interior.h"
 #include "btree/journal_overlay.h"
 #include "btree/node_scan.h"
-
-#include "journal/io.h"
+#include "btree/read.h"
 
 #include "init/error.h"
 #include "init/passes.h"

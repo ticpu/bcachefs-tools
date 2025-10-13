@@ -9,9 +9,9 @@
 
 #include "btree/bkey_buf.h"
 #include "btree/interior.h"
-#include "btree/io.h"
 #include "btree/journal_overlay.h"
 #include "btree/node_scan.h"
+#include "btree/read.h"
 #include "btree/update.h"
 
 #include "data/move.h"
@@ -29,7 +29,7 @@
 #include "init/recovery.h"
 
 #include "journal/init.h"
-#include "journal/io.h"
+#include "journal/read.h"
 #include "journal/reclaim.h"
 #include "journal/sb.h"
 #include "journal/seq_blacklist.h"

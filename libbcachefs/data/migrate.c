@@ -55,16 +55,13 @@ static int drop_btree_ptrs(struct btree_trans *trans, struct btree_iter *iter,
 			   unsigned flags, struct printbuf *err)
 {
 	struct bch_fs *c = trans->c;
-	struct bkey_buf k;
 
+	struct bkey_buf k __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&k);
-	bch2_bkey_buf_copy(&k, c, &b->key);
+	bch2_bkey_buf_copy(&k, &b->key);
 
-	int ret = drop_dev_ptrs(c, bkey_i_to_s(k.k), dev_idx, flags, err, true) ?:
+	return drop_dev_ptrs(c, bkey_i_to_s(k.k), dev_idx, flags, err, true) ?:
 		bch2_btree_node_update_key(trans, iter, b, k.k, 0, false);
-
-	bch2_bkey_buf_exit(&k, c);
-	return ret;
 }
 
 static int bch2_dev_usrdata_drop_key(struct btree_trans *trans,
@@ -81,12 +78,11 @@ static int bch2_dev_usrdata_drop_key(struct btree_trans *trans,
 	struct bkey_i *n =
 		errptr_try(bch2_bkey_make_mut(trans, iter, &k, BTREE_UPDATE_internal_snapshot_node));
 
-	enum set_needs_rebalance_ctx ctx = SET_NEEDS_REBALANCE_opt_change;
-	struct bch_inode_opts opts;
-
 	try(drop_dev_ptrs(c, bkey_i_to_s(n), dev_idx, flags, err, false));
-	try(bch2_extent_get_apply_io_opts_one(trans, &opts, iter, k, ctx));
-	try(bch2_bkey_set_needs_rebalance(c, &opts, n, ctx, 0));
+
+	struct bch_inode_opts opts;
+	try(bch2_bkey_get_io_opts(trans, NULL, k, &opts));
+	try(bch2_bkey_set_needs_rebalance(c, &opts, n, SET_NEEDS_REBALANCE_opt_change, 0));
 
 	/*
 	 * Since we're not inserting through an extent iterator
@@ -155,9 +151,6 @@ static int bch2_dev_metadata_drop(struct bch_fs *c,
 	if (flags & BCH_FORCE_IF_METADATA_LOST)
 		return bch_err_throw(c, remove_with_metadata_missing_unimplemented);
 
-	struct bkey_buf k;
-	bch2_bkey_buf_init(&k);
-
 	CLASS(btree_trans, trans)(c);
 
 	for (unsigned id = 0; id < btree_id_nr_alive(c) && !ret; id++) {
@@ -183,7 +176,6 @@ next:
 	}
 
 	bch2_btree_interior_updates_flush(c);
-	bch2_bkey_buf_exit(&k, c);
 
 	BUG_ON(bch2_err_matches(ret, BCH_ERR_transaction_restart));
 
@@ -224,11 +216,10 @@ int bch2_dev_data_drop_by_backpointers(struct bch_fs *c, unsigned dev_idx, unsig
 {
 	CLASS(btree_trans, trans)(c);
 
-	struct bkey_buf last_flushed;
+	struct bkey_buf last_flushed __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&last_flushed);
-	bkey_init(&last_flushed.k->k);
 
-	int ret = bch2_btree_write_buffer_flush_sync(trans) ?:
+	return bch2_btree_write_buffer_flush_sync(trans) ?:
 		for_each_btree_key_max_commit(trans, iter, BTREE_ID_backpointers,
 				POS(dev_idx, 0),
 				POS(dev_idx, U64_MAX), 0, k,
@@ -240,9 +231,6 @@ int bch2_dev_data_drop_by_backpointers(struct bch_fs *c, unsigned dev_idx, unsig
 				     &last_flushed, flags, err);
 
 	}));
-
-	bch2_bkey_buf_exit(&last_flushed, trans->c);
-	return ret;
 }
 
 int bch2_dev_data_drop(struct bch_fs *c, unsigned dev_idx,

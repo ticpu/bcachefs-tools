@@ -527,7 +527,7 @@ enum fsck_err_opts {
 	  OPT_DEVICE|OPT_RUNTIME,					\
 	  OPT_STR(bch2_member_states),					\
 	  BCH_MEMBER_STATE,		BCH_MEMBER_STATE_rw,		\
-	  "state",	"Specifies device state")			\
+	  "state",	"rw,ro,failed,spare")				\
 	x(bucket_size,			u32,				\
 	  OPT_DEVICE|OPT_HUMAN_READABLE|OPT_SB_FIELD_SECTORS,		\
 	  OPT_UINT(0, S64_MAX),						\
@@ -695,7 +695,7 @@ static inline void bch2_io_opts_fixups(struct bch_inode_opts *opts)
 	}
 }
 
-void bch2_inode_opts_get(struct bch_fs *, struct bch_inode_opts *);
+void bch2_inode_opts_get(struct bch_fs *, struct bch_inode_opts *, bool);
 bool bch2_opt_is_inode_opt(enum bch_opt_id);
 
 #endif /* _BCACHEFS_OPTS_H */

@@ -176,14 +176,15 @@ static void bchfs_read(struct btree_trans *trans,
 		       struct readpages_iter *readpages_iter)
 {
 	struct bch_fs *c = trans->c;
-	struct bkey_buf sk;
 	int flags = BCH_READ_retry_if_stale|
 		BCH_READ_may_promote;
 	int ret = 0;
 
 	rbio->subvol = inum.subvol;
 
+	struct bkey_buf sk __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&sk);
+
 	bch2_trans_begin(trans);
 	CLASS(btree_iter, iter)(trans, BTREE_ID_extents,
 			     POS(inum.inum, rbio->bio.bi_iter.bi_sector),
@@ -215,7 +216,7 @@ static void bchfs_read(struct btree_trans *trans,
 			bkey_start_offset(k.k);
 		sectors = k.k->size - offset_into_extent;
 
-		bch2_bkey_buf_reassemble(&sk, c, k);
+		bch2_bkey_buf_reassemble(&sk, k);
 
 		ret = bch2_read_indirect_extent(trans, &data_btree,
 					&offset_into_extent, &sk);
@@ -280,8 +281,6 @@ err:
 		rbio->bio.bi_status = BLK_STS_IOERR;
 		bio_endio(&rbio->bio);
 	}
-
-	bch2_bkey_buf_exit(&sk, c);
 }
 
 void bch2_readahead(struct readahead_control *ractl)
@@ -759,6 +758,9 @@ int bch2_write_begin(
 
 	bch2_pagecache_add_get(inode);
 
+	if (pos > inode->v.i_size)
+		bch2_zero_pagecache_posteof(inode);
+
 	folio = __filemap_get_folio(mapping, pos >> PAGE_SHIFT,
 				    FGP_WRITEBEGIN | fgf_set_order(len),
 				    mapping_gfp_mask(mapping));
@@ -1060,7 +1062,10 @@ static ssize_t bch2_buffered_write(struct kiocb *iocb, struct iov_iter *iter)
 	ssize_t written = 0;
 	int ret = 0;
 
-	bch2_pagecache_add_get(inode);
+	guard(bch2_pagecache_add)(inode);
+
+	if (pos > inode->v.i_size)
+		bch2_zero_pagecache_posteof(inode);
 
 	do {
 		unsigned offset = pos & (PAGE_SIZE - 1);
@@ -1116,8 +1121,6 @@ again:
 
 		balance_dirty_pages_ratelimited(mapping);
 	} while (iov_iter_count(iter));
-
-	bch2_pagecache_add_put(inode);
 
 	return written ? written : ret;
 }

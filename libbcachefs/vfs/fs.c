@@ -6,11 +6,8 @@
 #include "alloc/accounting.h"
 #include "alloc/buckets.h"
 
-#include "btree/bkey_buf.h"
 #include "btree/update.h"
 
-#include "data/extents.h"
-#include "data/read.h"
 #include "data/rebalance.h"
 
 #include "fs/acl.h"
@@ -30,7 +27,6 @@
 #include "snapshots/snapshot.h"
 
 #include "vfs/fs.h"
-#include "vfs/io.h"
 #include "vfs/ioctl.h"
 #include "vfs/buffered.h"
 #include "vfs/direct.h"
@@ -39,7 +35,6 @@
 #include <linux/aio.h>
 #include <linux/backing-dev.h>
 #include <linux/exportfs.h>
-#include <linux/fiemap.h>
 #include <linux/fileattr.h>
 #include <linux/fs_context.h>
 #include <linux/module.h>
@@ -905,10 +900,11 @@ static int bch2_rename2(struct mnt_idmap *idmap,
 
 	CLASS(btree_trans, trans)(c);
 
-	ret   = bch2_subvol_is_ro_trans(trans, src_dir->ei_inum.subvol) ?:
-		bch2_subvol_is_ro_trans(trans, dst_dir->ei_inum.subvol);
+	ret = lockrestart_do(trans,
+		bch2_subvol_is_ro_trans(trans, src_dir->ei_inum.subvol) ?:
+		bch2_subvol_is_ro_trans(trans, dst_dir->ei_inum.subvol));
 	if (ret)
-		goto err_tx_restart;
+		goto err;
 
 	if (inode_attr_changing(dst_dir, src_inode, Inode_opt_project)) {
 		ret = bch2_fs_quota_transfer(c, src_inode,
@@ -1050,71 +1046,59 @@ static void bch2_setattr_copy(struct mnt_idmap *idmap,
 	}
 }
 
+static int bch2_setattr_nonsize_trans(struct btree_trans *trans,
+				      struct mnt_idmap *idmap,
+				      struct bch_inode_info *inode,
+				      struct iattr *attr)
+{
+	struct posix_acl *acl __free(kfree) = NULL;
+
+	CLASS(btree_iter_uninit, inode_iter)(trans);
+	struct bch_inode_unpacked inode_u;
+	try(bch2_inode_peek(trans, &inode_iter, &inode_u, inode_inum(inode), BTREE_ITER_intent));
+
+	bch2_setattr_copy(idmap, inode, &inode_u, attr);
+
+	if (attr->ia_valid & ATTR_MODE)
+		try(bch2_acl_chmod(trans, inode_inum(inode), &inode_u, inode_u.bi_mode, &acl));
+
+	try(bch2_inode_write(trans, &inode_iter, &inode_u));
+	try(bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc));
+
+	bch2_inode_update_after_write(trans, inode, &inode_u, attr->ia_valid);
+
+	if (acl) {
+		set_cached_acl(&inode->v, ACL_TYPE_ACCESS, acl);
+		acl = NULL;
+	}
+
+	return 0;
+}
+
 int bch2_setattr_nonsize(struct mnt_idmap *idmap,
 			 struct bch_inode_info *inode,
 			 struct iattr *attr)
 {
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
-	struct bch_qid qid;
-	struct btree_iter inode_iter = {};
-	struct bch_inode_unpacked inode_u;
-	struct posix_acl *acl = NULL;
-	kuid_t kuid;
-	kgid_t kgid;
-	int ret;
 
 	guard(mutex)(&inode->ei_update_lock);
 
-	qid = inode->ei_qid;
+	struct bch_qid qid = inode->ei_qid;
 
 	if (attr->ia_valid & ATTR_UID) {
-		kuid = from_vfsuid(idmap, i_user_ns(&inode->v), attr->ia_vfsuid);
+		kuid_t kuid = from_vfsuid(idmap, i_user_ns(&inode->v), attr->ia_vfsuid);
 		qid.q[QTYP_USR] = from_kuid(i_user_ns(&inode->v), kuid);
 	}
 
 	if (attr->ia_valid & ATTR_GID) {
-		kgid = from_vfsgid(idmap, i_user_ns(&inode->v), attr->ia_vfsgid);
+		kgid_t kgid = from_vfsgid(idmap, i_user_ns(&inode->v), attr->ia_vfsgid);
 		qid.q[QTYP_GRP] = from_kgid(i_user_ns(&inode->v), kgid);
 	}
 
 	try(bch2_fs_quota_transfer(c, inode, qid, ~0, KEY_TYPE_QUOTA_PREALLOC));
 
 	CLASS(btree_trans, trans)(c);
-retry:
-	bch2_trans_begin(trans);
-	kfree(acl);
-	acl = NULL;
-
-	ret = bch2_inode_peek(trans, &inode_iter, &inode_u, inode_inum(inode),
-			      BTREE_ITER_intent);
-	if (ret)
-		goto btree_err;
-
-	bch2_setattr_copy(idmap, inode, &inode_u, attr);
-
-	if (attr->ia_valid & ATTR_MODE) {
-		ret = bch2_acl_chmod(trans, inode_inum(inode), &inode_u,
-				     inode_u.bi_mode, &acl);
-		if (ret)
-			goto btree_err;
-	}
-
-	ret =   bch2_inode_write(trans, &inode_iter, &inode_u) ?:
-		bch2_trans_commit(trans, NULL, NULL,
-				  BCH_TRANS_COMMIT_no_enospc);
-btree_err:
-	bch2_trans_iter_exit(&inode_iter);
-
-	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
-		goto retry;
-	if (unlikely(ret))
-		return ret;
-
-	bch2_inode_update_after_write(trans, inode, &inode_u, attr->ia_valid);
-
-	if (acl)
-		set_cached_acl(&inode->v, ACL_TYPE_ACCESS, acl);
-	return 0;
+	return lockrestart_do(trans, bch2_setattr_nonsize_trans(trans, idmap, inode, attr));
 }
 
 static int bch2_getattr(struct mnt_idmap *idmap,
@@ -1204,278 +1188,6 @@ static int bch2_tmpfile(struct mnt_idmap *idmap,
 	d_mark_tmpfile(file, &inode->v);
 	d_instantiate(file->f_path.dentry, &inode->v);
 	return finish_open_simple(file, 0);
-}
-
-struct bch_fiemap_extent {
-	struct bkey_buf	kbuf;
-	unsigned	flags;
-};
-
-static int bch2_fill_extent(struct bch_fs *c,
-			    struct fiemap_extent_info *info,
-			    struct bch_fiemap_extent *fe)
-{
-	struct bkey_s_c k = bkey_i_to_s_c(fe->kbuf.k);
-	unsigned flags = fe->flags;
-
-	BUG_ON(!k.k->size);
-
-	if (bkey_extent_is_direct_data(k.k)) {
-		struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
-		const union bch_extent_entry *entry;
-		struct extent_ptr_decoded p;
-
-		if (k.k->type == KEY_TYPE_reflink_v)
-			flags |= FIEMAP_EXTENT_SHARED;
-
-		bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
-			int flags2 = 0;
-			u64 offset = p.ptr.offset;
-
-			if (p.ptr.unwritten)
-				flags2 |= FIEMAP_EXTENT_UNWRITTEN;
-
-			if (p.crc.compression_type)
-				flags2 |= FIEMAP_EXTENT_ENCODED;
-			else
-				offset += p.crc.offset;
-
-			if ((offset & (block_sectors(c) - 1)) ||
-			    (k.k->size & (block_sectors(c) - 1)))
-				flags2 |= FIEMAP_EXTENT_NOT_ALIGNED;
-
-			try(fiemap_fill_next_extent(info,
-						bkey_start_offset(k.k) << 9,
-						offset << 9,
-						k.k->size << 9, flags|flags2));
-		}
-
-		return 0;
-	} else if (bkey_extent_is_inline_data(k.k)) {
-		return fiemap_fill_next_extent(info,
-					       bkey_start_offset(k.k) << 9,
-					       0, k.k->size << 9,
-					       flags|
-					       FIEMAP_EXTENT_DATA_INLINE);
-	} else if (k.k->type == KEY_TYPE_reservation) {
-		return fiemap_fill_next_extent(info,
-					       bkey_start_offset(k.k) << 9,
-					       0, k.k->size << 9,
-					       flags|
-					       FIEMAP_EXTENT_DELALLOC|
-					       FIEMAP_EXTENT_UNWRITTEN);
-	} else if (k.k->type == KEY_TYPE_error) {
-		return 0;
-	} else {
-		WARN_ONCE(1, "unhandled key type %s",
-			  k.k->type < KEY_TYPE_MAX
-			  ? bch2_bkey_types[k.k->type]
-			  : "(unknown)");
-		return 0;
-	}
-}
-
-/*
- * Scan a range of an inode for data in pagecache.
- *
- * Intended to be retryable, so don't modify the output params until success is
- * imminent.
- */
-static int
-bch2_fiemap_hole_pagecache(struct inode *vinode, u64 *start, u64 *end,
-			   bool nonblock)
-{
-	loff_t	dstart, dend;
-
-	dstart = bch2_seek_pagecache_data(vinode, *start, *end, 0, nonblock);
-	if (dstart < 0)
-		return dstart;
-
-	if (dstart == *end) {
-		*start = dstart;
-		return 0;
-	}
-
-	dend = bch2_seek_pagecache_hole(vinode, dstart, *end, 0, nonblock);
-	if (dend < 0)
-		return dend;
-
-	/* race */
-	BUG_ON(dstart == dend);
-
-	*start = dstart;
-	*end = dend;
-	return 0;
-}
-
-/*
- * Scan a range of pagecache that corresponds to a file mapping hole in the
- * extent btree. If data is found, fake up an extent key so it looks like a
- * delalloc extent to the rest of the fiemap processing code.
- */
-static int
-bch2_next_fiemap_pagecache_extent(struct btree_trans *trans, struct bch_inode_info *inode,
-				  u64 start, u64 end, struct bch_fiemap_extent *cur)
-{
-	struct bch_fs		*c = trans->c;
-	struct bkey_i_extent	*delextent;
-	struct bch_extent_ptr	ptr = {};
-	loff_t			dstart = start << 9, dend = end << 9;
-	int			ret;
-
-	/*
-	 * We hold btree locks here so we cannot block on folio locks without
-	 * dropping trans locks first. Run a nonblocking scan for the common
-	 * case of no folios over holes and fall back on failure.
-	 *
-	 * Note that dropping locks like this is technically racy against
-	 * writeback inserting to the extent tree, but a non-sync fiemap scan is
-	 * fundamentally racy with writeback anyways. Therefore, just report the
-	 * range as delalloc regardless of whether we have to cycle trans locks.
-	 */
-	ret = bch2_fiemap_hole_pagecache(&inode->v, &dstart, &dend, true);
-	if (ret == -EAGAIN)
-		ret = drop_locks_do(trans,
-			bch2_fiemap_hole_pagecache(&inode->v, &dstart, &dend, false));
-	if (ret < 0)
-		return ret;
-
-	/*
-	 * Create a fake extent key in the buffer. We have to add a dummy extent
-	 * pointer for the fill code to add an extent entry. It's explicitly
-	 * zeroed to reflect delayed allocation (i.e. phys offset 0).
-	 */
-	bch2_bkey_buf_realloc(&cur->kbuf, c, sizeof(*delextent) / sizeof(u64));
-	delextent = bkey_extent_init(cur->kbuf.k);
-	delextent->k.p = POS(inode->ei_inum.inum, dend >> 9);
-	delextent->k.size = (dend - dstart) >> 9;
-	bch2_bkey_append_ptr(&delextent->k_i, ptr);
-
-	cur->flags = FIEMAP_EXTENT_DELALLOC;
-
-	return 0;
-}
-
-static int bch2_next_fiemap_extent(struct btree_trans *trans,
-				   struct bch_inode_info *inode,
-				   u64 start, u64 end,
-				   struct bch_fiemap_extent *cur)
-{
-	u32 snapshot;
-	try(bch2_subvolume_get_snapshot(trans, inode->ei_inum.subvol, &snapshot));
-
-	CLASS(btree_iter, iter)(trans, BTREE_ID_extents,
-				SPOS(inode->ei_inum.inum, start, snapshot), 0);
-	struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_max(&iter, POS(inode->ei_inum.inum, end)));
-
-	u64 pagecache_end = k.k ? max(start, bkey_start_offset(k.k)) : end;
-
-	try(bch2_next_fiemap_pagecache_extent(trans, inode, start, pagecache_end, cur));
-
-	struct bpos pagecache_start = bkey_start_pos(&cur->kbuf.k->k);
-
-	/*
-	 * Does the pagecache or the btree take precedence?
-	 *
-	 * It _should_ be the pagecache, so that we correctly report delalloc
-	 * extents when dirty in the pagecache (we're COW, after all).
-	 *
-	 * But we'd have to add per-sector writeback tracking to
-	 * bch_folio_state, otherwise we report delalloc extents for clean
-	 * cached data in the pagecache.
-	 *
-	 * We should do this, but even then fiemap won't report stable mappings:
-	 * on bcachefs data moves around in the background (copygc, rebalance)
-	 * and we don't provide a way for userspace to lock that out.
-	 */
-	if (k.k &&
-	    bkey_le(bpos_max(iter.pos, bkey_start_pos(k.k)),
-		    pagecache_start)) {
-		bch2_bkey_buf_reassemble(&cur->kbuf, trans->c, k);
-		bch2_cut_front(iter.pos, cur->kbuf.k);
-		bch2_cut_back(POS(inode->ei_inum.inum, end), cur->kbuf.k);
-		cur->flags = 0;
-	} else if (k.k) {
-		bch2_cut_back(bkey_start_pos(k.k), cur->kbuf.k);
-	}
-
-	if (cur->kbuf.k->k.type == KEY_TYPE_reflink_p) {
-		unsigned sectors = cur->kbuf.k->k.size;
-		s64 offset_into_extent = 0;
-		enum btree_id data_btree = BTREE_ID_extents;
-		try(bch2_read_indirect_extent(trans, &data_btree, &offset_into_extent, &cur->kbuf));
-
-		struct bkey_i *k = cur->kbuf.k;
-		sectors = min_t(unsigned, sectors, k->k.size - offset_into_extent);
-
-		bch2_cut_front(POS(k->k.p.inode,
-				   bkey_start_offset(&k->k) + offset_into_extent),
-			       k);
-		bch2_key_resize(&k->k, sectors);
-		k->k.p = iter.pos;
-		k->k.p.offset += k->k.size;
-	}
-
-	return 0;
-}
-
-static int bch2_fiemap(struct inode *vinode, struct fiemap_extent_info *info,
-		       u64 start, u64 len)
-{
-	struct bch_fs *c = vinode->i_sb->s_fs_info;
-	struct bch_inode_info *ei = to_bch_ei(vinode);
-	struct bch_fiemap_extent cur, prev;
-	int ret = 0;
-
-	try(fiemap_prep(&ei->v, info, start, &len, 0));
-
-	if (start + len < start)
-		return -EINVAL;
-
-	start >>= 9;
-	u64 end = (start + len) >> 9;
-
-	bch2_bkey_buf_init(&cur.kbuf);
-	bch2_bkey_buf_init(&prev.kbuf);
-	bkey_init(&prev.kbuf.k->k);
-
-	CLASS(btree_trans, trans)(c);
-
-	while (start < end) {
-		ret = lockrestart_do(trans,
-			bch2_next_fiemap_extent(trans, ei, start, end, &cur));
-		if (ret)
-			goto err;
-
-		BUG_ON(bkey_start_offset(&cur.kbuf.k->k) < start);
-		BUG_ON(cur.kbuf.k->k.p.offset > end);
-
-		if (bkey_start_offset(&cur.kbuf.k->k) == end)
-			break;
-
-		start = cur.kbuf.k->k.p.offset;
-
-		if (!bkey_deleted(&prev.kbuf.k->k)) {
-			bch2_trans_unlock(trans);
-			ret = bch2_fill_extent(c, info, &prev);
-			if (ret)
-				goto err;
-		}
-
-		bch2_bkey_buf_copy(&prev.kbuf, c, cur.kbuf.k);
-		prev.flags = cur.flags;
-	}
-
-	if (!bkey_deleted(&prev.kbuf.k->k)) {
-		bch2_trans_unlock(trans);
-		prev.flags |= FIEMAP_EXTENT_LAST;
-		ret = bch2_fill_extent(c, info, &prev);
-	}
-err:
-	bch2_bkey_buf_exit(&cur.kbuf, c);
-	bch2_bkey_buf_exit(&prev.kbuf, c);
-
-	return bch2_err_class(ret < 0 ? ret : 0);
 }
 
 static const struct vm_operations_struct bch_vm_ops = {

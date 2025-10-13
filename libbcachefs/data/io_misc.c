@@ -37,16 +37,18 @@ int bch2_extent_fallocate(struct btree_trans *trans,
 {
 	struct bch_fs *c = trans->c;
 	struct disk_reservation disk_res = { 0 };
-	struct closure cl;
 	struct open_buckets open_buckets = { 0 };
-	struct bkey_buf old, new;
 	unsigned sectors_allocated = 0, new_replicas;
 	bool unwritten = opts.nocow &&
 	    c->sb.version >= bcachefs_metadata_version_unwritten_extents;
 	int ret;
 
+	struct bkey_buf old __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&old);
+	struct bkey_buf new __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&new);
+
+	struct closure cl;
 	closure_init_stack(&cl);
 
 	struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_slot(iter));
@@ -63,12 +65,12 @@ int bch2_extent_fallocate(struct btree_trans *trans,
 	if (unlikely(ret))
 		goto err_noprint;
 
-	bch2_bkey_buf_reassemble(&old, c, k);
+	bch2_bkey_buf_reassemble(&old, k);
 
 	if (!unwritten) {
 		struct bkey_i_reservation *reservation;
 
-		bch2_bkey_buf_realloc(&new, c, sizeof(*reservation) / sizeof(u64));
+		bch2_bkey_buf_realloc(&new, sizeof(*reservation) / sizeof(u64));
 		reservation = bkey_reservation_init(new.k);
 		reservation->k.p = iter->pos;
 		bch2_key_resize(&reservation->k, sectors);
@@ -80,7 +82,7 @@ int bch2_extent_fallocate(struct btree_trans *trans,
 
 		devs_have.nr = 0;
 
-		bch2_bkey_buf_realloc(&new, c, BKEY_EXTENT_U64s_MAX);
+		bch2_bkey_buf_realloc(&new, BKEY_EXTENT_U64s_MAX);
 
 		e = bkey_extent_init(new.k);
 		e->k.p = iter->pos;
@@ -126,8 +128,6 @@ err:
 err_noprint:
 	bch2_open_buckets_put(c, &open_buckets);
 	bch2_disk_reservation_put(c, &disk_res);
-	bch2_bkey_buf_exit(&new, c);
-	bch2_bkey_buf_exit(&old, c);
 
 	if (closure_nr_remaining(&cl) != 1) {
 		bch2_trans_unlock_long(trans);
@@ -309,10 +309,8 @@ int bch2_truncate(struct bch_fs *c, subvol_inum inum, u64 new_i_size, u64 *i_sec
 	 */
 	guard(rwsem_read)(&c->snapshot_create_lock);
 	CLASS(btree_trans, trans)(c);
-	int ret = bch2_logged_op_start(trans, &op.k_i);
-	if (ret)
-		return ret;
-	ret = __bch2_resume_logged_op_truncate(trans, &op.k_i, i_sectors_delta);
+	try(bch2_logged_op_start(trans, &op.k_i));
+	int ret = __bch2_resume_logged_op_truncate(trans, &op.k_i, i_sectors_delta);
 	ret = bch2_logged_op_finish(trans, &op.k_i) ?: ret;
 	return ret;
 }

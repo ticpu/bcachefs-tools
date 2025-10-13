@@ -24,6 +24,15 @@ enum btree_update_mode {
 #undef x
 };
 
+struct btree_update_node {
+	struct btree			*b;
+	unsigned			level;
+	__le64				seq;
+	__BKEY_PADDED(key, BKEY_BTREE_PTR_VAL_U64s_MAX);
+};
+
+typedef DARRAY_PREALLOCATED(struct btree_update_node, BTREE_UPDATE_NODES_MAX) btree_update_nodes;
+
 /*
  * Tracks an in progress split/rewrite of a btree node and the update to the
  * parent node:
@@ -94,23 +103,8 @@ struct btree_update {
 		unsigned		nr;
 	}				prealloc_nodes[2];
 
-	/* Nodes being freed: */
-	struct keylist			old_keys;
-	u64				_old_keys[BTREE_UPDATE_NODES_MAX *
-						  BKEY_BTREE_PTR_U64s_MAX];
-
-	/* Nodes being added: */
-	struct keylist			new_keys;
-	u64				_new_keys[BTREE_UPDATE_NODES_MAX *
-						  BKEY_BTREE_PTR_U64s_MAX];
-
-	/* New nodes, that will be made reachable by this update: */
-	struct btree			*new_nodes[BTREE_UPDATE_NODES_MAX];
-	unsigned			nr_new_nodes;
-
-	struct btree			*old_nodes[BTREE_UPDATE_NODES_MAX];
-	__le64				old_nodes_seq[BTREE_UPDATE_NODES_MAX];
-	unsigned			nr_old_nodes;
+	btree_update_nodes		old_nodes;
+	btree_update_nodes		new_nodes;
 
 	open_bucket_idx_t		open_buckets[BTREE_UPDATE_NODES_MAX *
 						     BCH_REPLICAS_MAX];
@@ -174,6 +168,8 @@ static inline int bch2_foreground_maybe_merge(struct btree_trans *trans,
 						    btree_next_sib);
 }
 
+int bch2_btree_node_get_iter(struct btree_trans *, struct btree_iter *, struct btree *);
+
 int bch2_btree_node_rewrite(struct btree_trans *, struct btree_iter *,
 			    struct btree *, unsigned,
 			    enum bch_trans_commit_flags);
@@ -194,8 +190,6 @@ void bch2_btree_node_rewrite_async(struct bch_fs *, struct btree *);
 int bch2_btree_node_update_key(struct btree_trans *, struct btree_iter *,
 			       struct btree *, struct bkey_i *,
 			       unsigned, bool);
-int bch2_btree_node_update_key_get_iter(struct btree_trans *, struct btree *,
-					struct bkey_i *, unsigned, bool);
 
 void bch2_btree_set_root_for_read(struct bch_fs *, struct btree *);
 

@@ -18,13 +18,14 @@
 #include "alloc/replicas.h"
 
 #include "btree/cache.h"
-#include "btree/io.h"
+#include "btree/check.h"
+#include "btree/interior.h"
 #include "btree/iter.h"
 #include "btree/key_cache.h"
+#include "btree/read.h"
 #include "btree/update.h"
-#include "btree/interior.h"
+#include "btree/write.h"
 #include "btree/write_buffer.h"
-#include "btree/check.h"
 
 #include "data/compress.h"
 #include "data/copygc.h"
@@ -484,7 +485,7 @@ STORE(bch2_fs)
 
 #ifdef CONFIG_BCACHEFS_TESTS
 	if (attr == &sysfs_perf_test) {
-		char *tmp = kstrdup(buf, GFP_KERNEL), *p = tmp;
+		char *tmp __free(kfree) = kstrdup(buf, GFP_KERNEL), *p = tmp;
 		char *test		= strsep(&p, " \t\n");
 		char *nr_str		= strsep(&p, " \t\n");
 		char *threads_str	= strsep(&p, " \t\n");
@@ -496,7 +497,6 @@ STORE(bch2_fs)
 		    !(ret = kstrtouint(threads_str, 10, &threads)) &&
 		    !(ret = bch2_strtoull_h(nr_str, &nr)))
 			ret = bch2_btree_perf_test(c, test, nr, threads);
-		kfree(tmp);
 
 		if (ret)
 			size = ret;
@@ -672,7 +672,7 @@ static ssize_t sysfs_opt_store(struct bch_fs *c,
 	if (unlikely(!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_sysfs)))
 		return -EROFS;
 
-	char *tmp = kstrdup(buf, GFP_KERNEL);
+	char *tmp __free(kfree) = kstrdup(buf, GFP_KERNEL);
 	if (!tmp) {
 		ret = -ENOMEM;
 		goto err;
@@ -681,7 +681,6 @@ static ssize_t sysfs_opt_store(struct bch_fs *c,
 	u64 v;
 	ret =   bch2_opt_parse(c, opt, strim(tmp), &v, NULL) ?:
 		bch2_opt_hook_pre_set(c, ca, 0, id, v, true);
-	kfree(tmp);
 
 	if (ret < 0)
 		goto err;
@@ -744,9 +743,7 @@ int bch2_opts_create_sysfs_files(struct kobject *kobj, unsigned type)
 		if (!(i->flags & type))
 			continue;
 
-		int ret = sysfs_create_file(kobj, &i->attr);
-		if (ret)
-			return ret;
+		try(sysfs_create_file(kobj, &i->attr));
 	}
 
 	return 0;
@@ -874,17 +871,11 @@ STORE(bch2_dev)
 	struct bch_fs *c = ca->fs;
 
 	if (attr == &sysfs_label) {
-		char *tmp;
-		int ret;
-
-		tmp = kstrdup(buf, GFP_KERNEL);
+		char *tmp __free(kfree) = kstrdup(buf, GFP_KERNEL);
 		if (!tmp)
 			return -ENOMEM;
 
-		ret = bch2_dev_group_set(c, ca, strim(tmp));
-		kfree(tmp);
-		if (ret)
-			return ret;
+		try(bch2_dev_group_set(c, ca, strim(tmp)));
 	}
 
 	if (attr == &sysfs_io_errors_reset)

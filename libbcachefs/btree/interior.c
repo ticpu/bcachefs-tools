@@ -13,10 +13,12 @@
 #include "btree/check.h"
 #include "btree/update.h"
 #include "btree/interior.h"
-#include "btree/io.h"
 #include "btree/iter.h"
 #include "btree/journal_overlay.h"
 #include "btree/locking.h"
+#include "btree/read.h"
+#include "btree/sort.h"
+#include "btree/write.h"
 
 #include "data/extents.h"
 #include "data/keylist.h"
@@ -59,18 +61,17 @@ int bch2_btree_node_check_topology(struct btree_trans *trans, struct btree *b)
 	struct bpos node_min = b->key.k.type == KEY_TYPE_btree_ptr_v2
 		? bkey_i_to_btree_ptr_v2(&b->key)->v.min_key
 		: b->data->min_key;
-	struct btree_and_journal_iter iter;
-	struct bkey_s_c k;
 	CLASS(printbuf, buf)();
-	struct bkey_buf prev;
 	int ret = 0;
 
 	BUG_ON(b->key.k.type == KEY_TYPE_btree_ptr_v2 &&
 	       !bpos_eq(bkey_i_to_btree_ptr_v2(&b->key)->v.min_key,
 			b->data->min_key));
 
+	struct bkey_buf prev __cleanup(bch2_bkey_buf_exit);
 	bch2_bkey_buf_init(&prev);
-	bkey_init(&prev.k->k);
+
+	struct btree_and_journal_iter iter;
 	bch2_btree_and_journal_iter_init_node_iter(trans, &iter, b);
 
 	/*
@@ -102,6 +103,7 @@ int bch2_btree_node_check_topology(struct btree_trans *trans, struct btree *b)
 	if (!b->c.level)
 		goto out;
 
+	struct bkey_s_c k;
 	while ((k = bch2_btree_and_journal_iter_peek(c, &iter)).k) {
 		if (k.k->type != KEY_TYPE_btree_ptr_v2)
 			goto out;
@@ -124,7 +126,7 @@ int bch2_btree_node_check_topology(struct btree_trans *trans, struct btree *b)
 			goto err;
 		}
 
-		bch2_bkey_buf_reassemble(&prev, c, k);
+		bch2_bkey_buf_reassemble(&prev, k);
 		bch2_btree_and_journal_iter_advance(&iter);
 	}
 
@@ -144,7 +146,6 @@ int bch2_btree_node_check_topology(struct btree_trans *trans, struct btree *b)
 	}
 out:
 	bch2_btree_and_journal_iter_exit(&iter);
-	bch2_bkey_buf_exit(&prev, c);
 	return ret;
 err:
 	bch2_btree_id_level_to_text(&buf, b->c.btree_id, b->c.level);
@@ -236,7 +237,6 @@ static void __btree_node_free(struct btree_trans *trans, struct btree *b)
 	BUG_ON(b == btree_node_root(c, b));
 	BUG_ON(b->ob.nr);
 	BUG_ON(!list_empty(&b->write_blocked));
-	BUG_ON(b->will_make_reachable);
 
 	clear_btree_node_noevict(b);
 }
@@ -610,24 +610,23 @@ static void bch2_btree_update_free(struct btree_update *as, struct btree_trans *
 	closure_wake_up(&c->btree_interior_update_wait);
 }
 
-static void btree_update_add_key(struct btree_update *as,
-				 struct keylist *keys, struct btree *b)
+static void btree_update_add_node(btree_update_nodes *nodes, struct btree *b)
 {
-	struct bkey_i *k = &b->key;
+	BUG_ON(darray_make_room(nodes, 1));
 
-	BUG_ON(bch2_keylist_u64s(keys) + k->k.u64s >
-	       ARRAY_SIZE(as->_old_keys));
+	struct btree_update_node *n = &darray_top(*nodes);
+	nodes->nr++;
 
-	bkey_copy(keys->top, k);
-	bkey_i_to_btree_ptr_v2(keys->top)->v.mem_ptr = b->c.level + 1;
-
-	bch2_keylist_push(keys);
+	n->b		= b;
+	n->level	= b->c.level;
+	n->seq		= b->data->keys.seq;
+	bkey_copy(&n->key, &b->key);
 }
 
 static bool btree_update_new_nodes_marked_sb(struct btree_update *as)
 {
-	for_each_keylist_key(&as->new_keys, k)
-		if (!bch2_dev_btree_bitmap_marked(as->c, bkey_i_to_s_c(k)))
+	darray_for_each(as->new_nodes, i)
+		if (!bch2_dev_btree_bitmap_marked(as->c, bkey_i_to_s_c(&i->key)))
 			return false;
 	return true;
 }
@@ -637,8 +636,8 @@ static void btree_update_new_nodes_mark_sb(struct btree_update *as)
 	struct bch_fs *c = as->c;
 
 	guard(mutex)(&c->sb_lock);
-	for_each_keylist_key(&as->new_keys, k)
-		bch2_dev_btree_bitmap_mark(c, bkey_i_to_s_c(k));
+	darray_for_each(as->new_nodes, i)
+		bch2_dev_btree_bitmap_mark(c, bkey_i_to_s_c(&i->key));
 
 	bch2_write_super(c);
 }
@@ -656,17 +655,26 @@ static int btree_update_nodes_written_trans(struct btree_trans *trans,
 
 	trans->journal_pin = &as->journal;
 
-	for_each_keylist_key(&as->old_keys, k) {
-		unsigned level = bkey_i_to_btree_ptr_v2(k)->v.mem_ptr;
-
-		try(bch2_key_trigger_old(trans, as->btree_id, level, bkey_i_to_s_c(k),
+	darray_for_each(as->old_nodes, i)
+		try(bch2_key_trigger_old(trans, as->btree_id, i->level + 1, bkey_i_to_s_c(&i->key),
 					 BTREE_TRIGGER_transactional));
-	}
 
-	for_each_keylist_key(&as->new_keys, k) {
-		unsigned level = bkey_i_to_btree_ptr_v2(k)->v.mem_ptr;
+	darray_for_each(as->new_nodes, i) {
+		/*
+		 * Use key from cached btree node, not the key we saved before,
+		 * to avoid racing with bch2_btree_node_update_key()
+		 *
+		 * We need an intent lock held on the node we're marking to
+		 * avoid racing with btree_node_update_key() - unless the node
+		 * has already been freed:
+		 */
+		CLASS(btree_iter_uninit, iter)(trans);
+		int ret = bch2_btree_node_get_iter(trans, &iter, i->b);
+		if (ret == -BCH_ERR_btree_node_dying)
+			ret = 0;
+		try(ret);
 
-		try(bch2_key_trigger_new(trans, as->btree_id, level, bkey_i_to_s(k),
+		try(bch2_key_trigger_new(trans, as->btree_id, i->level + 1, bkey_i_to_s(&i->b->key),
 					 BTREE_TRIGGER_transactional));
 	}
 
@@ -684,10 +692,8 @@ static noinline __no_kmsan_checks bool btree_node_seq_matches(struct btree *b, _
 static void btree_update_nodes_written(struct btree_update *as)
 {
 	struct bch_fs *c = as->c;
-	struct btree *b;
 	CLASS(btree_trans, trans)(c);
 	u64 journal_seq = 0;
-	unsigned i;
 	int ret;
 
 	/*
@@ -723,17 +729,15 @@ static void btree_update_nodes_written(struct btree_update *as)
 	 * the btree node has been reused for a different node, and the data
 	 * buffer swapped for a new data buffer).
 	 */
-	for (i = 0; i < as->nr_old_nodes; i++) {
-		b = as->old_nodes[i];
-
+	darray_for_each(as->old_nodes, i) {
 		bch2_trans_begin(trans);
-		btree_node_lock_nopath_nofail(trans, &b->c, SIX_LOCK_read);
-		bool seq_matches = btree_node_seq_matches(b, as->old_nodes_seq[i]);
-		six_unlock_read(&b->c.lock);
+		btree_node_lock_nopath_nofail(trans, &i->b->c, SIX_LOCK_read);
+		bool seq_matches = btree_node_seq_matches(i->b, i->seq);
+		six_unlock_read(&i->b->c.lock);
 		bch2_trans_unlock_long(trans);
 
 		if (seq_matches)
-			wait_on_bit_io(&b->flags, BTREE_NODE_write_in_flight_inner,
+			wait_on_bit_io(&i->b->flags, BTREE_NODE_write_in_flight_inner,
 				       TASK_UNINTERRUPTIBLE);
 	}
 
@@ -756,11 +760,22 @@ static void btree_update_nodes_written(struct btree_update *as)
 			BCH_TRANS_COMMIT_no_check_rw|
 			BCH_TRANS_COMMIT_journal_reclaim,
 			btree_update_nodes_written_trans(trans, as));
+err:
+	/*
+	 * Clear will_make_reachable while we still hold intent locks on all our
+	 * new nodes, to avoid racing with btree_node_update_key():
+	 */
+	scoped_guard(mutex, &c->btree_interior_update_lock)
+		darray_for_each(as->new_nodes, i) {
+			BUG_ON(i->b->will_make_reachable != (unsigned long) as);
+			i->b->will_make_reachable = 0;
+			clear_btree_node_will_make_reachable(i->b);
+		}
+
 	bch2_trans_unlock(trans);
 
 	bch2_fs_fatal_err_on(ret && !bch2_journal_error(&c->journal), c,
 			     "%s", bch2_err_str(ret));
-err:
 	/*
 	 * Ensure transaction is unlocked before using btree_node_lock_nopath()
 	 * (the use of which is always suspect, we need to work on removing this
@@ -778,7 +793,7 @@ err:
 	 * to free as->b and calling btree_update_reparent() on us - we'll
 	 * recheck under btree_update_lock below:
 	 */
-	b = READ_ONCE(as->b);
+	struct btree *b = READ_ONCE(as->b);
 	if (b) {
 		/*
 		 * @b is the node we did the final insert into:
@@ -846,25 +861,13 @@ err:
 
 	bch2_journal_pin_drop(&c->journal, &as->journal);
 
-	scoped_guard(mutex, &c->btree_interior_update_lock) {
-		for (i = 0; i < as->nr_new_nodes; i++) {
-			b = as->new_nodes[i];
-
-			BUG_ON(b->will_make_reachable != (unsigned long) as);
-			b->will_make_reachable = 0;
-			clear_btree_node_will_make_reachable(b);
-		}
+	darray_for_each(as->new_nodes, i) {
+		btree_node_lock_nopath_nofail(trans, &i->b->c, SIX_LOCK_read);
+		btree_node_write_if_need(trans, i->b, SIX_LOCK_read);
+		six_unlock_read(&i->b->c.lock);
 	}
 
-	for (i = 0; i < as->nr_new_nodes; i++) {
-		b = as->new_nodes[i];
-
-		btree_node_lock_nopath_nofail(trans, &b->c, SIX_LOCK_read);
-		btree_node_write_if_need(trans, b, SIX_LOCK_read);
-		six_unlock_read(&b->c.lock);
-	}
-
-	for (i = 0; i < as->nr_open_buckets; i++)
+	for (unsigned i = 0; i < as->nr_open_buckets; i++)
 		bch2_open_bucket_put(c, c->open_buckets + as->open_buckets[i]);
 
 	bch2_btree_update_free(as, trans);
@@ -989,14 +992,12 @@ static void bch2_btree_update_add_new_node(struct btree_update *as, struct btree
 
 	guard(mutex)(&c->btree_interior_update_lock);
 
-	BUG_ON(as->nr_new_nodes >= ARRAY_SIZE(as->new_nodes));
 	BUG_ON(b->will_make_reachable);
 
-	as->new_nodes[as->nr_new_nodes++] = b;
 	b->will_make_reachable = 1UL|(unsigned long) as;
 	set_btree_node_will_make_reachable(b);
 
-	btree_update_add_key(as, &as->new_keys, b);
+	btree_update_add_node(&as->new_nodes, b);
 
 	if (b->key.k.type == KEY_TYPE_btree_ptr_v2) {
 		unsigned bytes = vstruct_end(&b->data->keys) - (void *) b->data;
@@ -1005,41 +1006,6 @@ static void bch2_btree_update_add_new_node(struct btree_update *as, struct btree
 		bkey_i_to_btree_ptr_v2(&b->key)->v.sectors_written =
 			cpu_to_le16(sectors);
 	}
-}
-
-/*
- * returns true if @b was a new node
- */
-static void btree_update_drop_new_node(struct bch_fs *c, struct btree *b)
-{
-	struct btree_update *as;
-	unsigned long v;
-
-	scoped_guard(mutex, &c->btree_interior_update_lock) {
-		/*
-		 * When b->will_make_reachable != 0, it owns a ref on as->cl that's
-		 * dropped when it gets written by bch2_btree_complete_write - the
-		 * xchg() is for synchronization with bch2_btree_complete_write:
-		 */
-		v = xchg(&b->will_make_reachable, 0);
-		clear_btree_node_will_make_reachable(b);
-		as = (struct btree_update *) (v & ~1UL);
-
-		if (!as)
-			return;
-
-		unsigned i;
-		for (i = 0; i < as->nr_new_nodes; i++)
-			if (as->new_nodes[i] == b)
-				goto found;
-
-		BUG();
-	found:
-		array_remove_item(as->new_nodes, as->nr_new_nodes, i);
-	}
-
-	if (v & 1)
-		closure_put(&as->cl);
 }
 
 static void bch2_btree_update_get_open_buckets(struct btree_update *as, struct btree *b)
@@ -1117,22 +1083,7 @@ static void bch2_btree_interior_update_will_free_node(struct btree_update *as,
 
 	mutex_unlock(&c->btree_interior_update_lock);
 
-	/*
-	 * Is this a node that isn't reachable on disk yet?
-	 *
-	 * Nodes that aren't reachable yet have writes blocked until they're
-	 * reachable - now that we've cancelled any pending writes and moved
-	 * things waiting on that write to wait on this update, we can drop this
-	 * node from the list of nodes that the other update is making
-	 * reachable, prior to freeing it:
-	 */
-	btree_update_drop_new_node(c, b);
-
-	btree_update_add_key(as, &as->old_keys, b);
-
-	as->old_nodes[as->nr_old_nodes] = b;
-	as->old_nodes_seq[as->nr_old_nodes] = b->data->keys.seq;
-	as->nr_old_nodes++;
+	btree_update_add_node(&as->old_nodes, b);
 }
 
 static void bch2_btree_update_done(struct btree_update *as, struct btree_trans *trans)
@@ -1249,8 +1200,8 @@ bch2_btree_update_start(struct btree_trans *trans, struct btree_path *path,
 	INIT_LIST_HEAD(&as->list);
 	INIT_LIST_HEAD(&as->unwritten_list);
 	INIT_LIST_HEAD(&as->write_blocked_list);
-	bch2_keylist_init(&as->old_keys, as->_old_keys);
-	bch2_keylist_init(&as->new_keys, as->_new_keys);
+	darray_init(&as->old_nodes);
+	darray_init(&as->new_nodes);
 	bch2_keylist_init(&as->parent_keys, as->inline_keys);
 
 	scoped_guard(mutex, &c->btree_interior_update_lock)
@@ -2203,8 +2154,7 @@ err_free_update:
 	goto out;
 }
 
-static int get_iter_to_node(struct btree_trans *trans, struct btree_iter *iter,
-			    struct btree *b)
+int bch2_btree_node_get_iter(struct btree_trans *trans, struct btree_iter *iter, struct btree *b)
 {
 	bch2_trans_node_iter_init(trans, iter, b->c.btree_id, b->key.k.p,
 				  BTREE_MAX_DEPTH, b->c.level,
@@ -2329,7 +2279,7 @@ int bch2_btree_node_rewrite_key_get_iter(struct btree_trans *trans,
 					 enum bch_trans_commit_flags flags)
 {
 	CLASS(btree_iter_uninit, iter)(trans);
-	int ret = get_iter_to_node(trans, &iter, b);
+	int ret = bch2_btree_node_get_iter(trans, &iter, b);
 	if (ret)
 		return ret == -BCH_ERR_btree_node_dying ? 0 : ret;
 
@@ -2362,7 +2312,7 @@ static void async_btree_node_rewrite_work(struct work_struct *work)
 
 	closure_wake_up(&c->btree_node_rewrites_wait);
 
-	bch2_bkey_buf_exit(&a->key, c);
+	bch2_bkey_buf_exit(&a->key);
 	enumerated_ref_put(&c->writes, BCH_WRITE_REF_node_rewrite);
 	kfree(a);
 }
@@ -2379,7 +2329,7 @@ void bch2_btree_node_rewrite_async(struct bch_fs *c, struct btree *b)
 	INIT_WORK(&a->work, async_btree_node_rewrite_work);
 
 	bch2_bkey_buf_init(&a->key);
-	bch2_bkey_buf_copy(&a->key, c, &b->key);
+	bch2_bkey_buf_copy(&a->key, &b->key);
 
 	bool now = false, pending = false;
 
@@ -2399,7 +2349,7 @@ void bch2_btree_node_rewrite_async(struct bch_fs *c, struct btree *b)
 	} else if (pending) {
 		/* bch2_do_pending_node_rewrites will execute */
 	} else {
-		bch2_bkey_buf_exit(&a->key, c);
+		bch2_bkey_buf_exit(&a->key);
 		kfree(a);
 	}
 }
@@ -2442,77 +2392,72 @@ void bch2_free_pending_node_rewrites(struct bch_fs *c)
 		if (!a)
 			break;
 
-		bch2_bkey_buf_exit(&a->key, c);
+		bch2_bkey_buf_exit(&a->key);
 		kfree(a);
 	}
 }
 
 static int __bch2_btree_node_update_key(struct btree_trans *trans,
 					struct btree_iter *iter,
-					struct btree *b, struct btree *new_hash,
+					struct btree *b,
 					struct bkey_i *new_key,
 					unsigned commit_flags,
 					bool skip_triggers)
 {
 	struct bch_fs *c = trans->c;
 
-	if (!skip_triggers) {
-		try(bch2_key_trigger_old(trans, b->c.btree_id, b->c.level + 1,
-					 bkey_i_to_s_c(&b->key),
-					 BTREE_TRIGGER_transactional));
-		try(bch2_key_trigger_new(trans, b->c.btree_id, b->c.level + 1,
-					 bkey_i_to_s(new_key),
-					 BTREE_TRIGGER_transactional));
-	}
+	if (!btree_node_will_make_reachable(b)) {
+		if (!skip_triggers) {
+			try(bch2_key_trigger_old(trans, b->c.btree_id, b->c.level + 1,
+						 bkey_i_to_s_c(&b->key),
+						 BTREE_TRIGGER_transactional));
+			try(bch2_key_trigger_new(trans, b->c.btree_id, b->c.level + 1,
+						 bkey_i_to_s(new_key),
+						 BTREE_TRIGGER_transactional));
+		}
 
-	CLASS(btree_iter_uninit, iter2)(trans);
-	struct btree *parent = btree_node_parent(btree_iter_path(trans, iter), b);
-	if (parent) {
-		bch2_trans_copy_iter(&iter2, iter);
+		CLASS(btree_iter_uninit, iter2)(trans);
+		struct btree *parent = btree_node_parent(btree_iter_path(trans, iter), b);
+		if (parent) {
+			bch2_trans_copy_iter(&iter2, iter);
 
-		iter2.path = bch2_btree_path_make_mut(trans, iter2.path,
-				iter2.flags & BTREE_ITER_intent,
-				_THIS_IP_);
+			iter2.path = bch2_btree_path_make_mut(trans, iter2.path,
+					iter2.flags & BTREE_ITER_intent,
+					_THIS_IP_);
 
-		struct btree_path *path2 = btree_iter_path(trans, &iter2);
-		BUG_ON(path2->level != b->c.level);
-		BUG_ON(!bpos_eq(path2->pos, new_key->k.p));
+			struct btree_path *path2 = btree_iter_path(trans, &iter2);
+			BUG_ON(path2->level != b->c.level);
+			BUG_ON(!bpos_eq(path2->pos, new_key->k.p));
 
-		btree_path_set_level_up(trans, path2);
+			btree_path_set_level_up(trans, path2);
 
-		trans->paths_sorted = false;
+			trans->paths_sorted = false;
 
-		try(bch2_btree_iter_traverse(&iter2));
-		try(bch2_trans_update(trans, &iter2, new_key, BTREE_TRIGGER_norun));
+			try(bch2_btree_iter_traverse(&iter2));
+			try(bch2_trans_update(trans, &iter2, new_key, BTREE_TRIGGER_norun));
+		} else {
+			BUG_ON(!btree_node_is_root(c, b));
+
+			struct jset_entry *e = errptr_try(bch2_trans_jset_entry_alloc(trans,
+									jset_u64s(new_key->k.u64s)));
+
+			journal_entry_set(e,
+					  BCH_JSET_ENTRY_btree_root,
+					  b->c.btree_id, b->c.level,
+					  new_key, new_key->k.u64s);
+		}
+
+		try(bch2_trans_commit(trans, NULL, NULL, commit_flags));
 	} else {
-		BUG_ON(!btree_node_is_root(c, b));
-
-		struct jset_entry *e = errptr_try(bch2_trans_jset_entry_alloc(trans,
-								jset_u64s(new_key->k.u64s)));
-
-		journal_entry_set(e,
-				  BCH_JSET_ENTRY_btree_root,
-				  b->c.btree_id, b->c.level,
-				  new_key, new_key->k.u64s);
+		/*
+		 * Node is not visible on disk yet, we only need to update the
+		 * key in the btree node cache - btree_update_nodes_written()
+		 * will pick it up:
+		 */
 	}
-
-	try(bch2_trans_commit(trans, NULL, NULL, commit_flags));
 
 	bch2_btree_node_lock_write_nofail(trans, btree_iter_path(trans, iter), &b->c);
-
-	if (new_hash) {
-		guard(mutex)(&c->btree_cache.lock);
-		bch2_btree_node_hash_remove(&c->btree_cache, new_hash);
-
-		__bch2_btree_node_hash_remove(&c->btree_cache, b);
-
-		bkey_copy(&b->key, new_key);
-		int ret = __bch2_btree_node_hash_insert(&c->btree_cache, b);
-		BUG_ON(ret);
-	} else {
-		bkey_copy(&b->key, new_key);
-	}
-
+	bkey_copy(&b->key, new_key);
 	bch2_btree_node_unlock_write(trans, btree_iter_path(trans, iter), b);
 	return 0;
 }
@@ -2521,67 +2466,15 @@ int bch2_btree_node_update_key(struct btree_trans *trans, struct btree_iter *ite
 			       struct btree *b, struct bkey_i *new_key,
 			       unsigned commit_flags, bool skip_triggers)
 {
-	struct bch_fs *c = trans->c;
-	struct btree *new_hash = NULL;
 	struct btree_path *path = btree_iter_path(trans, iter);
-	int ret = 0;
 
 	try(bch2_btree_path_upgrade(trans, path, b->c.level + 1));
 
-	struct closure cl;
-	closure_init_stack(&cl);
-
-	/*
-	 * check btree_ptr_hash_val() after @b is locked by
-	 * btree_iter_traverse():
-	 */
-	if (btree_ptr_hash_val(new_key) != b->hash_val) {
-		ret = bch2_btree_cache_cannibalize_lock(trans, &cl);
-		if (ret)
-			try(drop_locks_do(trans, (closure_sync(&cl), 0)));
-
-		new_hash = bch2_btree_node_mem_alloc(trans, false);
-		bch2_btree_cache_cannibalize_unlock(trans);
-
-		ret = PTR_ERR_OR_ZERO(new_hash);
-		if (ret)
-			goto err;
-
-		bkey_copy(&new_hash->key, new_key);
-		ret = bch2_btree_node_hash_insert(&c->btree_cache,
-				new_hash, b->c.level, b->c.btree_id);
-		BUG_ON(ret);
-	}
-
 	path->intent_ref++;
-	ret = __bch2_btree_node_update_key(trans, iter, b, new_hash, new_key,
-					   commit_flags, skip_triggers);
+	int ret = __bch2_btree_node_update_key(trans, iter, b, new_key,
+					       commit_flags, skip_triggers);
 	--path->intent_ref;
-
-	if (new_hash) {
-		scoped_guard(mutex, &c->btree_cache.lock)
-			bch2_btree_node_hash_remove(&c->btree_cache, b);
-		bch2_btree_node_to_freelist(c, new_hash);
-	}
-err:
-	closure_sync(&cl);
 	return ret;
-}
-
-int bch2_btree_node_update_key_get_iter(struct btree_trans *trans,
-					struct btree *b, struct bkey_i *new_key,
-					unsigned commit_flags, bool skip_triggers)
-{
-	CLASS(btree_iter_uninit, iter)(trans);
-	int ret = get_iter_to_node(trans, &iter, b);
-	if (ret)
-		return ret == -BCH_ERR_btree_node_dying ? 0 : ret;
-
-	bch2_bkey_drop_ptrs(bkey_i_to_s(new_key), ptr,
-			    !bch2_bkey_has_device(bkey_i_to_s(&b->key), ptr->dev));
-
-	return bch2_btree_node_update_key(trans, &iter, b, new_key,
-					  commit_flags, skip_triggers);
 }
 
 /* Init code: */

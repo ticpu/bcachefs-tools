@@ -283,9 +283,6 @@ static inline struct bkey_s_c bch2_btree_path_peek_slot_exact(struct btree_path 
 	return (struct bkey_s_c) { u, NULL };
 }
 
-struct bkey_i *bch2_btree_journal_peek_slot(struct btree_trans *,
-					struct btree_iter *, struct bpos);
-
 void bch2_btree_path_level_init(struct btree_trans *, struct btree_path *, struct btree *);
 
 int __bch2_trans_mutex_lock(struct btree_trans *, struct mutex *);
@@ -693,10 +690,8 @@ static inline struct bkey_s_c __bch2_bkey_get_iter(struct btree_trans *trans,
 				enum btree_iter_update_trigger_flags flags,
 				enum bch_bkey_type type)
 {
-	struct bkey_s_c k;
-
 	bch2_trans_iter_init(trans, iter, btree, pos, flags);
-	k = bch2_btree_iter_peek_slot(iter);
+	struct bkey_s_c k = bch2_btree_iter_peek_slot(iter);
 
 	if (!bkey_err(k) && type && k.k->type != type)
 		k = bkey_s_c_err(bch_err_throw(trans->c, ENOENT_bkey_type_mismatch));

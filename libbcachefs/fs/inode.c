@@ -432,11 +432,7 @@ int bch2_inode_write_flags(struct btree_trans *trans,
 		     struct bch_inode_unpacked *inode,
 		     enum btree_iter_update_trigger_flags flags)
 {
-	struct bkey_inode_buf *inode_p;
-
-	inode_p = bch2_trans_kmalloc(trans, sizeof(*inode_p));
-	if (IS_ERR(inode_p))
-		return PTR_ERR(inode_p);
+	struct bkey_inode_buf *inode_p = errptr_try(bch2_trans_kmalloc(trans, sizeof(*inode_p)));
 
 	bch2_inode_pack_inlined(inode_p, inode);
 	inode_p->inode.k.p.snapshot = iter->snapshot;
@@ -445,11 +441,7 @@ int bch2_inode_write_flags(struct btree_trans *trans,
 
 int __bch2_fsck_write_inode(struct btree_trans *trans, struct bch_inode_unpacked *inode)
 {
-	struct bkey_inode_buf *inode_p =
-		bch2_trans_kmalloc(trans, sizeof(*inode_p));
-
-	if (IS_ERR(inode_p))
-		return PTR_ERR(inode_p);
+	struct bkey_inode_buf *inode_p = errptr_try(bch2_trans_kmalloc(trans, sizeof(*inode_p)));
 
 	bch2_inode_pack(inode_p, inode);
 	inode_p->inode.k.p.snapshot = inode->bi_snapshot;
@@ -470,18 +462,15 @@ int bch2_fsck_write_inode(struct btree_trans *trans, struct bch_inode_unpacked *
 
 struct bkey_i *bch2_inode_to_v3(struct btree_trans *trans, struct bkey_i *k)
 {
-	struct bch_inode_unpacked u;
-	struct bkey_inode_buf *inode_p;
-	int ret;
-
 	if (!bkey_is_inode(&k->k))
 		return ERR_PTR(-ENOENT);
 
-	inode_p = bch2_trans_kmalloc(trans, sizeof(*inode_p));
+	struct bkey_inode_buf *inode_p = bch2_trans_kmalloc(trans, sizeof(*inode_p));
 	if (IS_ERR(inode_p))
 		return ERR_CAST(inode_p);
 
-	ret = bch2_inode_unpack(bkey_i_to_s_c(k), &u);
+	struct bch_inode_unpacked u;
+	int ret = bch2_inode_unpack(bkey_i_to_s_c(k), &u);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -1125,8 +1114,6 @@ int bch2_inode_rm(struct bch_fs *c, subvol_inum inum)
 
 	try(bch2_inode_delete_keys(trans, inum, BTREE_ID_xattrs));
 
-	bch2_trans_begin(trans);
-
 	u32 snapshot;
 	try(commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc,
 		      bch2_inode_rm_trans(trans, inum, &snapshot)));
@@ -1196,26 +1183,6 @@ void bch2_inode_opts_get_inode(struct bch_fs *c,
 	ret->change_cookie = atomic_read(&c->opt_change_cookie);
 
 	bch2_io_opts_fixups(ret);
-}
-
-int bch2_inum_snapshot_opts_get(struct btree_trans *trans,
-				u64 inum, u32 snapshot,
-				struct bch_inode_opts *opts)
-{
-	if (inum) {
-		struct bch_inode_unpacked inode;
-		try(bch2_inode_find_by_inum_snapshot(trans, inum, snapshot, &inode, 0));
-
-		bch2_inode_opts_get_inode(trans->c, &inode, opts);
-	} else {
-		/*
-		 * data_update_index_update may call us for reflink btree extent
-		 * updates, inum will be 0
-		 */
-
-		bch2_inode_opts_get(trans->c, opts);
-	}
-	return 0;
 }
 
 int bch2_inode_set_casefold(struct btree_trans *trans, subvol_inum inum,

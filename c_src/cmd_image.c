@@ -96,10 +96,10 @@ struct move_btree_args {
 	unsigned	target;
 };
 
-static bool move_btree_pred(struct bch_fs *c, void *_arg,
-			    enum btree_id btree, struct bkey_s_c k,
-			    struct bch_inode_opts *io_opts,
-			    struct data_update_opts *data_opts)
+static int move_btree_pred(struct btree_trans *trans, void *_arg,
+			   enum btree_id btree, struct bkey_s_c k,
+			   struct bch_inode_opts *io_opts,
+			   struct data_update_opts *data_opts)
 {
 	struct move_btree_args *args = _arg;
 

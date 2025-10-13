@@ -15,7 +15,7 @@
 #include "init/error.h"
 #include "init/fs.h"
 
-#include "journal/io.h"
+#include "journal/read.h"
 #include "journal/seq_blacklist.h"
 
 #include <linux/fs_parser.h>

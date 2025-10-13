@@ -8,15 +8,16 @@
 #include "alloc/replicas.h"
 
 #include "btree/check.h"
-#include "btree/io.h"
 #include "btree/iter.h"
 #include "btree/journal_overlay.h"
 #include "btree/interior.h"
 #include "btree/key_cache.h"
+#include "btree/sort.h"
+#include "btree/write.h"
 #include "btree/write_buffer.h"
 
 #include "journal/journal.h"
-#include "journal/io.h"
+#include "journal/read.h"
 #include "journal/reclaim.h"
 
 #include "init/error.h"
@@ -827,7 +828,7 @@ static inline int do_bch2_trans_commit(struct btree_trans *trans,
 				       unsigned long trace_ip)
 {
 	struct bch_fs *c = trans->c;
-	int ret = 0, u64s_delta = 0;
+	int  u64s_delta = 0;
 
 	for (unsigned idx = 0; idx < trans->nr_updates; idx++) {
 		struct btree_insert_entry *i = trans->updates + idx;
@@ -838,22 +839,16 @@ static inline int do_bch2_trans_commit(struct btree_trans *trans,
 		u64s_delta -= i->old_btree_u64s;
 
 		if (!same_leaf_as_next(trans, i)) {
-			if (u64s_delta <= 0) {
-				ret = bch2_foreground_maybe_merge(trans, i->path,
-							i->level, flags);
-				if (unlikely(ret))
-					return ret;
-			}
+			if (u64s_delta <= 0)
+				try(bch2_foreground_maybe_merge(trans, i->path, i->level, flags));
 
 			u64s_delta = 0;
 		}
 	}
 
-	ret = bch2_trans_lock_write(trans);
-	if (unlikely(ret))
-		return ret;
+	try(bch2_trans_lock_write(trans));
 
-	ret = bch2_trans_commit_write_locked(trans, flags, stopped_at, trace_ip);
+	int ret = bch2_trans_commit_write_locked(trans, flags, stopped_at, trace_ip);
 
 	if (!ret && unlikely(trans->journal_replay_not_finished))
 		bch2_drop_overwrites_from_journal(trans);
@@ -877,12 +872,11 @@ static inline int do_bch2_trans_commit(struct btree_trans *trans,
 
 static int journal_reclaim_wait_done(struct bch_fs *c)
 {
-	int ret = bch2_journal_error(&c->journal) ?:
-		bch2_btree_key_cache_wait_done(c);
+	try(bch2_journal_error(&c->journal));
+	try(bch2_btree_key_cache_wait_done(c));
 
-	if (!ret)
-		journal_reclaim_kick(&c->journal);
-	return ret;
+	journal_reclaim_kick(&c->journal);
+	return 0;
 }
 
 static noinline
