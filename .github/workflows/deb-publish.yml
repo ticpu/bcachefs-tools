@@ -228,7 +228,7 @@ jobs:
             echo '::endgroup::'                                                                        \
           "
       - name: Create and populate repos
-        timeout-minutes: 10
+        timeout-minutes: 60
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
