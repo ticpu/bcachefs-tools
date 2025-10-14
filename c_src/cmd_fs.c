@@ -188,9 +188,9 @@ static struct durability_x_degraded replicas_durability(const struct bch_replica
 		unsigned dev_idx = r->devs[i];
 		struct dev_name *dev = dev_idx_to_name(dev_names, dev_idx);
 
-		unsigned durability = dev ? dev->durability : 0;
+		unsigned durability = dev ? dev->durability : 1;
 
-		if (dev->dev && dev->state != BCH_MEMBER_STATE_failed)
+		if (dev && dev->dev && dev->state != BCH_MEMBER_STATE_failed)
 			ret.minus_degraded += durability;
 		ret.durability += durability;
 	}
