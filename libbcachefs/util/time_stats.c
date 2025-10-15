@@ -166,6 +166,204 @@ void bch2_time_stats_reset(struct bch2_time_stats *stats)
 	spin_unlock_irq(&stats->lock);
 }
 
+#include <linux/seq_buf.h>
+
+static void seq_buf_time_units_aligned(struct seq_buf *out, u64 ns)
+{
+	const struct time_unit *u = bch2_pick_time_units(ns);
+
+	seq_buf_printf(out, "%8llu %s", div64_u64(ns, u->nsecs), u->name);
+}
+
+static inline u64 time_stats_lifetime(const struct bch2_time_stats *stats)
+{
+	return local_clock() - stats->start_time;
+}
+
+void bch2_time_stats_to_seq_buf(struct seq_buf *out, struct bch2_time_stats *stats,
+		const char *epoch_name, unsigned int flags)
+{
+	struct quantiles *quantiles = time_stats_to_quantiles(stats);
+	s64 f_mean = 0, d_mean = 0;
+	u64 f_stddev = 0, d_stddev = 0;
+	u64 lifetime = time_stats_lifetime(stats);
+
+	if (stats->buffer) {
+		int cpu;
+
+		spin_lock_irq(&stats->lock);
+		for_each_possible_cpu(cpu)
+			__bch2_time_stats_clear_buffer(stats, per_cpu_ptr(stats->buffer, cpu));
+		spin_unlock_irq(&stats->lock);
+	}
+
+	if (stats->freq_stats.n) {
+		/* avoid divide by zero */
+		f_mean = mean_and_variance_get_mean(stats->freq_stats);
+		f_stddev = mean_and_variance_get_stddev(stats->freq_stats);
+		d_mean = mean_and_variance_get_mean(stats->duration_stats);
+		d_stddev = mean_and_variance_get_stddev(stats->duration_stats);
+	} else if (flags & TIME_STATS_PRINT_NO_ZEROES) {
+		/* unless we didn't want zeroes anyway */
+		return;
+	}
+
+	seq_buf_printf(out, "count: %llu\n", stats->duration_stats.n);
+	seq_buf_printf(out, "lifetime: ");
+	seq_buf_time_units_aligned(out, lifetime);
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "                       since %-12s recent\n", epoch_name);
+
+	seq_buf_printf(out, "duration of events\n");
+
+	seq_buf_printf(out, "  min:                     ");
+	seq_buf_time_units_aligned(out, stats->min_duration);
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "  max:                     ");
+	seq_buf_time_units_aligned(out, stats->max_duration);
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "  total:                   ");
+	seq_buf_time_units_aligned(out, stats->total_duration);
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "  mean:                    ");
+	seq_buf_time_units_aligned(out, d_mean);
+	seq_buf_time_units_aligned(out, mean_and_variance_weighted_get_mean(stats->duration_stats_weighted, TIME_STATS_MV_WEIGHT));
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "  stddev:                  ");
+	seq_buf_time_units_aligned(out, d_stddev);
+	seq_buf_time_units_aligned(out, mean_and_variance_weighted_get_stddev(stats->duration_stats_weighted, TIME_STATS_MV_WEIGHT));
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "time between events\n");
+
+	seq_buf_printf(out, "  min:                     ");
+	seq_buf_time_units_aligned(out, stats->min_freq);
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "  max:                     ");
+	seq_buf_time_units_aligned(out, stats->max_freq);
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "  mean:                    ");
+	seq_buf_time_units_aligned(out, f_mean);
+	seq_buf_time_units_aligned(out, mean_and_variance_weighted_get_mean(stats->freq_stats_weighted, TIME_STATS_MV_WEIGHT));
+	seq_buf_printf(out, "\n");
+
+	seq_buf_printf(out, "  stddev:                  ");
+	seq_buf_time_units_aligned(out, f_stddev);
+	seq_buf_time_units_aligned(out, mean_and_variance_weighted_get_stddev(stats->freq_stats_weighted, TIME_STATS_MV_WEIGHT));
+	seq_buf_printf(out, "\n");
+
+	if (quantiles) {
+		int i = eytzinger0_first(NR_QUANTILES);
+		const struct time_unit *u =
+			bch2_pick_time_units(quantiles->entries[i].m);
+		u64 last_q = 0;
+
+		seq_buf_printf(out, "quantiles (%s):\t", u->name);
+		eytzinger0_for_each(i, NR_QUANTILES) {
+			bool is_last = eytzinger0_next(i, NR_QUANTILES) == -1;
+
+			u64 q = max(quantiles->entries[i].m, last_q);
+			seq_buf_printf(out, "%llu ", div_u64(q, u->nsecs));
+			if (is_last)
+				seq_buf_printf(out, "\n");
+			last_q = q;
+		}
+	}
+}
+
+void bch2_time_stats_to_json(struct seq_buf *out, struct bch2_time_stats *stats,
+		const char *epoch_name, unsigned int flags)
+{
+	struct quantiles *quantiles = time_stats_to_quantiles(stats);
+	s64 f_mean = 0, d_mean = 0;
+	u64 f_stddev = 0, d_stddev = 0;
+
+	if (stats->buffer) {
+		int cpu;
+
+		spin_lock_irq(&stats->lock);
+		for_each_possible_cpu(cpu)
+			__bch2_time_stats_clear_buffer(stats, per_cpu_ptr(stats->buffer, cpu));
+		spin_unlock_irq(&stats->lock);
+	}
+
+	if (stats->freq_stats.n) {
+		/* avoid divide by zero */
+		f_mean = mean_and_variance_get_mean(stats->freq_stats);
+		f_stddev = mean_and_variance_get_stddev(stats->freq_stats);
+		d_mean = mean_and_variance_get_mean(stats->duration_stats);
+		d_stddev = mean_and_variance_get_stddev(stats->duration_stats);
+	} else if (flags & TIME_STATS_PRINT_NO_ZEROES) {
+		/* unless we didn't want zeroes anyway */
+		return;
+	}
+
+	seq_buf_printf(out, "{\n");
+	seq_buf_printf(out, "  \"epoch\":       \"%s\",\n", epoch_name);
+	seq_buf_printf(out, "  \"count\":       %llu,\n", stats->duration_stats.n);
+
+	seq_buf_printf(out, "  \"duration_ns\": {\n");
+	seq_buf_printf(out, "    \"min\":       %llu,\n", stats->min_duration);
+	seq_buf_printf(out, "    \"max\":       %llu,\n", stats->max_duration);
+	seq_buf_printf(out, "    \"total\":     %llu,\n", stats->total_duration);
+	seq_buf_printf(out, "    \"mean\":      %llu,\n", d_mean);
+	seq_buf_printf(out, "    \"stddev\":    %llu\n", d_stddev);
+	seq_buf_printf(out, "  },\n");
+
+	d_mean = mean_and_variance_weighted_get_mean(stats->duration_stats_weighted, TIME_STATS_MV_WEIGHT);
+	d_stddev = mean_and_variance_weighted_get_stddev(stats->duration_stats_weighted, TIME_STATS_MV_WEIGHT);
+
+	seq_buf_printf(out, "  \"duration_ewma_ns\": {\n");
+	seq_buf_printf(out, "    \"mean\":      %llu,\n", d_mean);
+	seq_buf_printf(out, "    \"stddev\":    %llu\n", d_stddev);
+	seq_buf_printf(out, "  },\n");
+
+	seq_buf_printf(out, "  \"between_ns\": {\n");
+	seq_buf_printf(out, "    \"min\":       %llu,\n", stats->min_freq);
+	seq_buf_printf(out, "    \"max\":       %llu,\n", stats->max_freq);
+	seq_buf_printf(out, "    \"mean\":      %llu,\n", f_mean);
+	seq_buf_printf(out, "    \"stddev\":    %llu\n", f_stddev);
+	seq_buf_printf(out, "  },\n");
+
+	f_mean = mean_and_variance_weighted_get_mean(stats->freq_stats_weighted, TIME_STATS_MV_WEIGHT);
+	f_stddev = mean_and_variance_weighted_get_stddev(stats->freq_stats_weighted, TIME_STATS_MV_WEIGHT);
+
+	seq_buf_printf(out, "  \"between_ewma_ns\": {\n");
+	seq_buf_printf(out, "    \"mean\":      %llu,\n", f_mean);
+	seq_buf_printf(out, "    \"stddev\":    %llu\n", f_stddev);
+
+	if (quantiles) {
+		u64 last_q = 0;
+
+		/* close between_ewma_ns but signal more items */
+		seq_buf_printf(out, "  },\n");
+
+		seq_buf_printf(out, "  \"quantiles_ns\": [\n");
+		eytzinger0_for_each(i, NR_QUANTILES) {
+			bool is_last = eytzinger0_next(i, NR_QUANTILES) == -1;
+
+			u64 q = max(quantiles->entries[i].m, last_q);
+			seq_buf_printf(out, "    %llu", q);
+			if (!is_last)
+				seq_buf_printf(out, ", ");
+			last_q = q;
+		}
+		seq_buf_printf(out, "  ]\n");
+	} else {
+		/* close between_ewma_ns without dumping further */
+		seq_buf_printf(out, "  }\n");
+	}
+
+	seq_buf_printf(out, "}\n");
+}
+
 void bch2_time_stats_exit(struct bch2_time_stats *stats)
 {
 	if ((unsigned long) stats->buffer > TIME_STATS_NONPCPU)
@@ -178,6 +376,7 @@ void bch2_time_stats_init(struct bch2_time_stats *stats)
 	memset(stats, 0, sizeof(*stats));
 	stats->min_duration = U64_MAX;
 	stats->min_freq = U64_MAX;
+	stats->start_time = local_clock();
 	spin_lock_init(&stats->lock);
 }
 

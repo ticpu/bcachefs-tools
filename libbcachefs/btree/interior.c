@@ -659,24 +659,9 @@ static int btree_update_nodes_written_trans(struct btree_trans *trans,
 		try(bch2_key_trigger_old(trans, as->btree_id, i->level + 1, bkey_i_to_s_c(&i->key),
 					 BTREE_TRIGGER_transactional));
 
-	darray_for_each(as->new_nodes, i) {
-		/*
-		 * Use key from cached btree node, not the key we saved before,
-		 * to avoid racing with bch2_btree_node_update_key()
-		 *
-		 * We need an intent lock held on the node we're marking to
-		 * avoid racing with btree_node_update_key() - unless the node
-		 * has already been freed:
-		 */
-		CLASS(btree_iter_uninit, iter)(trans);
-		int ret = bch2_btree_node_get_iter(trans, &iter, i->b);
-		if (ret == -BCH_ERR_btree_node_dying)
-			ret = 0;
-		try(ret);
-
-		try(bch2_key_trigger_new(trans, as->btree_id, i->level + 1, bkey_i_to_s(&i->b->key),
+	darray_for_each(as->new_nodes, i)
+		try(bch2_key_trigger_new(trans, as->btree_id, i->level + 1, bkey_i_to_s(&i->key),
 					 BTREE_TRIGGER_transactional));
-	}
 
 	return 0;
 }
@@ -760,22 +745,11 @@ static void btree_update_nodes_written(struct btree_update *as)
 			BCH_TRANS_COMMIT_no_check_rw|
 			BCH_TRANS_COMMIT_journal_reclaim,
 			btree_update_nodes_written_trans(trans, as));
-err:
-	/*
-	 * Clear will_make_reachable while we still hold intent locks on all our
-	 * new nodes, to avoid racing with btree_node_update_key():
-	 */
-	scoped_guard(mutex, &c->btree_interior_update_lock)
-		darray_for_each(as->new_nodes, i) {
-			BUG_ON(i->b->will_make_reachable != (unsigned long) as);
-			i->b->will_make_reachable = 0;
-			clear_btree_node_will_make_reachable(i->b);
-		}
-
 	bch2_trans_unlock(trans);
 
 	bch2_fs_fatal_err_on(ret && !bch2_journal_error(&c->journal), c,
 			     "%s", bch2_err_str(ret));
+err:
 	/*
 	 * Ensure transaction is unlocked before using btree_node_lock_nopath()
 	 * (the use of which is always suspect, we need to work on removing this
@@ -860,6 +834,13 @@ err:
 	}
 
 	bch2_journal_pin_drop(&c->journal, &as->journal);
+
+	scoped_guard(mutex, &c->btree_interior_update_lock)
+		darray_for_each(as->new_nodes, i) {
+			BUG_ON(i->b->will_make_reachable != (unsigned long) as);
+			i->b->will_make_reachable = 0;
+			clear_btree_node_will_make_reachable(i->b);
+		}
 
 	darray_for_each(as->new_nodes, i) {
 		btree_node_lock_nopath_nofail(trans, &i->b->c, SIX_LOCK_read);
@@ -2406,55 +2387,47 @@ static int __bch2_btree_node_update_key(struct btree_trans *trans,
 {
 	struct bch_fs *c = trans->c;
 
-	if (!btree_node_will_make_reachable(b)) {
-		if (!skip_triggers) {
-			try(bch2_key_trigger_old(trans, b->c.btree_id, b->c.level + 1,
-						 bkey_i_to_s_c(&b->key),
-						 BTREE_TRIGGER_transactional));
-			try(bch2_key_trigger_new(trans, b->c.btree_id, b->c.level + 1,
-						 bkey_i_to_s(new_key),
-						 BTREE_TRIGGER_transactional));
-		}
-
-		CLASS(btree_iter_uninit, iter2)(trans);
-		struct btree *parent = btree_node_parent(btree_iter_path(trans, iter), b);
-		if (parent) {
-			bch2_trans_copy_iter(&iter2, iter);
-
-			iter2.path = bch2_btree_path_make_mut(trans, iter2.path,
-					iter2.flags & BTREE_ITER_intent,
-					_THIS_IP_);
-
-			struct btree_path *path2 = btree_iter_path(trans, &iter2);
-			BUG_ON(path2->level != b->c.level);
-			BUG_ON(!bpos_eq(path2->pos, new_key->k.p));
-
-			btree_path_set_level_up(trans, path2);
-
-			trans->paths_sorted = false;
-
-			try(bch2_btree_iter_traverse(&iter2));
-			try(bch2_trans_update(trans, &iter2, new_key, BTREE_TRIGGER_norun));
-		} else {
-			BUG_ON(!btree_node_is_root(c, b));
-
-			struct jset_entry *e = errptr_try(bch2_trans_jset_entry_alloc(trans,
-									jset_u64s(new_key->k.u64s)));
-
-			journal_entry_set(e,
-					  BCH_JSET_ENTRY_btree_root,
-					  b->c.btree_id, b->c.level,
-					  new_key, new_key->k.u64s);
-		}
-
-		try(bch2_trans_commit(trans, NULL, NULL, commit_flags));
-	} else {
-		/*
-		 * Node is not visible on disk yet, we only need to update the
-		 * key in the btree node cache - btree_update_nodes_written()
-		 * will pick it up:
-		 */
+	if (!skip_triggers) {
+		try(bch2_key_trigger_old(trans, b->c.btree_id, b->c.level + 1,
+					 bkey_i_to_s_c(&b->key),
+					 BTREE_TRIGGER_transactional));
+		try(bch2_key_trigger_new(trans, b->c.btree_id, b->c.level + 1,
+					 bkey_i_to_s(new_key),
+					 BTREE_TRIGGER_transactional));
 	}
+
+	CLASS(btree_iter_uninit, iter2)(trans);
+	struct btree *parent = btree_node_parent(btree_iter_path(trans, iter), b);
+	if (parent) {
+		bch2_trans_copy_iter(&iter2, iter);
+
+		iter2.path = bch2_btree_path_make_mut(trans, iter2.path,
+				iter2.flags & BTREE_ITER_intent,
+				_THIS_IP_);
+
+		struct btree_path *path2 = btree_iter_path(trans, &iter2);
+		BUG_ON(path2->level != b->c.level);
+		BUG_ON(!bpos_eq(path2->pos, new_key->k.p));
+
+		btree_path_set_level_up(trans, path2);
+
+		trans->paths_sorted = false;
+
+		try(bch2_btree_iter_traverse(&iter2));
+		try(bch2_trans_update(trans, &iter2, new_key, BTREE_TRIGGER_norun));
+	} else {
+		BUG_ON(!btree_node_is_root(c, b));
+
+		struct jset_entry *e = errptr_try(bch2_trans_jset_entry_alloc(trans,
+								jset_u64s(new_key->k.u64s)));
+
+		journal_entry_set(e,
+				  BCH_JSET_ENTRY_btree_root,
+				  b->c.btree_id, b->c.level,
+				  new_key, new_key->k.u64s);
+	}
+
+	try(bch2_trans_commit(trans, NULL, NULL, commit_flags));
 
 	bch2_btree_node_lock_write_nofail(trans, btree_iter_path(trans, iter), &b->c);
 	bkey_copy(&b->key, new_key);
@@ -2475,6 +2448,22 @@ int bch2_btree_node_update_key(struct btree_trans *trans, struct btree_iter *ite
 					       commit_flags, skip_triggers);
 	--path->intent_ref;
 	return ret;
+}
+
+int bch2_btree_node_update_key_get_iter(struct btree_trans *trans,
+					struct btree *b, struct bkey_i *new_key,
+					unsigned commit_flags, bool skip_triggers)
+{
+	CLASS(btree_iter_uninit, iter)(trans);
+	int ret = bch2_btree_node_get_iter(trans, &iter, b);
+	if (ret)
+		return ret == -BCH_ERR_btree_node_dying ? 0 : ret;
+
+	bch2_bkey_drop_ptrs(bkey_i_to_s(new_key), p, entry,
+			    !bch2_bkey_has_device(bkey_i_to_s(&b->key), p.ptr.dev));
+
+	return bch2_btree_node_update_key(trans, &iter, b, new_key,
+					  commit_flags, skip_triggers);
 }
 
 /* Init code: */

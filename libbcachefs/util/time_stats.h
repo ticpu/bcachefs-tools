@@ -79,6 +79,7 @@ struct bch2_time_stats {
 	u64             min_freq;
 	u64		last_event;
 	u64		last_event_start;
+	u64		start_time;
 
 	struct mean_and_variance	  duration_stats;
 	struct mean_and_variance	  freq_stats;
@@ -143,6 +144,14 @@ static inline bool track_event_change(struct bch2_time_stats *stats, bool v)
 }
 
 void bch2_time_stats_reset(struct bch2_time_stats *);
+
+#define TIME_STATS_PRINT_NO_ZEROES	(1U << 0)	/* print nothing if zero count */
+struct seq_buf;
+void bch2_time_stats_to_seq_buf(struct seq_buf *, struct bch2_time_stats *,
+				const char *epoch_name, unsigned int flags);
+void bch2_time_stats_to_json(struct seq_buf *, struct bch2_time_stats *,
+			     const char *epoch_name, unsigned int flags);
+
 void bch2_time_stats_exit(struct bch2_time_stats *);
 void bch2_time_stats_init(struct bch2_time_stats *);
 void bch2_time_stats_init_no_pcpu(struct bch2_time_stats *);
