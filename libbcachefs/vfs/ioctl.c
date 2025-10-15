@@ -26,7 +26,7 @@
 #define FSOP_GOING_FLAGS_LOGFLUSH	0x1	/* flush log but not data */
 #define FSOP_GOING_FLAGS_NOLOGFLUSH	0x2	/* don't flush log nor data */
 
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,17,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
 #define start_creating_user_path	user_path_create
 #define end_creating_path		done_path_create
 #define start_removing_user_path_at	user_path_locked_at

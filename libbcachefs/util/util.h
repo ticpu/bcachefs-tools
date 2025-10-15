@@ -49,7 +49,7 @@ struct closure;
 	(__builtin_types_compatible_p(typeof(_val), _type) ||		\
 	 __builtin_types_compatible_p(typeof(_val), const _type))
 
-#if defined(__KERNEL__) && LINUX_VERSION_CODE <= KERNEL_VERSION(6,17,0)
+#if defined(__KERNEL__) && LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
 static inline struct bio_vec *bio_inline_vecs(struct bio *bio)
 {
 	return (struct bio_vec *)(bio + 1);
@@ -66,7 +66,7 @@ static inline size_t buf_pages(void *p, size_t len)
 
 static inline void *bch2_kvmalloc_noprof(size_t n, gfp_t flags)
 {
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,17,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
 	void *p = unlikely(n >= INT_MAX)
 		? vmalloc_noprof(n)
 		: kvmalloc_noprof(n, flags & ~__GFP_ZERO);
