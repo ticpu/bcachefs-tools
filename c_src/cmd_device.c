@@ -416,27 +416,37 @@ static int cmd_device_set_state(int argc, char *argv[])
 		by_id = true;
 
 	if (offline) {
-		struct bch_opts opts = bch2_opts_empty();
-		struct bch_sb_handle sb = { NULL };
-
 		if (by_id)
 			die("Cannot specify offline device by id");
 
+		struct bch_opts opts = bch2_opts_empty();
+		opt_set(opts, nostart,	true);
+		opt_set(opts, degraded, BCH_DEGRADED_very);
+
+		struct bch_sb_handle sb = { NULL };
 		int ret = bch2_read_super(dev_str, &opts, &sb);
 		if (ret)
 			die("error opening %s: %s", dev_str, bch2_err_str(ret));
 
-		struct bch_member *m = bch2_members_v2_get_mut(sb.sb, sb.sb->dev_idx);
-
-		SET_BCH_MEMBER_STATE(m, new_state);
-
-		le64_add_cpu(&sb.sb->seq, 1);
-
-		bch2_super_write(sb.bdev->bd_fd, sb.sb);
-		ret = fsync(sb.bdev->bd_fd);
-		if (ret)
-			fprintf(stderr, "error writing superblock: fsync error (%m)");
+		unsigned dev_idx = sb.sb->dev_idx;
 		bch2_free_super(&sb);
+
+		/* scan for all devices in fs */
+		darray_const_str devs = get_or_split_cmdline_devs(1, &dev_str);
+
+		struct bch_fs *c = bch2_fs_open(&devs, &opts);
+		ret = PTR_ERR_OR_ZERO(c);
+		if (ret)
+			die("Error opening filesystem: %s", bch2_err_str(ret));
+
+		scoped_guard(mutex, &c->sb_lock) {
+			struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, dev_idx);
+
+			SET_BCH_MEMBER_STATE(m, new_state);
+
+			bch2_write_super(c);
+		}
+		bch2_fs_stop(c);
 		return ret;
 	}
 
