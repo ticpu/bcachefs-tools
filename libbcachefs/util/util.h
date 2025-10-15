@@ -49,7 +49,7 @@ struct closure;
 	(__builtin_types_compatible_p(typeof(_val), _type) ||		\
 	 __builtin_types_compatible_p(typeof(_val), const _type))
 
-#if defined(_KERNEL__) && LINUX_VERSION_CODE <= KERNEL_VERSION(6,17,0)
+#if defined(__KERNEL__) && LINUX_VERSION_CODE <= KERNEL_VERSION(6,17,0)
 static inline struct bio_vec *bio_inline_vecs(struct bio *bio)
 {
 	return (struct bio_vec *)(bio + 1);
