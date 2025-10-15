@@ -116,6 +116,7 @@ static inline void *kmalloc_array(size_t n, size_t size, gfp_t flags)
 DEFINE_FREE(kfree, void *, if (!IS_ERR_OR_NULL(_T)) kfree(_T))
 
 #define kvmalloc(size, flags)		kmalloc(size, flags)
+#define kvmalloc_node_align_noprof(size, align, flags, node)	kmalloc(size, flags)
 #define kvmalloc_noprof(size, flags)	kmalloc(size, flags)
 #define kvzalloc(size, flags)		kzalloc(size, flags)
 #define kvfree(p)			kfree(p)

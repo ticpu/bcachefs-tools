@@ -306,7 +306,7 @@ struct bio *bio_kmalloc(unsigned int nr_iovecs, gfp_t gfp_mask)
 		      sizeof(struct bio_vec) * nr_iovecs, gfp_mask);
 	if (unlikely(!bio))
 		return NULL;
-	bio_init(bio, NULL, nr_iovecs ? bio->bi_inline_vecs : NULL, nr_iovecs, 0);
+	bio_init(bio, NULL, nr_iovecs ? bio_inline_vecs(bio) : NULL, nr_iovecs, 0);
 	bio->bi_pool = NULL;
 	return bio;
 }
@@ -320,7 +320,7 @@ struct bio *bio_alloc(struct block_device *bdev, unsigned nr_iovecs,
 		      sizeof(struct bio_vec) * nr_iovecs, gfp_mask);
 	if (unlikely(!bio))
 		return NULL;
-	bio_init(bio, bdev, nr_iovecs ? bio->bi_inline_vecs : NULL, nr_iovecs, opf);
+	bio_init(bio, NULL, nr_iovecs ? bio_inline_vecs(bio) : NULL, nr_iovecs, opf);
 	bio->bi_pool = NULL;
 	return bio;
 }
@@ -372,7 +372,7 @@ struct bio *bio_alloc_bioset(struct block_device *bdev,
 
 		bio_init(bio, bdev, bvl, nr_iovecs, opf);
 	} else if (nr_iovecs) {
-		bio_init(bio, bdev, bio->bi_inline_vecs, BIO_INLINE_VECS, opf);
+		bio_init(bio, bdev, bio_inline_vecs(bio), BIO_INLINE_VECS, opf);
 	} else {
 		bio_init(bio, bdev, NULL, 0, opf);
 	}
