@@ -736,17 +736,13 @@ const struct bch_option *bch2_cmdline_opt_parse(int argc, char *argv[],
 		return NULL;
 
 	char *optstr = strdup(argv[optind] + 2);
-	optarg = argv[optind + 1];
+	optarg = NULL;
 
 	char *eq = strchr(optstr, '=');
 	if (eq) {
 		*eq = '\0';
 		optarg = eq + 1;
 	}
-
-	if (!optarg)
-		optarg = "1";
-
 
 	int optid = bch2_opt_lookup(optstr);
 	if (optid < 0)
@@ -758,11 +754,11 @@ const struct bch_option *bch2_cmdline_opt_parse(int argc, char *argv[],
 
 	optind++;
 
-	if (opt->type != BCH_OPT_BOOL) {
-		if (optarg == argv[optind])
-			optind++;
-	} else {
-		optarg = NULL;
+	if (!optarg) {
+		if (opt->type != BCH_OPT_BOOL)
+			optarg = argv[optind++];
+		else
+			optarg = "1";
 	}
 
 	return opt;
