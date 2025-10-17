@@ -16,12 +16,13 @@ static const u8 counters_to_stable_map[] = {
 #undef x
 };
 
-static struct bch_ioctl_query_counters *read_counters(struct bchfs_handle fs)
+static struct bch_ioctl_query_counters *read_counters(struct bchfs_handle fs, unsigned flags)
 {
 	struct bch_ioctl_query_counters *ret =
 		kzalloc(sizeof(*ret) + sizeof(ret->d[0]) * BCH_COUNTER_NR, GFP_KERNEL);
 
-	ret->nr = BCH_COUNTER_NR;
+	ret->nr		= BCH_COUNTER_NR;
+	ret->flags	= flags;
 
 	xioctl(fs.ioctl_fd, BCH_IOCTL_QUERY_COUNTERS, ret);
 	return ret;
@@ -31,19 +32,20 @@ static void fs_top(const char *path, bool human_readable)
 {
 	struct bchfs_handle fs = bcache_fs_open(path);
 
-	struct bch_ioctl_query_counters *start = read_counters(fs);
-	struct bch_ioctl_query_counters *curr = read_counters(fs);
+	struct bch_ioctl_query_counters *mount = read_counters(fs, BCH_IOCTL_QUERY_COUNTERS_MOUNT);
+	struct bch_ioctl_query_counters *start = read_counters(fs, 0);
+	struct bch_ioctl_query_counters *curr = read_counters(fs, 0);
 	struct bch_ioctl_query_counters *prev = NULL;
 
 	while (true) {
 		sleep(1);
 		kfree(prev);
 		prev = curr;
-		curr = read_counters(fs);
+		curr = read_counters(fs, 0);
 
 		printf("\033[2J");
 		printf("\033[H");
-		printf("%-40s %8s %12s\n", "", "2s", "total");
+		printf("%-40s %8s %12s %12s\n", "", "2s", "total", "mount");
 
 		for (unsigned i = 0; i < BCH_COUNTER_NR; i++) {
 			unsigned stable = counters_to_stable_map[i];
@@ -56,12 +58,13 @@ static void fs_top(const char *path, bool human_readable)
 				? curr->d[stable] - start->d[stable]
 				: 0;
 
-			if (!v2)
+			u64 v3 = curr->d[stable] - mount->d[stable];
+			if (!v3)
 				continue;
 
-			printf("%-40s %8llu %12llu\n",
+			printf("%-40s %8llu %12llu %12llu\n",
 			       bch2_counter_names[i],
-			       v1, v2);
+			       v1, v2, v3);
 		}
 
 		/* XXX: include btree cache size, key cache size, total ram size */
