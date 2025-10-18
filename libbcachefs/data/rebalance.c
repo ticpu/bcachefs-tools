@@ -491,11 +491,12 @@ static int rebalance_set_data_opts(struct btree_trans *trans,
 	struct bch_fs *c = trans->c;
 
 	memset(data_opts, 0, sizeof(*data_opts));
-	data_opts->rewrite_ptrs		= bch2_bkey_ptrs_need_rebalance(c, opts, k);
+	data_opts->type			= BCH_DATA_UPDATE_rebalance;
+	data_opts->ptrs_rewrite		= bch2_bkey_ptrs_need_rebalance(c, opts, k);
 	data_opts->target		= opts->background_target;
 	data_opts->write_flags		|= BCH_WRITE_only_specified_devs;
 
-	if (!data_opts->rewrite_ptrs) {
+	if (!data_opts->ptrs_rewrite) {
 		/*
 		 * device we would want to write to offline? devices in target
 		 * changed?
@@ -507,36 +508,6 @@ static int rebalance_set_data_opts(struct btree_trans *trans,
 		return 0;
 	}
 
-	if (trace_rebalance_extent_enabled()) {
-		CLASS(printbuf, buf)();
-
-		bch2_bkey_val_to_text(&buf, c, k);
-		prt_newline(&buf);
-
-		unsigned move_ptrs	= 0;
-		unsigned compress_ptrs	= 0;
-		u64 sectors		= 0;
-
-		bch2_bkey_needs_rebalance(c, k, opts, &move_ptrs, &compress_ptrs, &sectors);
-
-		if (move_ptrs) {
-			prt_str(&buf, "move=");
-			bch2_target_to_text(&buf, c, opts->background_target);
-			prt_str(&buf, " ");
-			bch2_prt_u64_base2(&buf, move_ptrs);
-			prt_newline(&buf);
-		}
-
-		if (compress_ptrs) {
-			prt_str(&buf, "compression=");
-			bch2_compression_opt_to_text(&buf, opts->background_compression);
-			prt_str(&buf, " ");
-			bch2_prt_u64_base2(&buf, compress_ptrs);
-			prt_newline(&buf);
-		}
-
-		trace_rebalance_extent(c, buf.buf);
-	}
 	count_event(c, rebalance_extent);
 	return 1;
 }
