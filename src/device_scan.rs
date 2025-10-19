@@ -137,9 +137,6 @@ fn devs_str_sbs_from_device(
         if metadata.is_dir() {
             return Err(anyhow::anyhow!("'{}' is a directory, not a block device", device.display()));
         }
-        if metadata.is_file() {
-            return Err(anyhow::anyhow!("'{}' is a regular file, not a block device", device.display()));
-        }
     }
 
     let dev_sb = read_super_silent(device, *opts)?;
