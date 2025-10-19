@@ -67,6 +67,7 @@ BuildRequires:  rust >= %{MSRV}
 BuildRequires:  rustc >= %{MSRV}
 %endif
 
+BuildRequires:  kernel-headers >= 6.11.3
 BuildRequires:  libaio-devel >= 0.3.111
 BuildRequires:  libattr-devel
 BuildRequires:  pkgconfig(blkid)
@@ -127,6 +128,7 @@ mount, create, check, modify and correct any inconsistencies in the bcachefs fil
 Summary:        Bcachefs kernel module managed by DKMS
 Requires:       diffutils
 Requires:       dkms >= 3.2.1
+Requires:       kernel-devel >= 6.16
 Requires:       gcc
 Requires:       make
 Requires:       perl
@@ -153,14 +155,22 @@ filesystem.
 %preun -n %{dkmsname}
 if [  "$(dkms status -m %{kmodname} -v %{version})" ]; then
    dkms remove -m %{kmodname} -v %{version} --all --rpm_safe_upgrade
+   exit $?
 fi
 
 %post -n %{dkmsname}
 if [ "$1" -ge "1" ]; then
+%if "%{_vendor}" == "suse"
+   if [ -f %{_libexecdir}/dkms/common.postinst ]; then
+      %{_libexecdir}/dkms/common.postinst %{kmodname} %{version}
+      exit $?
+   fi
+%else
    if [ -f /usr/lib/dkms/common.postinst ]; then
       /usr/lib/dkms/common.postinst %{kmodname} %{version}
       exit $?
    fi
+%endif
 fi
 
 %files -n %{dkmsname}
@@ -202,6 +212,8 @@ rm -rfv %{buildroot}/%{_datadir}/initramfs-tools
 
 
 %changelog
+* Sun Oct 19 2025 Roman Lebedev <lebedev.ri@gmail.com>
+- Fix DKMS support on SUSE
 * Sun Oct 12 2025 Roman Lebedev <lebedev.ri@gmail.com>
 - OBS support
 * Sat Sep 27 2025 Neal Gompa <neal@gompa.dev>
