@@ -63,9 +63,12 @@ static inline struct format_opts format_opts_default()
 	 */
 	(void)!system("modprobe bcachefs > /dev/null 2>&1");
 
+	unsigned kernel_version = bcachefs_kernel_version();
+
 	return (struct format_opts) {
-		.version		= bcachefs_kernel_version() ?:
-			bcachefs_metadata_version_current,
+		.version		= kernel_version
+			? min(bcachefs_metadata_version_current, kernel_version)
+			: bcachefs_metadata_version_current,
 		.superblock_size	= SUPERBLOCK_SIZE_DEFAULT,
 	};
 }
