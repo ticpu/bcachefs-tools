@@ -264,30 +264,26 @@ struct bkey_s_c bch2_lookup_indirect_extent(struct btree_trans *trans,
 
 	bch2_trans_iter_init(trans, iter, BTREE_ID_reflink, POS(0, reflink_offset), iter_flags);
 	struct bkey_s_c k = bch2_btree_iter_peek_slot(iter);
-	int ret = bkey_err(k);
-	if (ret)
-		goto err;
+	if (bkey_err(k))
+		return k;
 
 	if (unlikely(!bkey_extent_is_reflink_data(k.k))) {
 		u64 missing_end = min(k.k->p.offset,
 				      REFLINK_P_IDX(p.v) + p.k->size + le32_to_cpu(p.v->back_pad));
 		BUG_ON(reflink_offset == missing_end);
 
-		ret = bch2_indirect_extent_missing_error(trans, p, reflink_offset,
-							 missing_end, should_commit);
+		int ret = bch2_indirect_extent_missing_error(trans, p, reflink_offset,
+							     missing_end, should_commit);
 		if (ret)
-			goto err;
+			return bkey_s_c_err(ret);
 	} else if (unlikely(REFLINK_P_ERROR(p.v))) {
-		ret = bch2_indirect_extent_not_missing(trans, p, should_commit);
+		int ret = bch2_indirect_extent_not_missing(trans, p, should_commit);
 		if (ret)
-			goto err;
+			return bkey_s_c_err(ret);
 	}
 
 	*offset_into_extent = reflink_offset - bkey_start_offset(k.k);
 	return k;
-err:
-	bch2_trans_iter_exit(iter);
-	return bkey_s_c_err(ret);
 }
 
 /* reflink pointer trigger */
@@ -593,8 +589,6 @@ s64 bch2_remap_range(struct bch_fs *c,
 	while ((ret == 0 ||
 		bch2_err_matches(ret, BCH_ERR_transaction_restart)) &&
 	       bkey_lt(dst_iter.pos, dst_end)) {
-		struct disk_reservation disk_res = { 0 };
-
 		bch2_trans_begin(trans);
 
 		if (fatal_signal_pending(current)) {
@@ -681,11 +675,11 @@ s64 bch2_remap_range(struct bch_fs *c,
 				min(src_k.k->p.offset - src_want.offset,
 				    dst_end.offset - dst_iter.pos.offset));
 
+		CLASS(disk_reservation, res)(c);
 		ret = bch2_extent_update(trans, dst_inum, &dst_iter,
-					 new_dst.k, &disk_res,
+					 new_dst.k, &res.r,
 					 new_i_size, i_sectors_delta,
 					 true, 0);
-		bch2_disk_reservation_put(c, &disk_res);
 	}
 
 	BUG_ON(!ret && !bkey_eq(dst_iter.pos, dst_end));

@@ -175,18 +175,24 @@ static inline bool ptr_better(struct bch_fs *c,
 	if (unlikely(p1.do_ec_reconstruct || p2.do_ec_reconstruct))
 		return p1.do_ec_reconstruct < p2.do_ec_reconstruct;
 
-	int crc_retry_delta = (int) p1.crc_retry_nr - (int) p2.crc_retry_nr;
-	if (unlikely(crc_retry_delta))
-		return crc_retry_delta < 0;
+	int delta = (int) p2.crc_retry_nr - (int) p1.crc_retry_nr;
+	if (unlikely(delta))
+		return delta > 0;
 
 #ifdef CONFIG_BCACHEFS_DEBUG
 	if (bch2_force_read_device >= 0) {
-		int cmp = (p1.ptr.dev == bch2_force_read_device) -
+		delta = (p1.ptr.dev == bch2_force_read_device) -
 			(p2.ptr.dev == bch2_force_read_device);
-		if (cmp)
-			return cmp > 0;
+		if (delta)
+			return delta > 0;
 	}
 #endif
+
+	/* Prefer extents with checksums */
+	delta = (int) !!(p1.crc.csum_type) -
+		(int) !!(p2.crc.csum_type);
+	if (unlikely(delta))
+		return delta > 0;
 
 	/* Pick at random, biased in favor of the faster device: */
 
@@ -364,7 +370,7 @@ void bch2_btree_ptr_v2_to_text(struct printbuf *out, struct bch_fs *c,
 {
 	struct bkey_s_c_btree_ptr_v2 bp = bkey_s_c_to_btree_ptr_v2(k);
 
-	prt_printf(out, "seq %llx written %u min_key %s",
+	prt_printf(out, "\nseq %llx written %u min_key %s",
 	       le64_to_cpu(bp.v->seq),
 	       le16_to_cpu(bp.v->sectors_written),
 	       BTREE_PTR_RANGE_UPDATED(bp.v) ? "R " : "");
@@ -739,34 +745,44 @@ void bch2_extent_crc_append(struct bkey_i *k,
 
 /* Generic code for keys with pointers: */
 
-unsigned bch2_bkey_nr_ptrs(struct bkey_s_c k)
+unsigned bch2_bkey_nr_dirty_ptrs(struct bkey_s_c k)
 {
-	return bch2_bkey_devs(k).nr;
+	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+	unsigned ret = 0;
+
+	bkey_for_each_ptr(ptrs, ptr)
+		ret += !ptr->cached && ptr->dev != BCH_SB_MEMBER_INVALID;
+	return ret;
 }
 
 unsigned bch2_bkey_nr_ptrs_allocated(struct bkey_s_c k)
 {
-	return k.k->type == KEY_TYPE_reservation
-		? bkey_s_c_to_reservation(k).v->nr_replicas
-		: bch2_bkey_dirty_devs(k).nr;
+	if (k.k->type == KEY_TYPE_reservation) {
+		return bkey_s_c_to_reservation(k).v->nr_replicas;
+	} else {
+		unsigned ret = 0;
+		struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+
+		bkey_for_each_ptr(ptrs, ptr)
+			ret += !ptr->cached;
+		return ret;
+	}
 }
 
 unsigned bch2_bkey_nr_ptrs_fully_allocated(struct bkey_s_c k)
 {
-	unsigned ret = 0;
-
 	if (k.k->type == KEY_TYPE_reservation) {
-		ret = bkey_s_c_to_reservation(k).v->nr_replicas;
+		return bkey_s_c_to_reservation(k).v->nr_replicas;
 	} else {
 		struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
 		const union bch_extent_entry *entry;
 		struct extent_ptr_decoded p;
+		unsigned ret = 0;
 
 		bkey_for_each_ptr_decode(k.k, ptrs, p, entry)
 			ret += !p.ptr.cached && !crc_is_compressed(p.crc);
+		return ret;
 	}
-
-	return ret;
 }
 
 unsigned bch2_bkey_sectors_compressed(struct bkey_s_c k)
@@ -1001,22 +1017,10 @@ void bch2_bkey_drop_ptr(struct bkey_s k, struct bch_extent_ptr *ptr)
 			}
 	}
 
-	bool have_dirty = bch2_bkey_dirty_devs(k.s_c).nr;
-
 	bch2_bkey_drop_ptr_noerror(k, ptr);
 
-	/*
-	 * If we deleted all the dirty pointers and there's still cached
-	 * pointers, we could set the cached pointers to dirty if they're not
-	 * stale - but to do that correctly we'd need to grab an open_bucket
-	 * reference so that we don't race with bucket reuse:
-	 */
-	if (have_dirty &&
-	    !bch2_bkey_dirty_devs(k.s_c).nr) {
+	if (!bch2_bkey_nr_dirty_ptrs(k.s_c)) {
 		k.k->type = KEY_TYPE_error;
-		set_bkey_val_u64s(k.k, 0);
-	} else if (!bch2_bkey_nr_ptrs(k.s_c)) {
-		k.k->type = KEY_TYPE_deleted;
 		set_bkey_val_u64s(k.k, 0);
 	}
 }

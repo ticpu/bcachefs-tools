@@ -716,7 +716,7 @@ static int image_update(const char *src_path, const char *dst_image,
 	/* xattrs will be recreated */
 	bch_verbose(c, "Deleting xattrs");
 	ret = bch2_btree_delete_range(c, BTREE_ID_xattrs, POS_MIN, SPOS_MAX,
-				      BTREE_ITER_all_snapshots, NULL);
+				      BTREE_ITER_all_snapshots);
 	bch_err_msg(c, ret, "deleting xattrs");
 	if (ret)
 		goto err_stop;
