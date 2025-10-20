@@ -127,11 +127,13 @@ jobs:
           eatmydata apt full-upgrade
           eatmydata apt install \
             ca-certificates \
+            coreutils \
             curl \
             git \
             git-lfs \
             gnupg \
             openssh-client \
+            patch \
             tar \
             xz-utils \
             zip \
@@ -149,7 +151,6 @@ jobs:
           gpg --import <<EOT
           ${{ secrets.GPG_SECRET_SUBKEYS }}
           EOT
-          set -xe
           gpg \
             --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc \
             --armor \
@@ -163,6 +164,11 @@ jobs:
             --import \
             /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc \
           ;
+          echo "" >> ~/.gnupg/gpg-agent.conf
+          echo "enable-ssh-support" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent
+          gpgconf --launch gpg-agent
+          gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
       - name: Ensure that the download directory does not exist
         timeout-minutes: 1
         run: |
@@ -230,7 +236,7 @@ jobs:
             echo 'ok.' &&                                                                              \
             echo '::endgroup::'                                                                        \
           "
-      - name: Update OBS Repo
+      - name: Checkout the OBS Repo
         timeout-minutes: 1
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
@@ -243,38 +249,77 @@ jobs:
           mkdir -p ~/.ssh
           echo "" >> ~/.ssh/config
           echo "StrictHostKeyChecking=accept-new" >> ~/.ssh/config
-          echo "" >> ~/.gnupg/gpg-agent.conf
-          echo "enable-ssh-support" >> ~/.gnupg/gpg-agent.conf
-          gpgconf --kill gpg-agent
-          gpgconf --launch gpg-agent
           export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
-          gpg-connect-agent 'keyattr ${{ secrets.GPG_AUTH_SUBKEY_KEYGRIP }} Use-for-ssh: true' /bye
           OBS_REPO_URL="${{ secrets[format('OBS_{0}_REPO_URL', env.SUITE)] }}"
           OBS_REPO_DIR="${{ github.workspace }}/bcachefs-obs"
           git clone "$OBS_REPO_URL" "$OBS_REPO_DIR"
+          git config --global --add safe.directory "$OBS_REPO_DIR"
+      - name: Update OBS Repo state
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          OBS_REPO_DIR="${{ github.workspace }}/bcachefs-obs"
           cd "$OBS_REPO_DIR"
-          git config --global --add safe.directory .
           git rm -rf --ignore-unmatch -- .
           tee .gitattributes > /dev/null <<EOT
           *.tar.xz filter=lfs diff=lfs merge=lfs -text
           EOT
           git add .gitattributes
-          cp /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc apt.bcachefs.org.keyring
           for suffix in .dsc .tar.xz .tar.xz.sig; do
           cp "${{ github.workspace }}/deb-src/"*$suffix .
           done
+          VER_STR="$(basename --suffix=.tar.xz $(ls *.tar.xz))"
+          VER="${VER_STR##bcachefs-tools_}"
+          rm -f "$OBS_REPO_DIR/.git/COMMIT_EDITMSG"
+          tee -a "$OBS_REPO_DIR/.git/COMMIT_EDITMSG" > /dev/null <<EOT
+          Update to $VER_STR
+
+          EOT
           tee dkms-bcachefs.rpmlintrc > /dev/null <<EOT
           addFilter("dkms-bcachefs.noarch: E: devel-file-in-non-devel-package")
           EOT
           tar -xvf *.tar.xz -C "$OBS_REPO_DIR" --wildcards '*/bcachefs-tools.spec' --strip-components=1
           tar -xvf *.tar.xz -C "$OBS_REPO_DIR" --wildcards '*/debian/cargo.config' --strip-components=2
+          patch "$OBS_REPO_DIR/bcachefs-tools.spec" <<EOF
+          --- a/bcachefs-tools.spec
+          +++ b/bcachefs-tools.spec
+          @@ -20 +20 @@ Name:           bcachefs-tools
+          -Version:        0%{?_version}
+          +Version:        $VER
+          EOF
+          git add .
+      - name: Ensure that all OBS repo state entries are signed, or sign them
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          OBS_REPO_DIR="${{ github.workspace }}/bcachefs-obs"
+          cd "$OBS_REPO_DIR"
+          git ls-files --cached | grep -v '^\.' | grep -v '\.sig$' | xargs -I'{}' sh -c "              \
+            echo '::group::Signing {}' &&                                                              \
+            (                                                                                          \
+              gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     || \
+              gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig || \
+              gpg --verbose --detach-sign {}                                                           \
+            ) &&                                                                                       \
+            echo '::endgroup::'                                                                        \
+          "
+      - name: Produce OBS _service file
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          OBS_REPO_DIR="${{ github.workspace }}/bcachefs-obs"
+          cd "$OBS_REPO_DIR"
+          cp /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc apt.bcachefs.org.keyring
           rm -f "${{ github.workspace }}/_service"
           tee -a "${{ github.workspace }}/_service" > /dev/null <<EOT
           <services>
-            <service name="set_version" mode="buildtime" />
           EOT
           for FILENAME in *; do
-          CHECKSUM="$(sha256sum "$FILENAME" | awk '{print $1}')"
+          CHECKSUM="$(sha256sum -b "$FILENAME" | awk '{print $1}')"
           tee -a "${{ github.workspace }}/_service" > /dev/null <<EOT
             <service name="verify_file">
               <param name="file">$FILENAME</param>
@@ -287,7 +332,37 @@ jobs:
           </services>
           EOT
           mv "${{ github.workspace }}/_service" "$OBS_REPO_DIR"
-          VER="$(basename --suffix=.tar.xz $(ls *.tar.xz))"
+          for f in "$OBS_REPO_DIR/_service"; do
+            echo "::group::Signing $f"
+            gpg --verbose --detach-sign $f
+            echo '::endgroup::'
+          done
           git add .
-          git commit --message="Update to $VER"
+      - name: Prepare OBS Repo state for attestation
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          OBS_REPO_DIR="${{ github.workspace }}/bcachefs-obs"
+          cd "$OBS_REPO_DIR"
+          (git ls-files --cached | xargs sha256sum -b) > "${{ github.workspace }}/bcachefs-obs.sha256sums"
+      - name: Attest the current OBS Repo state
+        timeout-minutes: 1
+        # if: github.event_name != 'pull_request'
+        id: attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-checksums: '${{ github.workspace }}/bcachefs-obs.sha256sums'
+      - name: Push updated OBS Repo
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
+          OBS_REPO_DIR="${{ github.workspace }}/bcachefs-obs"
+          tee -a "$OBS_REPO_DIR/.git/COMMIT_EDITMSG" > /dev/null <<EOT
+          Attestation: ${{ steps.attestation.outputs.attestation-url }}
+          EOT
+          cd "$OBS_REPO_DIR"
+          git commit --file="$OBS_REPO_DIR/.git/COMMIT_EDITMSG"
           git push
