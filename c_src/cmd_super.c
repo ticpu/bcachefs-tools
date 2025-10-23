@@ -127,7 +127,7 @@ int cmd_show_super(int argc, char *argv[])
 		{ "help",			no_argument, NULL, 'h' },
 		{ NULL }
 	};
-	unsigned fields = 0;
+	unsigned fields = BIT(BCH_SB_FIELD_ext);
 	int field_only = -1;
 	bool print_layout = false;
 	bool print_default_fields = true;
