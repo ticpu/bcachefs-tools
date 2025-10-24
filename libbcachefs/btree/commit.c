@@ -67,11 +67,8 @@ static void verify_update_old_key(struct btree_trans *trans, struct btree_insert
 			k = bkey_i_to_s_c(j_k);
 	}
 
-	u = *k.k;
-	u.needs_whiteout = i->old_k.needs_whiteout;
-
-	BUG_ON(memcmp(&i->old_k, &u, sizeof(struct bkey)));
-	BUG_ON(i->old_v != k.v);
+	struct bkey_s_c old = { &i->old_k, i->old_v };
+	BUG_ON(!bkey_and_val_eq(k, old));
 #endif
 }
 
@@ -692,14 +689,14 @@ bch2_trans_commit_write_locked(struct btree_trans *trans,
 	trans_for_each_update(trans, i)
 		if (btree_node_type_has_atomic_triggers(i->bkey_type)) {
 			ret = run_one_mem_trigger(trans, i, BTREE_TRIGGER_atomic|i->flags);
-			if (ret)
-				goto fatal_err;
+			if (bch2_fs_fatal_err_on(ret, c, "fatal error in transaction commit: %s", bch2_err_str(ret)))
+				return ret;
 		}
 
 	if (unlikely(c->gc_pos.phase)) {
 		ret = bch2_trans_commit_run_gc_triggers(trans);
-		if  (ret)
-			goto fatal_err;
+		if (bch2_fs_fatal_err_on(ret, c, "fatal error in transaction commit: %s", bch2_err_str(ret)))
+			return ret;
 	}
 
 	struct bkey_validate_context validate_context = { .from	= BKEY_VALIDATE_commit };
@@ -716,7 +713,9 @@ bch2_trans_commit_write_locked(struct btree_trans *trans,
 		if (unlikely(ret)) {
 			bch2_trans_inconsistent(trans, "invalid journal entry on insert from %s\n",
 						trans->fn);
-			goto fatal_err;
+			bch2_sb_error_count(c, BCH_FSCK_ERR_validate_error_in_commit);
+			__WARN();
+			return ret;
 		}
 	}
 
@@ -728,7 +727,9 @@ bch2_trans_commit_write_locked(struct btree_trans *trans,
 		if (unlikely(ret)){
 			bch2_trans_inconsistent(trans, "invalid bkey on insert from %s -> %ps\n",
 						trans->fn, (void *) i->ip_allocated);
-			goto fatal_err;
+			bch2_sb_error_count(c, BCH_FSCK_ERR_validate_error_in_commit);
+			__WARN();
+			return ret;
 		}
 		btree_insert_entry_checks(trans, i);
 	}
@@ -795,9 +796,6 @@ bch2_trans_commit_write_locked(struct btree_trans *trans,
 	}
 
 	return 0;
-fatal_err:
-	bch2_fs_fatal_error(c, "fatal error in transaction commit: %s", bch2_err_str(ret));
-	return ret;
 }
 
 static noinline void bch2_drop_overwrites_from_journal(struct btree_trans *trans)
@@ -1054,6 +1052,29 @@ int __bch2_trans_commit(struct btree_trans *trans, enum bch_trans_commit_flags f
 	ret = bch2_trans_commit_run_triggers(trans);
 	if (ret)
 		goto out_reset;
+
+	if (likely(!(flags & BCH_TRANS_COMMIT_no_skip_noops))) {
+		struct btree_insert_entry *dst = trans->updates;
+		trans_for_each_update(trans, i) {
+			struct bkey_s_c old = { &i->old_k, i->old_v };
+
+			/*
+			 * We can't drop noop inode updates because fsync relies
+			 * on grabbing the journal_seq of the latest update from
+			 * the inode - and the journal_seq isn't updated until
+			 * the atomic trigger:
+			 */
+			if (likely(i->bkey_type == BKEY_TYPE_inodes ||
+				   !bkey_and_val_eq(old, bkey_i_to_s_c(i->k))))
+				*dst++ = *i;
+			else
+				bch2_path_put(trans, i->path, true);
+		}
+		trans->nr_updates = dst - trans->updates;
+
+		if (!bch2_trans_has_updates(trans))
+			goto out_reset;
+	}
 
 	if (!(flags & BCH_TRANS_COMMIT_no_check_rw) &&
 	    unlikely(!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_trans))) {

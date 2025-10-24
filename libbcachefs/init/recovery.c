@@ -368,6 +368,7 @@ int bch2_journal_replay(struct bch_fs *c)
 
 		ret = commit_do(trans, NULL, NULL,
 				BCH_TRANS_COMMIT_no_enospc|
+				BCH_TRANS_COMMIT_no_skip_noops|
 				BCH_TRANS_COMMIT_journal_reclaim|
 				BCH_TRANS_COMMIT_skip_accounting_apply|
 				BCH_TRANS_COMMIT_no_journal_res|
@@ -400,6 +401,7 @@ int bch2_journal_replay(struct bch_fs *c)
 		ret = c->journal.watermark ? -1 :
 			commit_do(trans, NULL, NULL,
 				  BCH_TRANS_COMMIT_no_enospc|
+				  BCH_TRANS_COMMIT_no_skip_noops|
 				  BCH_TRANS_COMMIT_journal_reclaim|
 				  BCH_TRANS_COMMIT_skip_accounting_apply|
 				  (!k->allocated ? BCH_TRANS_COMMIT_no_journal_res : 0),
@@ -429,6 +431,7 @@ int bch2_journal_replay(struct bch_fs *c)
 
 		ret = commit_do(trans, NULL, NULL,
 				BCH_TRANS_COMMIT_no_enospc|
+				BCH_TRANS_COMMIT_no_skip_noops|
 				BCH_TRANS_COMMIT_skip_accounting_apply|
 				(!k->allocated
 				 ? BCH_TRANS_COMMIT_no_journal_res|BCH_WATERMARK_reclaim
@@ -1082,6 +1085,11 @@ int bch2_fs_initialize(struct bch_fs *c)
 	scoped_guard(mutex, &c->sb_lock) {
 		SET_BCH_SB_INITIALIZED(c->disk_sb.sb, true);
 		SET_BCH_SB_CLEAN(c->disk_sb.sb, false);
+
+		struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
+		memset(ext->errors_silent, 0, sizeof(ext->errors_silent));
+		memset(ext->recovery_passes_required, 0, sizeof(ext->recovery_passes_required));
+
 		bch2_write_super(c);
 	}
 

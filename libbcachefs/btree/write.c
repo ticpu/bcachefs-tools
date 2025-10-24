@@ -109,7 +109,7 @@ static int btree_node_write_update_key(struct btree_trans *trans,
 	bch2_bkey_drop_ptrs(bkey_i_to_s(n), p, entry,
 		bch2_dev_list_has_dev(wbio->wbio.failed, p.ptr.dev));
 
-	if (!bch2_bkey_nr_dirty_ptrs(bkey_i_to_s_c(&wbio->key)))
+	if (!bch2_bkey_nr_dirty_ptrs(bkey_i_to_s_c(n)))
 		return bch_err_throw(c, btree_node_write_all_failed);
 
 	return bch2_btree_node_update_key(trans, &iter, b, n,
@@ -127,7 +127,6 @@ static void btree_node_write_work(struct work_struct *work)
 	struct bch_fs *c	= wbio->wbio.c;
 	struct btree *b		= wbio->wbio.bio.bi_private;
 	u64 start_time		= wbio->start_time;
-	int ret = 0;
 
 	bch2_btree_bounce_free(c,
 		wbio->data_bytes,
@@ -135,7 +134,7 @@ static void btree_node_write_work(struct work_struct *work)
 		wbio->data);
 
 	if (!wbio->wbio.first_btree_write || wbio->wbio.failed.nr) {
-		ret = bch2_trans_do(c, btree_node_write_update_key(trans, wbio, b));
+		int ret = bch2_trans_do(c, btree_node_write_update_key(trans, wbio, b));
 		if (ret) {
 			set_btree_node_noevict(b);
 

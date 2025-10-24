@@ -451,8 +451,6 @@ bool bch2_fs_emergency_read_only_locked(struct bch_fs *c)
 
 static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 {
-	int ret;
-
 	BUG_ON(!test_bit(BCH_FS_may_go_rw, &c->flags));
 
 	if (WARN_ON(c->sb.features & BIT_ULL(BCH_FEATURE_no_alloc_info)))
@@ -473,17 +471,9 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 
 	bch_info(c, "going read-write");
 
-	ret = bch2_fs_init_rw(c);
-	if (ret)
-		return ret;
-
-	ret = bch2_sb_members_v2_init(c);
-	if (ret)
-		return ret;
-
-	ret = bch2_fs_mark_dirty(c);
-	if (ret)
-		return ret;
+	try(bch2_fs_init_rw(c));
+	try(bch2_sb_members_v2_init(c));
+	try(bch2_fs_mark_dirty(c));
 
 	clear_bit(BCH_FS_clean_shutdown, &c->flags);
 
@@ -518,22 +508,12 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 
 	enumerated_ref_start(&c->writes);
 
-	ret = bch2_journal_reclaim_start(&c->journal);
+	int ret = bch2_journal_reclaim_start(&c->journal) ?:
+		  bch2_copygc_start(c) ?:
+		  bch2_rebalance_start(c);
 	if (ret) {
-		bch_err_msg(c, ret, "error starting journal reclaim thread");
-		goto err;
-	}
-
-	ret = bch2_copygc_start(c);
-	if (ret) {
-		bch_err_msg(c, ret, "error starting copygc thread");
-		goto err;
-	}
-
-	ret = bch2_rebalance_start(c);
-	if (ret) {
-		bch_err_msg(c, ret, "error starting rebalance thread");
-		goto err;
+		bch2_fs_read_only(c);
+		return ret;
 	}
 
 	bch2_do_discards(c);
@@ -541,12 +521,6 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 	bch2_do_stripe_deletes(c);
 	bch2_do_pending_node_rewrites(c);
 	return 0;
-err:
-	if (test_bit(BCH_FS_rw, &c->flags))
-		bch2_fs_read_only(c);
-	else
-		__bch2_fs_read_only(c);
-	return ret;
 }
 
 int bch2_fs_read_write(struct bch_fs *c)
@@ -905,8 +879,6 @@ static bool check_version_upgrade(struct bch_fs *c)
 noinline_for_stack
 static int bch2_fs_opt_version_init(struct bch_fs *c)
 {
-	int ret = 0;
-
 	if (c->opts.norecovery) {
 		c->opts.recovery_pass_last = c->opts.recovery_pass_last
 			? min(c->opts.recovery_pass_last, BCH_RECOVERY_PASS_snapshots_read)
@@ -974,9 +946,7 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 		if (!ext)
 			return bch_err_throw(c, ENOSPC_sb);
 
-		ret = bch2_sb_members_v2_init(c);
-		if (ret)
-			return ret;
+		try(bch2_sb_members_v2_init(c));
 
 		__le64 now = cpu_to_le64(ktime_get_real_seconds());
 		scoped_guard(rcu)
@@ -1370,7 +1340,7 @@ static bool bch2_fs_may_start(struct bch_fs *c)
 	}
 
 	CLASS(printbuf, err)();
-	bool ret = bch2_have_enough_devs(c, c->online_devs, flags, &err);
+	bool ret = bch2_have_enough_devs(c, c->online_devs, flags, &err, !c->opts.read_only);
 	if (!ret)
 		bch2_print_str(c, KERN_ERR, err.buf);
 	return ret;
