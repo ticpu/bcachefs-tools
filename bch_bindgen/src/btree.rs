@@ -99,11 +99,11 @@ impl<'t> BtreeIter<'t> {
         }
     }
 
-    pub fn peek(&mut self) -> Result<Option<BkeySC>, bch_errcode> {
+    pub fn peek(&mut self) -> Result<Option<BkeySC<'_>>, bch_errcode> {
         self.peek_max(SPOS_MAX)
     }
 
-    pub fn peek_and_restart(&mut self) -> Result<Option<BkeySC>, bch_errcode> {
+    pub fn peek_and_restart(&mut self) -> Result<Option<BkeySC<'_>>, bch_errcode> {
         unsafe {
             let k = c::bch2_btree_iter_peek_and_restart_outlined(&mut self.raw);
 
