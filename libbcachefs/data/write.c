@@ -1020,6 +1020,8 @@ static int bch2_write_extent(struct bch_write_op *op, struct write_point *wp,
 		struct bversion version = op->version;
 		size_t dst_len = 0, src_len = 0;
 
+		BUG_ON(src->bi_iter.bi_size & (block_bytes(c) - 1));
+
 		if (page_alloc_failed &&
 		    dst->bi_iter.bi_size  < (wp->sectors_free << 9) &&
 		    dst->bi_iter.bi_size < c->opts.encoded_extent_max)
@@ -1314,7 +1316,7 @@ static void bch2_nocow_write(struct bch_write_op *op)
 {
 	struct bch_fs *c = op->c;
 	struct btree_trans *trans;
-	struct btree_iter iter;
+	struct btree_iter iter = {};
 	struct bkey_s_c k;
 	struct bkey_ptrs_c ptrs;
 	u32 snapshot;
@@ -1676,6 +1678,7 @@ CLOSURE_CALLBACK(bch2_write)
 	if (unlikely(bio->bi_iter.bi_size & (c->opts.block_size - 1))) {
 		bch2_write_op_error(op, op->pos.offset, "misaligned write");
 		op->error = bch_err_throw(c, data_write_misaligned);
+		__WARN();
 		goto err;
 	}
 

@@ -413,11 +413,11 @@ int bch2_move_data_btree(struct moving_context *ctxt,
 {
 	struct btree_trans *trans = ctxt->trans;
 	struct bch_fs *c = trans->c;
-	struct btree_iter iter;
 	struct bkey_s_c k;
 	int ret = 0;
 
 	CLASS(per_snapshot_io_opts, snapshot_io_opts)(c);
+	CLASS(btree_iter_uninit, iter)(trans);
 
 	if (ctxt->stats) {
 		ctxt->stats->data_type	= BCH_DATA_user;
@@ -437,24 +437,19 @@ retry_root:
 		if (ret)
 			goto root_err;
 
-		if (b != btree_node_root(c, b)) {
-			bch2_trans_iter_exit(&iter);
+		if (b != btree_node_root(c, b))
 			goto retry_root;
-		}
 
 		k = bkey_i_to_s_c(&b->key);
 		ret = bch2_move_extent(ctxt, NULL, &snapshot_io_opts, pred, arg, &iter, level, k);
 root_err:
-		if (bch2_err_matches(ret, BCH_ERR_transaction_restart)) {
-			bch2_trans_iter_exit(&iter);
+		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 			goto retry_root;
-		}
 		if (bch2_err_matches(ret, BCH_ERR_data_update_fail))
 			ret = 0; /* failure for this extent, keep going */
-		if (bch2_err_matches(ret, EROFS))
-			goto out;
-		WARN_ONCE(ret, "unhandled error from move_extent: %s", bch2_err_str(ret));
-		goto out;
+		WARN_ONCE(ret && !bch2_err_matches(ret, EROFS),
+			  "unhandled error from move_extent: %s", bch2_err_str(ret));
+		return ret;
 	}
 
 	bch2_trans_node_iter_init(trans, &iter, btree_id, start, 0, level,
@@ -499,8 +494,6 @@ next_nondata:
 		if (!bch2_btree_iter_advance(&iter))
 			break;
 	}
-out:
-	bch2_trans_iter_exit(&iter);
 
 	return ret;
 }
@@ -736,7 +729,6 @@ static int bch2_move_btree(struct bch_fs *c,
 			   struct bch_move_stats *stats)
 {
 	bool kthread = (current->flags & PF_KTHREAD) != 0;
-	struct btree_iter iter;
 	struct btree *b;
 	enum btree_id btree;
 	int ret = 0;
@@ -747,6 +739,8 @@ static int bch2_move_btree(struct bch_fs *c,
 	struct moving_context ctxt __cleanup(bch2_moving_ctxt_exit);
 	bch2_moving_ctxt_init(&ctxt, c, NULL, stats, writepoint_ptr(&c->btree_write_point), true);
 	struct btree_trans *trans = ctxt.trans;
+
+	CLASS(btree_iter_uninit, iter)(trans);
 
 	stats->data_type = BCH_DATA_btree;
 
@@ -779,8 +773,6 @@ retry:
 				goto next;
 
 			ret = bch2_btree_node_rewrite(trans, &iter, b, 0, 0) ?: ret;
-			if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
-				continue;
 			if (ret)
 				break;
 next:
@@ -789,12 +781,11 @@ next:
 		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 			goto retry;
 
-		bch2_trans_iter_exit(&iter);
-
 		if (kthread && kthread_should_stop())
 			break;
 	}
 
+	bch2_trans_unlock(trans);
 	bch2_btree_interior_updates_flush(c);
 	bch_err_fn(c, ret);
 

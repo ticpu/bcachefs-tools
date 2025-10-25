@@ -541,7 +541,7 @@ void bch2_trans_iter_init_outlined(struct btree_trans *, struct btree_iter *,
 			  enum btree_iter_update_trigger_flags,
 			  unsigned long ip);
 
-static inline void bch2_trans_iter_init(struct btree_trans *trans,
+static inline void __bch2_trans_iter_init(struct btree_trans *trans,
 			  struct btree_iter *iter,
 			  enum btree_id btree, struct bpos pos,
 			  enum btree_iter_update_trigger_flags flags)
@@ -555,10 +555,19 @@ static inline void bch2_trans_iter_init(struct btree_trans *trans,
 		bch2_trans_iter_init_outlined(trans, iter, btree, pos, flags, _RET_IP_);
 }
 
+static inline void bch2_trans_iter_init(struct btree_trans *trans,
+			  struct btree_iter *iter,
+			  enum btree_id btree, struct bpos pos,
+			  enum btree_iter_update_trigger_flags flags)
+{
+	bch2_trans_iter_exit(iter);
+	__bch2_trans_iter_init(trans, iter, btree, pos, flags);
+}
+
 #define bch2_trans_iter_class_init(_trans, _btree, _pos, _flags)		\
 ({										\
 	struct btree_iter iter;							\
-	bch2_trans_iter_init(_trans, &iter, (_btree), (_pos), (_flags));	\
+	__bch2_trans_iter_init(_trans, &iter, (_btree), (_pos), (_flags));	\
 	iter;									\
 })
 
@@ -594,16 +603,28 @@ DEFINE_CLASS(btree_iter_copy, struct btree_iter,
 	     bch2_trans_iter_copy_class_init(src),
 	     struct btree_iter *src)
 
-void bch2_trans_node_iter_init(struct btree_trans *, struct btree_iter *,
-			       enum btree_id, struct bpos,
-			       unsigned, unsigned,
-			       enum btree_iter_update_trigger_flags);
+void __bch2_trans_node_iter_init(struct btree_trans *, struct btree_iter *,
+				 enum btree_id, struct bpos,
+				 unsigned, unsigned,
+				 enum btree_iter_update_trigger_flags);
+
+static inline void bch2_trans_node_iter_init(struct btree_trans *trans,
+			       struct btree_iter *iter,
+			       enum btree_id btree,
+			       struct bpos pos,
+			       unsigned locks_want,
+			       unsigned depth,
+			       enum btree_iter_update_trigger_flags flags)
+{
+	bch2_trans_iter_exit(iter);
+	__bch2_trans_node_iter_init(trans, iter, btree, pos, locks_want, depth, flags);
+}
 
 #define bch2_trans_node_iter_class_init(_trans, _btree, _pos, _locks_want, _depth, _flags)\
 ({										\
 	struct btree_iter iter;							\
-	bch2_trans_node_iter_init(_trans, &iter, (_btree), (_pos),		\
-				  (_locks_want), (_depth), (_flags));		\
+	__bch2_trans_node_iter_init(_trans, &iter, (_btree), (_pos),		\
+				    (_locks_want), (_depth), (_flags));		\
 	iter;									\
 })
 
@@ -684,30 +705,6 @@ static __always_inline void *bch2_trans_kmalloc_nomemzero(struct btree_trans *tr
 	return bch2_trans_kmalloc_nomemzero_ip(trans, size, _THIS_IP_);
 }
 
-static inline struct bkey_s_c __bch2_bkey_get_iter(struct btree_trans *trans,
-				struct btree_iter *iter,
-				enum btree_id btree, struct bpos pos,
-				enum btree_iter_update_trigger_flags flags,
-				enum bch_bkey_type type)
-{
-	bch2_trans_iter_init(trans, iter, btree, pos, flags);
-	struct bkey_s_c k = bch2_btree_iter_peek_slot(iter);
-
-	if (!bkey_err(k) && type && k.k->type != type)
-		k = bkey_s_c_err(bch_err_throw(trans->c, ENOENT_bkey_type_mismatch));
-	if (unlikely(bkey_err(k)))
-		bch2_trans_iter_exit(iter);
-	return k;
-}
-
-static inline struct bkey_s_c bch2_bkey_get_iter(struct btree_trans *trans,
-				struct btree_iter *iter,
-				enum btree_id btree, struct bpos pos,
-				enum btree_iter_update_trigger_flags flags)
-{
-	return __bch2_bkey_get_iter(trans, iter, btree, pos, flags, 0);
-}
-
 static inline struct bkey_s_c __bch2_bkey_get_typed(struct btree_iter *iter,
 						    enum bch_bkey_type type)
 {
@@ -762,9 +759,8 @@ u32 bch2_trans_begin(struct btree_trans *);
 ({										\
 	bch2_trans_begin((_trans));						\
 										\
-	struct btree_iter _iter;						\
-	bch2_trans_node_iter_init((_trans), &_iter, (_btree_id),		\
-				  _start, _locks_want, _depth, _flags);		\
+	CLASS(btree_node_iter, _iter)((_trans), (_btree_id), _start,		\
+				      _locks_want, _depth, _flags);		\
 	int _ret3 = 0;								\
 	do {									\
 		_ret3 = lockrestart_do((_trans), ({				\
@@ -778,7 +774,6 @@ u32 bch2_trans_begin(struct btree_trans *);
 			PTR_ERR_OR_ZERO(bch2_btree_iter_next_node(&_iter)));	\
 	} while (!_ret3);							\
 										\
-	bch2_trans_iter_exit(&(_iter));						\
 	_ret3;									\
 })
 

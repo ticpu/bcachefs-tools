@@ -150,7 +150,7 @@ impl<'t> BtreeNodeIter<'t> {
     ) -> BtreeNodeIter<'t> {
         unsafe {
             let mut iter: MaybeUninit<c::btree_iter> = MaybeUninit::uninit();
-            c::bch2_trans_node_iter_init(
+            c::__bch2_trans_node_iter_init(
                 trans.raw,
                 iter.as_mut_ptr(),
                 btree,
