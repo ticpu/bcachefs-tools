@@ -530,7 +530,8 @@ filesystem:
 	\item \texttt{bcachefs device add}: Formats and adds a new device to an
 		existing filesystem.
 	\item \texttt{bcachefs device remove}: Permanently removes a device from
-		an existing filesystem.
+		an existing filesystem. Offline Devices can be removed via ID found 
+		in Superblock
 	\item \texttt{bcachefs device online}: Connects a device to a running
 		filesystem that was mounted without it (i.e. in degraded mode)
 	\item \texttt{bcachefs device offline}: Disconnects a device from a
@@ -540,6 +541,7 @@ filesystem:
 		if necessary.
 	\item \texttt{bcachefs device set-state}: Changes the state of a member
 		device: one of rw (readwrite), ro (readonly), failed, or spare.
+		Offline Devices can be removed via ID found in Superblock
 
 		A failed device is considered to have 0 durability, and replicas
 		on that device won't be counted towards the number of replicas
@@ -551,6 +553,10 @@ The \texttt{bcachefs device remove}, \texttt{bcachefs device offline} and
 \texttt{bcachefs device set-state} commands take force options for when they
 would leave the filesystem degraded or with data missing. Todo: regularize and
 improve those options.
+
+\subsubsection{Device labeling}
+Devices can be labeled after Formatting by setting \\
+\texttt{/sys/fs/bcachefs/<uuid>/dev-<device-id>/label}
 
 \subsection{Data management}
 
@@ -571,8 +577,10 @@ a third device added.
 
 \subsubsection{Scrub}
 
-To be implemented: a command for reading all data within a filesystem and
-ensuring that checksums are valid, fixing bitrot when a valid copy can be found.
+The \texttt{bcachefs data scrub} Command takes a mountpoint as first parameter and
+validates all data with checksums, fixing bitrot when a valid copy can be found.
+Currently does not print affected files in the Terminal, but when a broken File is
+found the path is being printed into the Kernel Log.
 
 \section{Options}
 
@@ -581,7 +589,8 @@ also be set on inodes (files and directories), overriding the global defaults.
 Filesystem wide options may be set when formatting, when mounting, or at runtime
 via \texttt{/sys/fs/bcachefs/<uuid>/options/}. When set at runtime via sysfs,
 the persistent options in the superblock are updated as well; when options are
-passed as mount parameters the persistent options are unmodified.
+passed as mount parameters the persistent options are unmodified. Additionally
+some of the filesystem wide options can be set via \texttt{bcachefs set-fs-option}
 
 \subsection{File and directory options}
 
@@ -731,6 +740,9 @@ recursively.
 
 	\texttt{discard}		\` \textbf{device}			\\
 	\> Enable discard/TRIM support						\\ \\
+
+	\texttt{casefold\_disabled}		\` \textbf{mount}			\\
+	\> Disables the Casefolding Feature						\\ \\
 \end{tabbing}
 
 \subsection{Error actions}
