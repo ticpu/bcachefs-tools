@@ -76,6 +76,16 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
+          latexDerivation = (
+            pkgs.texliveBasic.withPackages (
+              ps: with ps; [
+                imakeidx
+                xkeyval
+                upquote
+                collection-fontsrecommended
+              ]
+            )
+          );
         in
         {
           packages =
@@ -102,6 +112,22 @@
             packages
             // {
               default = self'.packages.${cargoToml.package.name};
+              doc = pkgs.stdenv.mkDerivation {
+                pname = "bcachefs-tools-doc";
+                inherit version;
+                src = ./doc;
+                buildInputs = with pkgs; [
+                  latexDerivation
+                ];
+                buildPhase = ''
+                  pdflatex bcachefs-principles-of-operation.tex
+                  pdflatex bcachefs-principles-of-operation.tex
+                '';
+                installPhase = ''
+                  mkdir -p $out/doc
+                  cp bcachefs-principles-of-operation.pdf $out/doc
+                '';
+              };
             };
 
           checks = {
@@ -154,6 +180,12 @@
                   "rust-src"
                 ];
               })
+            ];
+          };
+
+          devShells.doc = pkgs.mkShell {
+            packages = with pkgs; [
+              latexDerivation
             ];
           };
 
