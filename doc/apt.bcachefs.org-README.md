@@ -50,4 +50,6 @@ and thus pinning by origin label is inherently insecure!
 For more information, see:
 https://wiki.debian.org/DebianRepository/UseThirdParty
 
-Source, Debian tarballs and dsc files can be verified using https://github.com/sigstore/rekor.
+Source, Debian tarballs, dsc files and binary `.deb` packages can be verified using https://github.com/sigstore/rekor.
+
+Binary `.deb` packages are signed with debsigs.
