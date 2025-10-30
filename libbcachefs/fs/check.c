@@ -913,6 +913,9 @@ static int check_inode(struct btree_trans *trans,
 	}
 
 	ret = bch2_check_inode_has_case_insensitive(trans, &u, &s->ids, &do_update);
+	if (bch2_err_matches(ret, ENOENT)) /* disconnected inode; will be fixed by a later pass */
+		ret = 0;
+	bch_err_msg(c, ret, "bch2_check_inode_has_case_insensitive()");
 	if (ret)
 		goto err;
 
@@ -1627,7 +1630,7 @@ static int check_dirent(struct btree_trans *trans, struct btree_iter *iter,
 		new_d->k.p.inode	= d.k->p.inode;
 		new_d->k.p.snapshot	= d.k->p.snapshot;
 
-		struct btree_iter dup_iter = {};
+		CLASS(btree_iter_uninit, dup_iter)(trans);
 		return  bch2_hash_delete_at(trans,
 					    bch2_dirent_hash_desc, hash_info, iter,
 					    BTREE_UPDATE_internal_snapshot_node) ?:

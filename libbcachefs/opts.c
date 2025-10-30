@@ -525,6 +525,37 @@ void bch2_opts_to_text(struct printbuf *out,
 	}
 }
 
+static int opt_hook_io(struct bch_fs *c, struct bch_dev *ca, u64 inum, enum bch_opt_id id, bool post)
+{
+	if (!test_bit(BCH_FS_started, &c->flags))
+		return 0;
+
+	switch (id) {
+	case Opt_foreground_target:
+	case Opt_background_target:
+	case Opt_promote_target:
+	case Opt_compression:
+	case Opt_background_compression:
+	case Opt_data_checksum:
+	case Opt_data_replicas:
+	case Opt_erasure_code: {
+		struct rebalance_scan s = {
+			.type = !inum ? REBALANCE_SCAN_fs : REBALANCE_SCAN_inum,
+			.inum = inum,
+		};
+
+		try(bch2_set_rebalance_needs_scan(c, s));
+		if (post)
+			bch2_rebalance_wakeup(c);
+		break;
+	}
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, u64 inum, enum bch_opt_id id, u64 v,
 			  bool change)
 {
@@ -546,16 +577,8 @@ int bch2_opt_hook_pre_set(struct bch_fs *c, struct bch_dev *ca, u64 inum, enum b
 		break;
 	}
 
-	if (change &&
-	    test_bit(BCH_FS_started, &c->flags) &&
-	    (id == Opt_foreground_target ||
-	     id == Opt_background_target ||
-	     id == Opt_promote_target ||
-	     id == Opt_compression ||
-	     id == Opt_background_compression ||
-	     id == Opt_data_checksum ||
-	     id == Opt_data_replicas))
-		try(bch2_set_rebalance_needs_scan(c, inum));
+	if (change)
+		try(opt_hook_io(c, ca, inum, id, false));
 
 	return 0;
 }
@@ -571,17 +594,7 @@ int bch2_opts_hooks_pre_set(struct bch_fs *c)
 void bch2_opt_hook_post_set(struct bch_fs *c, struct bch_dev *ca, u64 inum,
 			    enum bch_opt_id id, u64 v)
 {
-	if (test_bit(BCH_FS_started, &c->flags) &&
-	    (id == Opt_foreground_target ||
-	     id == Opt_background_target ||
-	     id == Opt_promote_target ||
-	     id == Opt_compression ||
-	     id == Opt_background_compression ||
-	     id == Opt_data_checksum ||
-	     id == Opt_data_replicas)) {
-		bch2_set_rebalance_needs_scan(c, inum);
-		bch2_rebalance_wakeup(c);
-	}
+	opt_hook_io(c, ca, inum, id, true);
 
 	switch (id) {
 	case Opt_rebalance_enabled:
@@ -838,6 +851,7 @@ void bch2_inode_opts_get(struct bch_fs *c, struct bch_inode_opts *ret, bool meta
 		ret->background_target	= c->opts.metadata_target ?: c->opts.foreground_target;
 		ret->data_replicas	= c->opts.metadata_replicas;
 		ret->data_checksum	= c->opts.metadata_checksum;
+		ret->erasure_code	= false;
 	} else {
 		bch2_io_opts_fixups(ret);
 	}

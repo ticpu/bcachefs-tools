@@ -447,8 +447,13 @@ int bch2_dev_attach_bdev(struct bch_fs *c, struct bch_sb_handle *sb, struct prin
 	lockdep_assert_held(&c->state_lock);
 
 	if (le64_to_cpu(sb->sb->seq) >
-	    le64_to_cpu(c->disk_sb.sb->seq))
-		bch2_sb_to_fs(c, sb->sb);
+	    le64_to_cpu(c->disk_sb.sb->seq)) {
+		/*
+		 * rewind, we'll lose some updates but it's not safe to call
+		 * bch2_sb_to_fs() after fs is started
+		 */
+		sb->sb->seq = c->disk_sb.sb->seq;
+	}
 
 	BUG_ON(!bch2_dev_exists(c, sb->sb->dev_idx));
 
@@ -628,11 +633,11 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 		goto err;
 	}
 
-	ret = bch2_replicas_gc2(c);
-	if (ret) {
-		prt_printf(err, "bch2_replicas_gc2() error: %s\n", bch2_err_str(ret));
-		goto err;
-	}
+	/*
+	 * flushing the journal should be sufficient, but it's the write buffer
+	 * flush that kills superblock replicas entries after they've gone to 0
+	 * so bch2_dev_has_data() returns the correct value:
+	 */
 
 	data = bch2_dev_has_data(c, ca);
 	if (data) {
