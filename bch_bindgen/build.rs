@@ -81,6 +81,7 @@ fn main() {
         .allowlist_type("nonce")
         .no_debug("bch_replicas_padded")
         .no_debug("jset")
+        .no_debug("bch_replicas_entry_cpu")
         .newtype_enum("bch_kdf_types")
         .rustified_enum("bch_key_types")
         .opaque_type("gendisk")
