@@ -112,6 +112,7 @@ jobs:
           eatmydata apt full-upgrade
           eatmydata apt install \
             aptly \
+            debsig-verify \
             devscripts \
             gettext-base \
             gnupg \
@@ -132,6 +133,11 @@ jobs:
           gpg --import <<EOT
           ${{ secrets.GPG_SECRET_SUBKEYS }}
           EOT
+          gpg \
+            --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.gpg \
+            --export \
+            ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }} \
+          ;
           gpg \
             --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc \
             --armor \
@@ -225,6 +231,38 @@ jobs:
               )                                                                                        \
             ) &&                                                                                       \
             echo 'ok.' &&                                                                              \
+            echo '::endgroup::'                                                                        \
+          "
+      - name: Ensure that all incoming deb's are signed
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          POL_DIR="/etc/debsig/policies/${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"
+          KEY_DIR="/usr/share/debsig/keyrings/${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"
+          mkdir $POL_DIR
+          mkdir $KEY_DIR
+          cp /etc/apt/trusted.gpg.d/apt.bcachefs.org.gpg $KEY_DIR/
+          tee $POL_DIR/pol.pol > /dev/null <<EOT
+          <?xml version="1.0"?>
+          <!DOCTYPE Policy SYSTEM "https://www.debian.org/debsig/1.0/policy.dtd">
+          <Policy xmlns="https://www.debian.org/debsig/1.0/">
+            <Origin Name="apt.bcachefs.org" id="${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"/>
+            <Selection>
+              <Required Type="origin" File="apt.bcachefs.org.gpg" id="${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"/>
+            </Selection>
+            <Verification MinOptional="0">
+              <Required Type="origin" File="apt.bcachefs.org.gpg" id="${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"/>
+            </Verification>
+          </Policy>
+          EOT
+          cd "${{ github.workspace }}/incoming"
+          find . -type f \( -name '*.deb' -or -name '*.ddeb' \) -print0 | xargs --null -I'{}' sh -c "  \
+            echo '::group::Checking signature on {}' &&                                                \
+            (                                                                                          \
+              debsig-verify --verbose {}                                                               \
+            ) &&                                                                                       \
             echo '::endgroup::'                                                                        \
           "
       - name: Create and populate repos
