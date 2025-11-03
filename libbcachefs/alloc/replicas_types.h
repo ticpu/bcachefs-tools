@@ -2,16 +2,10 @@
 #ifndef _BCACHEFS_REPLICAS_TYPES_H
 #define _BCACHEFS_REPLICAS_TYPES_H
 
-/* unsized - bch_replicas_entry_v1 is variable length */
-struct bch_replicas_entry_cpu {
-	atomic_t			ref;
-	struct bch_replicas_entry_v1	e;
-};
-
 struct bch_replicas_cpu {
-	unsigned			nr;
-	unsigned			entry_size;
-	struct bch_replicas_entry_cpu	*entries;
+	unsigned		nr;
+	unsigned		entry_size;
+	struct bch_replicas_entry_v1 *entries;
 };
 
 union bch_replicas_padded {
