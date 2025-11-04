@@ -160,6 +160,17 @@ static int bio_iov_iter_align_down(struct bio *bio, struct iov_iter *iter,
 	return 0;
 }
 
+static void bch2_bio_iov_bvec_set(struct bio *bio, const struct iov_iter *iter)
+{
+	WARN_ON_ONCE(bio->bi_max_vecs);
+
+	bio->bi_vcnt = iter->nr_segs;
+	bio->bi_io_vec = (struct bio_vec *)iter->bvec;
+	bio->bi_iter.bi_bvec_done = iter->iov_offset;
+	bio->bi_iter.bi_size = iov_iter_count(iter);
+	bio_set_flag(bio, BIO_CLONED);
+}
+
 int bch2_bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter,
 				unsigned len_align_mask)
 {
@@ -169,7 +180,7 @@ int bch2_bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter,
 		return -EIO;
 
 	if (iov_iter_is_bvec(iter)) {
-		bio_iov_bvec_set(bio, iter);
+		bch2_bio_iov_bvec_set(bio, iter);
 		iov_iter_advance(iter, bio->bi_iter.bi_size);
 		return 0;
 	}
