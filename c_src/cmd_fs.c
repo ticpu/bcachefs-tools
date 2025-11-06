@@ -183,6 +183,7 @@ static struct durability_x_degraded replicas_durability(const struct bch_replica
 							dev_names *dev_names)
 {
 	struct durability_x_degraded ret = {};
+	unsigned degraded = 0;
 
 	for (unsigned i = 0; i < r->nr_devs; i++) {
 		unsigned dev_idx = r->devs[i];
@@ -190,10 +191,16 @@ static struct durability_x_degraded replicas_durability(const struct bch_replica
 
 		unsigned durability = dev ? dev->durability : 1;
 
-		if (dev && dev->dev && dev->state != BCH_MEMBER_STATE_failed)
-			ret.minus_degraded += durability;
+		if (!dev || !dev->dev || dev->state == BCH_MEMBER_STATE_failed)
+			degraded += durability;
 		ret.durability += durability;
 	}
+
+	if (r->nr_required > 1)
+		ret.durability = r->nr_devs - r->nr_required;
+
+	ret.minus_degraded = max_t(int, 0, ret.durability - degraded);
+
 	return ret;
 }
 
