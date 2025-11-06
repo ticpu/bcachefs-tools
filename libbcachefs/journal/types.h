@@ -50,6 +50,7 @@ struct journal_buf {
 	bool			write_allocated:1;
 	bool			write_done:1;
 	bool			had_error:1;
+	bool			empty:1;
 	u8			idx;
 };
 
@@ -265,6 +266,8 @@ struct journal {
 		u64 front, back, size, mask;
 		struct journal_entry_pin_list *data;
 	}			pin;
+	u64			last_seq;
+
 	size_t			dirty_entry_bytes;
 
 	struct journal_space	space[journal_space_nr];
@@ -276,6 +279,7 @@ struct journal {
 	spinlock_t		err_lock;
 
 	struct mutex		reclaim_lock;
+	struct mutex		last_seq_ondisk_lock;
 	/*
 	 * Used for waiting until journal reclaim has freed up space in the
 	 * journal:
@@ -350,6 +354,13 @@ struct journal_device {
  */
 struct journal_entry_res {
 	unsigned		u64s;
+};
+
+struct journal_start_info {
+	u64	seq_read_start;
+	u64	seq_read_end;
+	u64	start_seq;
+	bool	clean;
 };
 
 #endif /* _BCACHEFS_JOURNAL_TYPES_H */

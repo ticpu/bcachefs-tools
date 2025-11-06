@@ -215,8 +215,7 @@ static int __mark_stripe_bucket(struct btree_trans *trans,
 		sectors = -sectors;
 
 	if (!deleting) {
-		if (bch2_trans_inconsistent_on(a->stripe ||
-					       a->stripe_redundancy, trans,
+		if (bch2_trans_inconsistent_on(a->stripe, trans,
 				"bucket %llu:%llu gen %u data type %s dirty_sectors %u: multiple stripes using same bucket (%u, %llu)\n%s",
 				bucket.inode, bucket.offset, a->gen,
 				bch2_data_type_str(a->data_type),
@@ -234,8 +233,7 @@ static int __mark_stripe_bucket(struct btree_trans *trans,
 				(bch2_bkey_val_to_text(&buf, c, s.s_c), buf.buf)))
 			return bch_err_throw(c, mark_stripe);
 	} else {
-		if (bch2_trans_inconsistent_on(a->stripe != s.k->p.offset ||
-					       a->stripe_redundancy != s.v->nr_redundant, trans,
+		if (bch2_trans_inconsistent_on(a->stripe != s.k->p.offset, trans,
 				"bucket %llu:%llu gen %u: not marked as stripe when deleting stripe (got %u)\n%s",
 				bucket.inode, bucket.offset, a->gen,
 				a->stripe,
@@ -267,11 +265,9 @@ static int __mark_stripe_bucket(struct btree_trans *trans,
 
 	if (!deleting) {
 		a->stripe		= s.k->p.offset;
-		a->stripe_redundancy	= s.v->nr_redundant;
 		alloc_data_type_set(a, data_type);
 	} else {
 		a->stripe		= 0;
-		a->stripe_redundancy	= 0;
 		alloc_data_type_set(a, BCH_DATA_user);
 	}
 
@@ -437,7 +433,7 @@ int bch2_trigger_stripe(struct btree_trans *trans,
 			struct disk_accounting_pos acc;
 			memset(&acc, 0, sizeof(acc));
 			acc.type = BCH_DISK_ACCOUNTING_replicas;
-			bch2_bkey_to_replicas(&acc.replicas, new);
+			bch2_bkey_to_replicas(c, &acc.replicas, new);
 			try(bch2_disk_accounting_mod(trans, &acc, &sectors, 1, gc));
 
 			if (gc)
@@ -451,7 +447,7 @@ int bch2_trigger_stripe(struct btree_trans *trans,
 			struct disk_accounting_pos acc;
 			memset(&acc, 0, sizeof(acc));
 			acc.type = BCH_DISK_ACCOUNTING_replicas;
-			bch2_bkey_to_replicas(&acc.replicas, old);
+			bch2_bkey_to_replicas(c, &acc.replicas, old);
 			try(bch2_disk_accounting_mod(trans, &acc, &sectors, 1, gc));
 		}
 
@@ -462,7 +458,8 @@ int bch2_trigger_stripe(struct btree_trans *trans,
 }
 
 /* returns blocknr in stripe that we matched: */
-static const struct bch_extent_ptr *bkey_matches_stripe(struct bch_stripe *s,
+static const struct bch_extent_ptr *bkey_matches_stripe(const struct bch_fs *c,
+							struct bch_stripe *s,
 						struct bkey_s_c k, unsigned *block)
 {
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
@@ -479,7 +476,7 @@ static const struct bch_extent_ptr *bkey_matches_stripe(struct bch_stripe *s,
 	return NULL;
 }
 
-static bool extent_has_stripe_ptr(struct bkey_s_c k, u64 idx)
+static bool extent_has_stripe_ptr(const struct bch_fs *c, struct bkey_s_c k, u64 idx)
 {
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
 	const union bch_extent_entry *entry;
@@ -1082,11 +1079,11 @@ static int ec_stripe_update_extent(struct btree_trans *trans,
 		return 0;
 	}
 
-	if (extent_has_stripe_ptr(k, s->key.k.p.offset))
+	if (extent_has_stripe_ptr(c, k, s->key.k.p.offset))
 		return 0;
 
 	unsigned block;
-	const struct bch_extent_ptr *ptr_c = bkey_matches_stripe(v, k, &block);
+	const struct bch_extent_ptr *ptr_c = bkey_matches_stripe(c, v, k, &block);
 	/*
 	 * It doesn't generally make sense to erasure code cached ptrs:
 	 * XXX: should we be incrementing a counter?
@@ -1119,10 +1116,10 @@ static int ec_stripe_update_extent(struct btree_trans *trans,
 
 	bch2_bkey_drop_ptrs_noerror(bkey_i_to_s(n), p, entry, p.ptr.dev != dev);
 
-	struct bch_extent_ptr *ec_ptr = bch2_bkey_has_device(bkey_i_to_s(n), dev);
+	struct bch_extent_ptr *ec_ptr = bch2_bkey_has_device(c, bkey_i_to_s(n), dev);
 	BUG_ON(!ec_ptr);
 
-	__extent_entry_insert(n,
+	__extent_entry_insert(c, n,
 			(union bch_extent_entry *) ec_ptr,
 			(union bch_extent_entry *) &stripe_ptr);
 
@@ -2066,7 +2063,7 @@ int bch2_invalidate_stripe_to_dev(struct btree_trans *trans,
 
 	memset(&acc, 0, sizeof(acc));
 	acc.type = BCH_DISK_ACCOUNTING_replicas;
-	bch2_bkey_to_replicas(&acc.replicas, bkey_i_to_s_c(&s->k_i));
+	bch2_bkey_to_replicas(c, &acc.replicas, bkey_i_to_s_c(&s->k_i));
 	acc.replicas.data_type = BCH_DATA_user;
 	try(bch2_disk_accounting_mod(trans, &acc, &sectors, 1, false));
 
@@ -2105,7 +2102,7 @@ int bch2_invalidate_stripe_to_dev(struct btree_trans *trans,
 
 	memset(&acc, 0, sizeof(acc));
 	acc.type = BCH_DISK_ACCOUNTING_replicas;
-	bch2_bkey_to_replicas(&acc.replicas, bkey_i_to_s_c(&s->k_i));
+	bch2_bkey_to_replicas(c, &acc.replicas, bkey_i_to_s_c(&s->k_i));
 	acc.replicas.data_type = BCH_DATA_user;
 	return bch2_disk_accounting_mod(trans, &acc, &sectors, 1, false);
 }

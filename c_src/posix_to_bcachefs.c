@@ -354,7 +354,7 @@ static void link_data(struct bch_fs *c, struct bch_inode_unpacked *dst,
 		e->k.p.offset	= logical + sectors;
 		e->k.p.snapshot	= U32_MAX;
 		e->k.size	= sectors;
-		bch2_bkey_append_ptr(&e->k_i, (struct bch_extent_ptr) {
+		bch2_bkey_append_ptr(c, &e->k_i, (struct bch_extent_ptr) {
 					.offset = physical,
 					.dev = 0,
 					.gen = *bucket_gen(ca, b),

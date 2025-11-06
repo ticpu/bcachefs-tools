@@ -325,7 +325,7 @@ fsck_err:
 	return ret;
 }
 
-void bch2_alloc_v4_swab(struct bkey_s k)
+void bch2_alloc_v4_swab(const struct bch_fs *c, struct bkey_s k)
 {
 	struct bch_alloc_v4 *a = bkey_s_to_alloc_v4(k).v;
 
@@ -364,7 +364,6 @@ static inline void __bch2_alloc_v4_to_text(struct printbuf *out, struct bch_fs *
 		prt_printf(out, "stripe_sectors       %u\n",	a->stripe_sectors);
 	prt_printf(out, "cached_sectors       %u\n",	a->cached_sectors);
 	prt_printf(out, "stripe               %u\n",	a->stripe);
-	prt_printf(out, "stripe_redundancy    %u\n",	a->stripe_redundancy);
 	prt_printf(out, "io_time[READ]        %llu\n",	a->io_time[READ]);
 	prt_printf(out, "io_time[WRITE]       %llu\n",	a->io_time[WRITE]);
 
@@ -412,7 +411,6 @@ void __bch2_alloc_to_v4(struct bkey_s_c k, struct bch_alloc_v4 *out)
 			.gen			= u.gen,
 			.oldest_gen		= u.oldest_gen,
 			.data_type		= u.data_type,
-			.stripe_redundancy	= u.stripe_redundancy,
 			.dirty_sectors		= u.dirty_sectors,
 			.cached_sectors		= u.cached_sectors,
 			.io_time[READ]		= u.read_time,
@@ -1237,7 +1235,7 @@ static int invalidate_one_bp(struct btree_trans *trans,
 	struct bkey_i *n = errptr_try(bch2_bkey_make_mut(trans, &iter, &k,
 						BTREE_UPDATE_internal_snapshot_node));
 
-	bch2_bkey_drop_device(bkey_i_to_s(n), ca->dev_idx);
+	bch2_bkey_drop_device(trans->c, bkey_i_to_s(n), ca->dev_idx);
 	return 0;
 }
 

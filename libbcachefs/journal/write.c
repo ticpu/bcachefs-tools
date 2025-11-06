@@ -75,7 +75,7 @@ static void __journal_write_alloc(struct journal *j,
 		 * it:
 		 */
 		if (!ja->nr ||
-		    bch2_bkey_has_device_c(bkey_i_to_s_c(&w->key), ca->dev_idx) ||
+		    bch2_bkey_has_device_c(c, bkey_i_to_s_c(&w->key), ca->dev_idx) ||
 		    sectors > ja->sectors_free) {
 			enumerated_ref_put(&ca->io_ref[WRITE], BCH_DEV_WRITE_REF_journal_write);
 			continue;
@@ -83,7 +83,7 @@ static void __journal_write_alloc(struct journal *j,
 
 		bch2_dev_stripe_increment(ca, &j->wp.stripe);
 
-		bch2_bkey_append_ptr(&w->key,
+		bch2_bkey_append_ptr(c, &w->key,
 			(struct bch_extent_ptr) {
 				  .offset = bucket_to_sector(ca,
 					ja->buckets[ja->cur_idx]) +
@@ -189,6 +189,7 @@ static CLOSURE_CALLBACK(journal_write_done)
 	struct journal *j = container_of(w, struct journal, buf[w->idx]);
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
 	u64 seq = le64_to_cpu(w->data->seq);
+	u64 seq_wrote = seq;
 	int err = 0;
 
 	bch2_time_stats_update(!JSET_NO_FLUSH(w->data)
@@ -225,7 +226,6 @@ static CLOSURE_CALLBACK(journal_write_done)
 	BUG_ON(seq < j->pin.front);
 	if (err && (!j->err_seq || seq < j->err_seq))
 		j->err_seq	= seq;
-	w->write_done = true;
 
 	if (!j->free_buf || j->free_buf_size < w->buf_size) {
 		swap(j->free_buf,	w->data);
@@ -243,25 +243,37 @@ static CLOSURE_CALLBACK(journal_write_done)
 	}
 
 	bool completed = false;
-	bool do_discards = false;
-
+	bool last_seq_ondisk_updated = false;
+again:
 	for (seq = journal_last_unwritten_seq(j);
 	     seq <= journal_cur_seq(j);
 	     seq++) {
 		w = j->buf + (seq & JOURNAL_BUF_MASK);
-		if (!w->write_done)
+		if (!w->write_done && seq != seq_wrote)
 			break;
 
 		if (!j->err_seq && !w->noflush) {
-			j->flushed_seq_ondisk = seq;
-			j->last_seq_ondisk = w->last_seq;
+			if (j->last_seq_ondisk < w->last_seq) {
+				spin_unlock(&j->lock);
+				/*
+				 * this needs to happen _before_ updating
+				 * j->flushed_seq_ondisk, for flushing to work
+				 * properly - when the flush completes replcias
+				 * refs need to have been dropped
+				 * */
+				bch2_journal_update_last_seq_ondisk(j, w->last_seq);
+				last_seq_ondisk_updated = true;
+				spin_lock(&j->lock);
+				goto again;
+			}
 
-			closure_wake_up(&c->freelist_wait);
-			bch2_reset_alloc_cursors(c);
-			do_discards = true;
+			j->flushed_seq_ondisk = seq;
 		}
 
 		j->seq_ondisk = seq;
+
+		if (w->empty)
+			j->last_empty_seq = seq;
 
 		/*
 		 * Updating last_seq_ondisk may let bch2_journal_reclaim_work() discard
@@ -277,14 +289,18 @@ static CLOSURE_CALLBACK(journal_write_done)
 		completed = true;
 	}
 
+	j->buf[seq_wrote & JOURNAL_BUF_MASK].write_done = true;
+
 	if (completed) {
-		bch2_journal_reclaim_fast(j);
+		bch2_journal_update_last_seq(j);
 		bch2_journal_space_available(j);
 
 		track_event_change(&c->times[BCH_TIME_blocked_journal_max_in_flight], false);
 
 		journal_wake(j);
 	}
+
+	j->pin.front = min(j->pin.back, j->last_seq_ondisk);
 
 	if (journal_last_unwritten_seq(j) == journal_cur_seq(j) &&
 	    j->reservations.cur_entry_offset < JOURNAL_ENTRY_CLOSED_VAL) {
@@ -308,8 +324,11 @@ static CLOSURE_CALLBACK(journal_write_done)
 	bch2_journal_do_writes(j);
 	spin_unlock(&j->lock);
 
-	if (do_discards)
+	if (last_seq_ondisk_updated) {
+		bch2_reset_alloc_cursors(c);
+		closure_wake_up(&c->freelist_wait);
 		bch2_do_discards(c);
+	}
 
 	closure_put(&c->cl);
 }
@@ -445,6 +464,8 @@ static int bch2_journal_write_prep(struct journal *j, struct journal_buf *w)
 	u64 seq = le64_to_cpu(jset->seq);
 	int ret;
 
+	bool empty = jset->seq == jset->last_seq;
+
 	/*
 	 * Simple compaction, dropping empty jset_entries (from journal
 	 * reservations that weren't fully used) and merging jset_entries that
@@ -459,6 +480,9 @@ static int bch2_journal_write_prep(struct journal *j, struct journal_buf *w)
 		/* Empty entry: */
 		if (!u64s)
 			continue;
+
+		if (i->type == BCH_JSET_ENTRY_btree_keys)
+			empty = false;
 
 		/*
 		 * New btree roots are set by journalling them; when the journal
@@ -504,8 +528,10 @@ static int bch2_journal_write_prep(struct journal *j, struct journal_buf *w)
 		}
 	}
 
-	scoped_guard(spinlock, &c->journal.lock)
+	scoped_guard(spinlock, &c->journal.lock) {
 		w->need_flush_to_write_buffer = false;
+		w->empty = empty;
+	}
 
 	start = end = vstruct_last(jset);
 
@@ -539,7 +565,6 @@ static int bch2_journal_write_checksum(struct journal *j, struct journal_buf *w)
 {
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
 	struct jset *jset = w->data;
-	u64 seq = le64_to_cpu(jset->seq);
 	bool validate_before_checksum = false;
 	int ret = 0;
 
@@ -548,9 +573,6 @@ static int bch2_journal_write_checksum(struct journal *j, struct journal_buf *w)
 
 	SET_JSET_BIG_ENDIAN(jset, CPU_BIG_ENDIAN);
 	SET_JSET_CSUM_TYPE(jset, bch2_meta_checksum_type(c));
-
-	if (!JSET_NO_FLUSH(jset) && journal_entry_empty(jset))
-		j->last_empty_seq = seq;
 
 	if (bch2_csum_type_is_encryption(JSET_CSUM_TYPE(jset)))
 		validate_before_checksum = true;
@@ -694,7 +716,7 @@ CLOSURE_CALLBACK(bch2_journal_write)
 		bch2_journal_do_writes(j);
 	}
 
-	w->devs_written = bch2_bkey_devs(bkey_i_to_s_c(&w->key));
+	w->devs_written = bch2_bkey_devs(c, bkey_i_to_s_c(&w->key));
 
 	/*
 	 * Mark journal replicas before we submit the write to guarantee

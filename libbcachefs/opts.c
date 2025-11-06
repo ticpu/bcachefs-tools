@@ -851,6 +851,8 @@ void bch2_inode_opts_get(struct bch_fs *c, struct bch_inode_opts *ret, bool meta
 		ret->background_target	= c->opts.metadata_target ?: c->opts.foreground_target;
 		ret->data_replicas	= c->opts.metadata_replicas;
 		ret->data_checksum	= c->opts.metadata_checksum;
+		ret->compression	= 0;
+		ret->background_compression = 0;
 		ret->erasure_code	= false;
 	} else {
 		bch2_io_opts_fixups(ret);
@@ -871,4 +873,17 @@ bool bch2_opt_is_inode_opt(enum bch_opt_id id)
 			return true;
 
 	return false;
+}
+
+void bch2_inode_opts_to_text(struct printbuf *out, struct bch_fs *c, struct bch_inode_opts opts)
+{
+	bool first = true;
+
+#define x(_name, _bits)			\
+	if (!first)			\
+		prt_char(out, ',');	\
+	first = false;			\
+	bch2_opt_to_text(out, c, c->disk_sb.sb, &bch2_opt_table[Opt_##_name], opts._name, 0);
+	BCH_INODE_OPTS()
+#undef x
 }
