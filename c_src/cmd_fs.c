@@ -197,7 +197,7 @@ static struct durability_x_degraded replicas_durability(const struct bch_replica
 	}
 
 	if (r->nr_required > 1)
-		ret.durability = r->nr_devs - r->nr_required;
+		ret.durability = r->nr_devs - r->nr_required + 1;
 
 	ret.minus_degraded = max_t(int, 0, ret.durability - degraded);
 
