@@ -162,9 +162,6 @@ bool bch2_btree_bset_insert_key(struct btree_trans *trans,
 				struct btree_node_iter *node_iter,
 				struct bkey_i *insert)
 {
-	struct bkey_packed *k;
-	unsigned clobber_u64s = 0, new_u64s = 0;
-
 	EBUG_ON(btree_node_just_written(b));
 	EBUG_ON(bset_written(b, btree_bset_last(b)));
 	EBUG_ON(bkey_deleted(&insert->k) && bkey_val_u64s(&insert->k));
@@ -174,7 +171,7 @@ bool bch2_btree_bset_insert_key(struct btree_trans *trans,
 	EBUG_ON(!b->c.level && !bpos_eq(insert->k.p, path->pos));
 	kmsan_check_memory(insert, bkey_bytes(&insert->k));
 
-	k = bch2_btree_node_iter_peek_all(node_iter, b);
+	struct bkey_packed *k = bch2_btree_node_iter_peek_all(node_iter, b);
 	if (k && bkey_cmp_left_packed(b, k, &insert->k.p))
 		k = NULL;
 
@@ -185,50 +182,38 @@ bool bch2_btree_bset_insert_key(struct btree_trans *trans,
 	if (bkey_deleted(&insert->k) && !k)
 		return false;
 
-	if (bkey_deleted(&insert->k)) {
-		/* Deleting: */
-		btree_account_key_drop(b, k);
-		k->type = KEY_TYPE_deleted;
-
-		if (k->needs_whiteout)
-			push_whiteout(b, insert->k.p);
-		k->needs_whiteout = false;
-
-		if (k >= btree_bset_last(b)->start) {
-			clobber_u64s = k->u64s;
-			bch2_bset_delete(b, k, clobber_u64s);
-			goto fix_iter;
-		} else {
-			bch2_btree_path_fix_key_modified(trans, b, k);
-		}
-
-		return true;
-	}
-
 	if (k) {
-		/* Overwriting: */
 		btree_account_key_drop(b, k);
 		k->type = KEY_TYPE_deleted;
 
-		insert->k.needs_whiteout = k->needs_whiteout;
-		k->needs_whiteout = false;
-
-		if (k >= btree_bset_last(b)->start) {
-			clobber_u64s = k->u64s;
-			goto overwrite;
-		} else {
-			bch2_btree_path_fix_key_modified(trans, b, k);
+		if (k->needs_whiteout) {
+			if (bkey_deleted(&insert->k))
+				push_whiteout(b, insert->k.p);
+			else
+				insert->k.needs_whiteout = true;
+			k->needs_whiteout = false;
 		}
+
+		if (k < btree_bset_last(b)->start)
+			bch2_btree_path_fix_key_modified(trans, b, k);
 	}
 
-	k = bch2_btree_node_iter_bset_pos(node_iter, b, bset_tree_last(b));
-overwrite:
-	bch2_bset_insert(b, k, insert, clobber_u64s);
-	new_u64s = k->u64s;
-fix_iter:
+	unsigned clobber_u64s = k >= btree_bset_last(b)->start ? k->u64s : 0;
+
+	if (bkey_deleted(&insert->k)) {
+		if (k >= btree_bset_last(b)->start)
+			bch2_bset_delete(b, k, clobber_u64s);
+	} else {
+		if (k < btree_bset_last(b)->start)
+			k = bch2_btree_node_iter_bset_pos(node_iter, b, bset_tree_last(b));
+
+		bch2_bset_insert(b, k, insert, clobber_u64s);
+	}
+
+	unsigned new_u64s = !bkey_deleted(&insert->k) ? k->u64s : 0;
 	if (clobber_u64s != new_u64s)
-		bch2_btree_node_iter_fix(trans, path, b, node_iter, k,
-					 clobber_u64s, new_u64s);
+		bch2_btree_node_iter_fix(trans, path, b, node_iter, k, clobber_u64s, new_u64s);
+
 	return true;
 }
 
@@ -877,10 +862,9 @@ static int journal_reclaim_wait_done(struct bch_fs *c)
 	return 0;
 }
 
-static noinline
-int bch2_trans_commit_error(struct btree_trans *trans, unsigned flags,
-			    struct btree_insert_entry *i,
-			    int ret, unsigned long trace_ip)
+static int __bch2_trans_commit_error(struct btree_trans *trans, unsigned flags,
+				     struct btree_insert_entry *i,
+				     int ret, unsigned long trace_ip)
 {
 	struct bch_fs *c = trans->c;
 	enum bch_watermark watermark = flags & BCH_WATERMARK_MASK;
@@ -891,16 +875,13 @@ int bch2_trans_commit_error(struct btree_trans *trans, unsigned flags,
 		 * flag
 		 */
 		if ((flags & BCH_TRANS_COMMIT_journal_reclaim) &&
-		    watermark < BCH_WATERMARK_reclaim) {
-			ret = bch_err_throw(c, journal_reclaim_would_deadlock);
-			goto out;
-		}
+		    watermark < BCH_WATERMARK_reclaim)
+			return bch_err_throw(c, journal_reclaim_would_deadlock);
 
-		ret = drop_locks_do(trans,
+		return drop_locks_do(trans,
 			bch2_trans_journal_res_get(trans,
 					(flags & BCH_WATERMARK_MASK)|
 					JOURNAL_RES_GET_CHECK));
-		goto out;
 	}
 
 	switch (ret) {
@@ -909,11 +890,9 @@ int bch2_trans_commit_error(struct btree_trans *trans, unsigned flags,
 		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 			trace_and_count(c, trans_restart_btree_node_split, trans,
 					trace_ip, trans->paths + i->path);
-		break;
+		return ret;
 	case -BCH_ERR_btree_insert_need_mark_replicas:
-		ret = drop_locks_do(trans,
-			bch2_accounting_update_sb(trans));
-		break;
+		return drop_locks_do(trans, bch2_accounting_update_sb(trans));
 	case -BCH_ERR_btree_insert_need_journal_reclaim:
 		bch2_trans_unlock(trans);
 
@@ -925,22 +904,25 @@ int bch2_trans_commit_error(struct btree_trans *trans, unsigned flags,
 
 		track_event_change(&c->times[BCH_TIME_blocked_key_cache_flush], false);
 
-		if (ret < 0)
-			break;
-
-		ret = bch2_trans_relock(trans);
-		break;
+		return ret < 0 ? ret : bch2_trans_relock(trans);
 	default:
 		BUG_ON(ret >= 0);
-		break;
+		return ret;
 	}
-out:
+}
+
+static noinline
+int bch2_trans_commit_error(struct btree_trans *trans, unsigned flags,
+			    struct btree_insert_entry *i,
+			    int ret, unsigned long trace_ip)
+{
+	ret = __bch2_trans_commit_error(trans, flags, i, ret, trace_ip);
+
 	BUG_ON(bch2_err_matches(ret, BCH_ERR_transaction_restart) != !!trans->restarted);
 
 	bch2_fs_inconsistent_on(bch2_err_matches(ret, ENOSPC) &&
-				(flags & BCH_TRANS_COMMIT_no_enospc), c,
-		"%s: incorrectly got %s\n", __func__, bch2_err_str(ret));
-
+				(flags & BCH_TRANS_COMMIT_no_enospc),
+				trans->c, "%s: incorrectly got %s\n", __func__, bch2_err_str(ret));
 	return ret;
 }
 

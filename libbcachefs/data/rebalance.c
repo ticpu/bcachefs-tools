@@ -292,13 +292,20 @@ int bch2_bkey_get_io_opts(struct btree_trans *trans,
 			  struct per_snapshot_io_opts *snapshot_opts, struct bkey_s_c k,
 			  struct bch_inode_opts *opts)
 {
+	enum io_opts_mode {
+		IO_OPTS_metadata,
+		IO_OPTS_reflink,
+		IO_OPTS_user,
+	} mode = bkey_is_btree_ptr(k.k) ? IO_OPTS_metadata :
+		 !bkey_is_indirect(k.k)	? IO_OPTS_user :
+					  IO_OPTS_reflink;
+
 	struct bch_fs *c = trans->c;
-	bool metadata = bkey_is_btree_ptr(k.k);
 
 	if (!snapshot_opts) {
-		bch2_inode_opts_get(c, opts, metadata);
+		bch2_inode_opts_get(c, opts, mode == IO_OPTS_metadata);
 
-		if (!metadata && k.k->p.snapshot) {
+		if (mode == IO_OPTS_user) {
 			struct bch_inode_unpacked inode;
 			int ret = bch2_inode_find_by_inum_snapshot(trans, k.k->p.inode, k.k->p.snapshot,
 								   &inode, BTREE_ITER_cached);
@@ -308,55 +315,61 @@ int bch2_bkey_get_io_opts(struct btree_trans *trans,
 				bch2_inode_opts_get_inode(c, &inode, opts);
 		}
 	} else {
+		/*
+		 * If we have a per_snapshot_io_opts, we're doing a scan in
+		 * natural key order: we can cache options for the inode number
+		 * we're currently on, but we have to cache options from every
+		 * different snapshot version of that inode
+		 */
+
+		bool metadata = mode == IO_OPTS_metadata;
 		if (snapshot_opts->fs_io_opts.change_cookie	!= atomic_read(&c->opt_change_cookie) ||
 		    snapshot_opts->metadata			!= metadata) {
 			bch2_inode_opts_get(c, &snapshot_opts->fs_io_opts, metadata);
 
 			snapshot_opts->metadata = metadata;
 			snapshot_opts->cur_inum = 0;
-			snapshot_opts->d.nr = 0;
+			snapshot_opts->d.nr	= 0;
 		}
 
-		if (!metadata && k.k->p.snapshot) {
+		if (mode == IO_OPTS_user) {
 			if (snapshot_opts->cur_inum != k.k->p.inode) {
 				snapshot_opts->d.nr = 0;
 
-				int ret = for_each_btree_key(trans, iter, BTREE_ID_inodes, POS(0, k.k->p.inode),
-							     BTREE_ITER_all_snapshots, k, ({
-					if (k.k->p.offset != k.k->p.inode)
-						break;
-
-					if (!bkey_is_inode(k.k))
+				try(for_each_btree_key_max(trans, iter, BTREE_ID_inodes,
+							   SPOS(0, k.k->p.inode, 0),
+							   SPOS(0, k.k->p.inode, U32_MAX),
+							   BTREE_ITER_all_snapshots, inode_k, ({
+					struct bch_inode_unpacked inode;
+					if (!bkey_is_inode(inode_k.k) ||
+					    bch2_inode_unpack(inode_k, &inode))
 						continue;
 
-					struct bch_inode_unpacked inode;
-					_ret3 = bch2_inode_unpack(k, &inode);
-					if (_ret3)
-						break;
-
-					struct snapshot_io_opts_entry e = { .snapshot = k.k->p.snapshot };
+					struct snapshot_io_opts_entry e = { .snapshot = inode_k.k->p.snapshot };
 					bch2_inode_opts_get_inode(c, &inode, &e.io_opts);
 
 					darray_push(&snapshot_opts->d, e);
-				}));
+				})));
 
 				snapshot_opts->cur_inum = k.k->p.inode;
 
-				return ret ?: bch_err_throw(c, transaction_restart_nested);
+				return bch_err_throw(c, transaction_restart_nested);
 			}
 
-			darray_for_each(snapshot_opts->d, i)
-				if (bch2_snapshot_is_ancestor(c, k.k->p.snapshot, i->snapshot)) {
-					*opts = i->io_opts;
-					return 0;
-				}
+			struct snapshot_io_opts_entry *i =
+				darray_find_p(snapshot_opts->d, i,
+					      bch2_snapshot_is_ancestor(c, k.k->p.snapshot, i->snapshot));
+			if (i) {
+				*opts = i->io_opts;
+				return 0;
+			}
 		}
 
 		*opts = snapshot_opts->fs_io_opts;
 	}
 
 	const struct bch_extent_rebalance *old;
-	if (k.k->type == KEY_TYPE_reflink_v &&
+	if (mode == IO_OPTS_reflink &&
 	    (old = bch2_bkey_rebalance_opts(c, k))) {
 #define x(_name)								\
 		if (old->_name##_from_inode)					\
@@ -365,8 +378,6 @@ int bch2_bkey_get_io_opts(struct btree_trans *trans,
 		BCH_REBALANCE_OPTS()
 #undef x
 	}
-
-	BUG_ON(metadata && opts->erasure_code);
 
 	return 0;
 }
@@ -535,7 +546,6 @@ static int rebalance_set_data_opts(struct btree_trans *trans,
 	struct btree_iter *extent_iter = arg;
 	struct bch_fs *c = trans->c;
 
-	memset(data_opts, 0, sizeof(*data_opts));
 	data_opts->type			= BCH_DATA_UPDATE_rebalance;
 	data_opts->ptrs_rewrite		= bch2_bkey_ptrs_need_rebalance(c, opts, k);
 	data_opts->target		= opts->background_target;
@@ -1067,7 +1077,7 @@ int bch2_check_rebalance_work(struct bch_fs *c)
 	struct wb_maybe_flush last_flushed __cleanup(wb_maybe_flush_exit);
 	wb_maybe_flush_init(&last_flushed);
 
-	struct progress_indicator_state progress;
+	struct progress_indicator progress;
 	bch2_progress_init(&progress, c, BIT_ULL(BTREE_ID_rebalance_work));
 
 	int ret = 0;

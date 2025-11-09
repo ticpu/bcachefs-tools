@@ -770,20 +770,22 @@ static int delete_dead_snapshot_keys_v1(struct btree_trans *trans)
 	struct bch_fs *c = trans->c;
 	struct snapshot_delete *d = &c->snapshot_delete;
 
-	for (d->pos.btree = 0; d->pos.btree < BTREE_ID_NR; d->pos.btree++) {
+	bch2_progress_init(&d->progress, c, btree_has_snapshots_mask);
+	d->progress.silent	= true;
+	d->version		= 1;
+
+	for (unsigned btree = 0; btree < BTREE_ID_NR; btree++) {
 		CLASS(disk_reservation, res)(c);
 		u64 prev_inum = 0;
 
-		d->pos.pos = POS_MIN;
-
-		if (!btree_type_has_snapshots(d->pos.btree))
+		if (!btree_type_has_snapshots(btree))
 			continue;
 
 		try(for_each_btree_key_commit(trans, iter,
-				d->pos.btree, POS_MIN,
+				btree, POS_MIN,
 				BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k,
 				&res.r, NULL, BCH_TRANS_COMMIT_no_enospc, ({
-			d->pos.pos = iter.pos;
+			progress_update_iter(trans, &d->progress, &iter);
 
 			if (skip_unrelated_snapshot_tree(trans, &iter, &prev_inum))
 				continue;
@@ -802,16 +804,11 @@ static int delete_dead_snapshot_keys_range(struct btree_trans *trans,
 					   struct bpos start, struct bpos end)
 {
 	struct bch_fs *c = trans->c;
-	struct snapshot_delete *d = &c->snapshot_delete;
-
-	d->pos.btree	= btree;
-	d->pos.pos	= POS_MIN;
 
 	return for_each_btree_key_max_commit(trans, iter,
 			btree, start, end,
 			BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k,
 			res, NULL, BCH_TRANS_COMMIT_no_enospc, ({
-		d->pos.pos = iter.pos;
 		bch2_disk_reservation_put(c, res);
 		delete_dead_snapshots_process_key(trans, &iter, k);
 	}));
@@ -824,8 +821,20 @@ static int delete_dead_snapshot_keys_v2(struct btree_trans *trans)
 	CLASS(disk_reservation, res)(c);
 	u64 prev_inum = 0;
 
+	bch2_progress_init(&d->progress, c, BIT_ULL(BTREE_ID_inodes));
+	d->progress.silent	= true;
+	d->version		= 2;
+
 	CLASS(btree_iter, iter)(trans, BTREE_ID_inodes, POS_MIN,
-			     BTREE_ITER_prefetch|BTREE_ITER_all_snapshots);
+				BTREE_ITER_prefetch|BTREE_ITER_all_snapshots);
+
+	/*
+	 * First, delete extents/dirents/xattrs
+	 *
+	 * If an extent/dirent/xattr is present in a given snapshot ID an inode
+	 * must also be present in that same snapshot ID, so we can use this to
+	 * greatly accelerate scanning:
+	 */
 
 	while (1) {
 		struct bkey_s_c k;
@@ -834,8 +843,7 @@ static int delete_dead_snapshot_keys_v2(struct btree_trans *trans)
 		if (!k.k)
 			break;
 
-		d->pos.btree	= iter.btree_id;
-		d->pos.pos	= iter.pos;
+		progress_update_iter(trans, &d->progress, &iter);
 
 		if (skip_unrelated_snapshot_tree(trans, &iter, &prev_inum))
 			continue;
@@ -854,14 +862,13 @@ static int delete_dead_snapshot_keys_v2(struct btree_trans *trans)
 		}
 	}
 
+	/* Then the inodes */
+
 	prev_inum = 0;
 	try(for_each_btree_key_commit(trans, iter,
 			BTREE_ID_inodes, POS_MIN,
 			BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k,
 			&res.r, NULL, BCH_TRANS_COMMIT_no_enospc, ({
-		d->pos.btree	= iter.btree_id;
-		d->pos.pos	= iter.pos;
-
 		if (skip_unrelated_snapshot_tree(trans, &iter, &prev_inum))
 			continue;
 
@@ -1025,10 +1032,43 @@ static void bch2_snapshot_delete_nodes_to_text(struct printbuf *out, struct snap
 	prt_newline(out);
 }
 
+static int delete_dead_snapshots_locked(struct bch_fs *c)
+{
+	CLASS(btree_trans, trans)(c);
+
+	/*
+	 * For every snapshot node: If we have no live children and it's not
+	 * pointed to by a subvolume, delete it:
+	 */
+	try(for_each_btree_key(trans, iter, BTREE_ID_snapshots, POS_MIN, 0, k,
+		check_should_delete_snapshot(trans, k)));
+
+	struct snapshot_delete *d = &c->snapshot_delete;
+	if (!d->delete_leaves.nr && !d->delete_interior.nr)
+		return 0;
+
+	CLASS(printbuf, buf)();
+	bch2_snapshot_delete_nodes_to_text(&buf, d);
+	try(commit_do(trans, NULL, NULL, 0, bch2_trans_log_msg(trans, &buf)));
+
+	try(!bch2_request_incompat_feature(c, bcachefs_metadata_version_snapshot_deletion_v2)
+	    ? delete_dead_snapshot_keys_v2(trans)
+	    : delete_dead_snapshot_keys_v1(trans));
+
+	darray_for_each(d->delete_leaves, i)
+		try(commit_do(trans, NULL, NULL, 0,
+			bch2_snapshot_node_delete(trans, *i)));
+
+	darray_for_each(d->delete_interior, i)
+		try(commit_do(trans, NULL, NULL, 0,
+			bch2_snapshot_node_set_no_keys(trans, i->id)));
+
+	return 0;
+}
+
 int __bch2_delete_dead_snapshots(struct bch_fs *c)
 {
 	struct snapshot_delete *d = &c->snapshot_delete;
-	int ret = 0;
 
 	if (!mutex_trylock(&d->lock))
 		return 0;
@@ -1038,59 +1078,11 @@ int __bch2_delete_dead_snapshots(struct bch_fs *c)
 		return 0;
 	}
 
-	CLASS(btree_trans, trans)(c);
-
-	/*
-	 * For every snapshot node: If we have no live children and it's not
-	 * pointed to by a subvolume, delete it:
-	 */
 	d->running = true;
-	d->pos = BBPOS_MIN;
+	d->progress.pos = BBPOS_MIN;
 
-	ret = for_each_btree_key(trans, iter, BTREE_ID_snapshots, POS_MIN, 0, k,
-		check_should_delete_snapshot(trans, k));
-	if (!bch2_err_matches(ret, EROFS))
-		bch_err_msg(c, ret, "walking snapshots");
-	if (ret)
-		goto err;
+	int ret = delete_dead_snapshots_locked(c);
 
-	if (!d->delete_leaves.nr && !d->delete_interior.nr)
-		goto err;
-
-	{
-		CLASS(printbuf, buf)();
-		bch2_snapshot_delete_nodes_to_text(&buf, d);
-
-		ret = commit_do(trans, NULL, NULL, 0, bch2_trans_log_msg(trans, &buf));
-		if (ret)
-			goto err;
-	}
-
-	ret = !bch2_request_incompat_feature(c, bcachefs_metadata_version_snapshot_deletion_v2)
-		? delete_dead_snapshot_keys_v2(trans)
-		: delete_dead_snapshot_keys_v1(trans);
-	if (!bch2_err_matches(ret, EROFS))
-		bch_err_msg(c, ret, "deleting keys from dying snapshots");
-	if (ret)
-		goto err;
-
-	darray_for_each(d->delete_leaves, i) {
-		ret = commit_do(trans, NULL, NULL, 0,
-			bch2_snapshot_node_delete(trans, *i));
-		if (!bch2_err_matches(ret, EROFS))
-			bch_err_msg(c, ret, "deleting snapshot %u", *i);
-		if (ret)
-			goto err;
-	}
-	darray_for_each(d->delete_interior, i) {
-		ret = commit_do(trans, NULL, NULL, 0,
-			bch2_snapshot_node_set_no_keys(trans, i->id));
-		if (!bch2_err_matches(ret, EROFS))
-			bch_err_msg(c, ret, "deleting snapshot %u", i->id);
-		if (ret)
-			goto err;
-	}
-err:
 	scoped_guard(mutex, &d->progress_lock) {
 		darray_exit(&d->deleting_from_trees);
 		darray_exit(&d->delete_interior);
@@ -1146,8 +1138,9 @@ void bch2_snapshot_delete_status_to_text(struct printbuf *out, struct bch_fs *c)
 	}
 
 	scoped_guard(mutex, &d->progress_lock) {
-		prt_str(out, "Current position: ");
-		bch2_bbpos_to_text(out, d->pos);
+		prt_printf(out, "Snapshot deletion v%u\n", d->version);
+		prt_str(out, "Progress: ");
+		bch2_progress_to_text(out, &d->progress);
 		prt_newline(out);
 		bch2_snapshot_delete_nodes_to_text(out, d);
 	}

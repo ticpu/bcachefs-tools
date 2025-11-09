@@ -34,15 +34,33 @@ static inline enum bch_compression_opts bch2_compression_type_to_opt(enum bch_co
 
 /* Bounce buffer: */
 struct bbuf {
+	struct bch_fs	*c;
 	void		*b;
-	enum {
-		BB_NONE,
-		BB_VMAP,
-		BB_KMALLOC,
-		BB_MEMPOOL,
+	enum bbuf_type {
+		BB_none,
+		BB_vmap,
+		BB_kmalloc,
+		BB_mempool,
 	}		type;
 	int		rw;
 };
+
+static void bbuf_exit(struct bbuf *buf)
+{
+	switch (buf->type) {
+	case BB_none:
+		break;
+	case BB_vmap:
+		vunmap((void *) ((unsigned long) buf->b & PAGE_MASK));
+		break;
+	case BB_kmalloc:
+		kfree(buf->b);
+		break;
+	case BB_mempool:
+		mempool_free(buf->b, &buf->c->compression_bounce[buf->rw]);
+		break;
+	}
+}
 
 static struct bbuf __bounce_alloc(struct bch_fs *c, unsigned size, int rw)
 {
@@ -52,13 +70,22 @@ static struct bbuf __bounce_alloc(struct bch_fs *c, unsigned size, int rw)
 
 	b = kmalloc(size, GFP_NOFS|__GFP_NOWARN);
 	if (b)
-		return (struct bbuf) { .b = b, .type = BB_KMALLOC, .rw = rw };
+		return (struct bbuf) { .c = c, .b = b, .type = BB_kmalloc, .rw = rw };
 
 	b = mempool_alloc(&c->compression_bounce[rw], GFP_NOFS);
 	if (b)
-		return (struct bbuf) { .b = b, .type = BB_MEMPOOL, .rw = rw };
+		return (struct bbuf) { .c = c, .b = b, .type = BB_mempool, .rw = rw };
 
 	BUG();
+}
+
+static struct bbuf bio_bounce(struct bch_fs *c, struct bio *bio, struct bvec_iter start, int rw)
+{
+	struct bbuf ret = __bounce_alloc(c, start.bi_size, rw);
+
+	if (rw == READ)
+		memcpy_from_bio(ret.b, bio, start);
+	return ret;
 }
 
 static bool bio_phys_contig(struct bio *bio, struct bvec_iter start)
@@ -82,7 +109,6 @@ static bool bio_phys_contig(struct bio *bio, struct bvec_iter start)
 static struct bbuf __bio_map_or_bounce(struct bch_fs *c, struct bio *bio,
 				       struct bvec_iter start, int rw)
 {
-	struct bbuf ret;
 	struct bio_vec bv;
 	struct bvec_iter iter;
 	unsigned nr_pages = 0;
@@ -95,20 +121,22 @@ static struct bbuf __bio_map_or_bounce(struct bch_fs *c, struct bio *bio,
 	if (!PageHighMem(bio_iter_page(bio, start)) &&
 	    bio_phys_contig(bio, start))
 		return (struct bbuf) {
-			.b = page_address(bio_iter_page(bio, start)) +
+			.c	= c,
+			.b	= page_address(bio_iter_page(bio, start)) +
 				bio_iter_offset(bio, start),
-			.type = BB_NONE, .rw = rw
+			.type	= BB_none,
+			.rw	= rw
 		};
 
 	/* check if we can map the pages contiguously: */
 	__bio_for_each_segment(bv, bio, iter, start) {
 		if (iter.bi_size != start.bi_size &&
 		    bv.bv_offset)
-			goto bounce;
+			return bio_bounce(c, bio, start, rw);
 
 		if (bv.bv_len < iter.bi_size &&
 		    bv.bv_offset + bv.bv_len < PAGE_SIZE)
-			goto bounce;
+			return bio_bounce(c, bio, start, rw);
 
 		nr_pages++;
 	}
@@ -119,7 +147,7 @@ static struct bbuf __bio_map_or_bounce(struct bch_fs *c, struct bio *bio,
 		? kmalloc_array(nr_pages, sizeof(struct page *), GFP_NOFS)
 		: stack_pages;
 	if (!pages)
-		goto bounce;
+		return bio_bounce(c, bio, start, rw);
 
 	nr_pages = 0;
 	__bio_for_each_segment(bv, bio, iter, start)
@@ -129,40 +157,20 @@ static struct bbuf __bio_map_or_bounce(struct bch_fs *c, struct bio *bio,
 	if (pages != stack_pages)
 		kfree(pages);
 
-	if (data)
-		return (struct bbuf) {
-			.b = data + bio_iter_offset(bio, start),
-			.type = BB_VMAP, .rw = rw
-		};
-bounce:
-	ret = __bounce_alloc(c, start.bi_size, rw);
+	if (!data)
+		return bio_bounce(c, bio, start, rw);
 
-	if (rw == READ)
-		memcpy_from_bio(ret.b, bio, start);
-
-	return ret;
+	return (struct bbuf) {
+		c,
+		data + bio_iter_offset(bio, start),
+		BB_vmap,
+		rw
+	};
 }
 
 static struct bbuf bio_map_or_bounce(struct bch_fs *c, struct bio *bio, int rw)
 {
 	return __bio_map_or_bounce(c, bio, bio->bi_iter, rw);
-}
-
-static void bio_unmap_or_unbounce(struct bch_fs *c, struct bbuf buf)
-{
-	switch (buf.type) {
-	case BB_NONE:
-		break;
-	case BB_VMAP:
-		vunmap((void *) ((unsigned long) buf.b & PAGE_MASK));
-		break;
-	case BB_KMALLOC:
-		kfree(buf.b);
-		break;
-	case BB_MEMPOOL:
-		mempool_free(buf.b, &c->compression_bounce[buf.rw]);
-		break;
-	}
 }
 
 static inline void zlib_set_workspace(z_stream *strm, void *workspace)
@@ -175,7 +183,6 @@ static inline void zlib_set_workspace(z_stream *strm, void *workspace)
 static int __bio_uncompress(struct bch_fs *c, struct bio *src,
 			    void *dst_data, struct bch_extent_crc_unpacked crc)
 {
-	struct bbuf src_data = { NULL };
 	size_t src_len = src->bi_iter.bi_size;
 	size_t dst_len = crc.uncompressed_size << 9;
 	void *workspace;
@@ -187,14 +194,12 @@ static int __bio_uncompress(struct bch_fs *c, struct bio *src,
 		if (fsck_err(c, compression_type_not_marked_in_sb,
 			     "compression type %s set but not marked in superblock",
 			     __bch2_compression_types[crc.compression_type]))
-			ret = bch2_check_set_has_compressed_data(c, opt);
+			try(bch2_check_set_has_compressed_data(c, opt));
 		else
-			ret = bch_err_throw(c, compression_workspace_not_initialized);
-		if (ret)
-			goto err;
+			return bch_err_throw(c, compression_workspace_not_initialized);
 	}
 
-	src_data = bio_map_or_bounce(c, src, READ);
+	struct bbuf src_data __cleanup(bbuf_exit) = bio_map_or_bounce(c, src, READ);
 
 	switch (crc.compression_type) {
 	case BCH_COMPRESSION_TYPE_lz4_old:
@@ -202,7 +207,7 @@ static int __bio_uncompress(struct bch_fs *c, struct bio *src,
 		ret2 = LZ4_decompress_safe_partial(src_data.b, dst_data,
 						   src_len, dst_len, dst_len);
 		if (ret2 != dst_len)
-			ret = bch_err_throw(c, decompress_lz4);
+			return bch_err_throw(c, decompress_lz4);
 		break;
 	case BCH_COMPRESSION_TYPE_gzip: {
 		z_stream strm = {
@@ -221,17 +226,15 @@ static int __bio_uncompress(struct bch_fs *c, struct bio *src,
 		mempool_free(workspace, workspace_pool);
 
 		if (ret2 != Z_STREAM_END)
-			ret = bch_err_throw(c, decompress_gzip);
+			return bch_err_throw(c, decompress_gzip);
 		break;
 	}
 	case BCH_COMPRESSION_TYPE_zstd: {
 		ZSTD_DCtx *ctx;
 		size_t real_src_len = le32_to_cpup(src_data.b);
 
-		if (real_src_len > src_len - 4) {
-			ret = bch_err_throw(c, decompress_zstd_src_len_bad);
-			goto err;
-		}
+		if (real_src_len > src_len - 4)
+			return bch_err_throw(c, decompress_zstd_src_len_bad);
 
 		workspace = mempool_alloc(workspace_pool, GFP_NOFS);
 		ctx = zstd_init_dctx(workspace, zstd_dctx_workspace_bound());
@@ -243,15 +246,13 @@ static int __bio_uncompress(struct bch_fs *c, struct bio *src,
 		mempool_free(workspace, workspace_pool);
 
 		if (ret2 != dst_len)
-			ret = bch_err_throw(c, decompress_zstd);
+			return bch_err_throw(c, decompress_zstd);
 		break;
 	}
 	default:
 		BUG();
 	}
-err:
 fsck_err:
-	bio_unmap_or_unbounce(c, src_data);
 	return ret;
 }
 
@@ -260,9 +261,7 @@ int bch2_bio_uncompress_inplace(struct bch_write_op *op,
 {
 	struct bch_fs *c = op->c;
 	struct bch_extent_crc_unpacked *crc = &op->crc;
-	struct bbuf data = { NULL };
 	size_t dst_len = crc->uncompressed_size << 9;
-	int ret = 0;
 
 	/* bio must own its pages: */
 	BUG_ON(!bio->bi_vcnt);
@@ -275,16 +274,14 @@ int bch2_bio_uncompress_inplace(struct bch_write_op *op,
 		return bch_err_throw(c, decompress_exceeded_max_encoded_extent);
 	}
 
-	data = __bounce_alloc(c, dst_len, WRITE);
+	struct bbuf data __cleanup(bbuf_exit) = __bounce_alloc(c, dst_len, WRITE);
 
-	ret = __bio_uncompress(c, bio, data.b, *crc);
-
+	int ret = __bio_uncompress(c, bio, data.b, *crc);
 	if (c->opts.no_data_io)
 		ret = 0;
-
 	if (ret) {
 		bch2_write_op_error(op, op->pos.offset, "%s", bch2_err_str(ret));
-		goto err;
+		return ret;
 	}
 
 	/*
@@ -301,37 +298,29 @@ int bch2_bio_uncompress_inplace(struct bch_write_op *op,
 	crc->uncompressed_size	= crc->live_size;
 	crc->offset		= 0;
 	crc->csum		= (struct bch_csum) { 0, 0 };
-err:
-	bio_unmap_or_unbounce(c, data);
-	return ret;
+	return 0;
 }
 
 int bch2_bio_uncompress(struct bch_fs *c, struct bio *src,
 		       struct bio *dst, struct bvec_iter dst_iter,
 		       struct bch_extent_crc_unpacked crc)
 {
-	struct bbuf dst_data = { NULL };
 	size_t dst_len = crc.uncompressed_size << 9;
-	int ret;
 
 	if (crc.uncompressed_size << 9	> c->opts.encoded_extent_max ||
 	    crc.compressed_size << 9	> c->opts.encoded_extent_max)
 		return bch_err_throw(c, decompress_exceeded_max_encoded_extent);
 
-	dst_data = dst_len == dst_iter.bi_size
+	struct bbuf dst_data __cleanup(bbuf_exit) = dst_len == dst_iter.bi_size
 		? __bio_map_or_bounce(c, dst, dst_iter, WRITE)
 		: __bounce_alloc(c, dst_len, WRITE);
 
-	ret = __bio_uncompress(c, src, dst_data.b, crc);
-	if (ret)
-		goto err;
+	try(__bio_uncompress(c, src, dst_data.b, crc));
 
-	if (dst_data.type != BB_NONE &&
-	    dst_data.type != BB_VMAP)
+	if (dst_data.type != BB_none &&
+	    dst_data.type != BB_vmap)
 		memcpy_to_bio(dst, dst_iter, dst_data.b + (crc.offset << 9));
-err:
-	bio_unmap_or_unbounce(c, dst_data);
-	return ret;
+	return 0;
 }
 
 static int attempt_compress(struct bch_fs *c,
@@ -430,11 +419,8 @@ static unsigned __bio_compress(struct bch_fs *c,
 			       struct bio *src, size_t *src_len,
 			       union bch_compression_opt compression)
 {
-	struct bbuf src_data = { NULL }, dst_data = { NULL };
-	void *workspace;
 	enum bch_compression_type compression_type =
 		__bch2_compression_opt_to_type[compression.type];
-	unsigned pad;
 	int ret = 0;
 
 	/* bch2_compression_decode catches unknown compression types: */
@@ -457,10 +443,10 @@ static unsigned __bio_compress(struct bch_fs *c,
 	if (src->bi_iter.bi_size <= c->opts.block_size)
 		return BCH_COMPRESSION_TYPE_incompressible;
 
-	dst_data = bio_map_or_bounce(c, dst, WRITE);
-	src_data = bio_map_or_bounce(c, src, READ);
+	struct bbuf dst_data __cleanup(bbuf_exit) = bio_map_or_bounce(c, dst, WRITE);
+	struct bbuf src_data __cleanup(bbuf_exit) = bio_map_or_bounce(c, src, READ);
 
-	workspace = mempool_alloc(workspace_pool, GFP_NOFS);
+	void *workspace = mempool_alloc(workspace_pool, GFP_NOFS);
 
 	*src_len = src->bi_iter.bi_size;
 	*dst_len = dst->bi_iter.bi_size;
@@ -506,36 +492,28 @@ static unsigned __bio_compress(struct bch_fs *c,
 	mempool_free(workspace, workspace_pool);
 
 	if (ret)
-		goto err;
+		return BCH_COMPRESSION_TYPE_incompressible;
 
 	/* Didn't get smaller: */
 	if (round_up(*dst_len, block_bytes(c)) >= *src_len)
-		goto err;
+		return BCH_COMPRESSION_TYPE_incompressible;
 
-	pad = round_up(*dst_len, block_bytes(c)) - *dst_len;
+	unsigned pad = round_up(*dst_len, block_bytes(c)) - *dst_len;
 
 	memset(dst_data.b + *dst_len, 0, pad);
 	*dst_len += pad;
 
-	if (dst_data.type != BB_NONE &&
-	    dst_data.type != BB_VMAP)
+	if (dst_data.type != BB_none &&
+	    dst_data.type != BB_vmap)
 		memcpy_to_bio(dst, dst->bi_iter, dst_data.b);
 
 	BUG_ON(!*dst_len || *dst_len > dst->bi_iter.bi_size);
 	BUG_ON(!*src_len || *src_len > src->bi_iter.bi_size);
 	BUG_ON(*dst_len & (block_bytes(c) - 1));
 	BUG_ON(*src_len & (block_bytes(c) - 1));
-	ret = compression_type;
-out:
-	bio_unmap_or_unbounce(c, src_data);
-	bio_unmap_or_unbounce(c, dst_data);
-	return ret;
-err:
-	ret = BCH_COMPRESSION_TYPE_incompressible;
-	goto out;
+	return compression_type;
 fsck_err:
-	ret = 0;
-	goto out;
+	return BCH_COMPRESSION_TYPE_none;
 }
 
 unsigned bch2_bio_compress(struct bch_fs *c,

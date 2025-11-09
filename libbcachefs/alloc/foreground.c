@@ -762,10 +762,7 @@ static int bucket_alloc_from_stripe(struct btree_trans *trans,
 	if (ec_open_bucket(c, &req->ptrs))
 		return 0;
 
-	struct ec_stripe_head *h =
-		bch2_ec_stripe_head_get(trans, req, 0, cl);
-	if (IS_ERR(h))
-		return PTR_ERR(h);
+	struct ec_stripe_head *h = errptr_try(bch2_ec_stripe_head_get(trans, req, 0, cl));
 	if (!h)
 		return 0;
 
@@ -1427,7 +1424,7 @@ void bch2_open_bucket_to_text(struct printbuf *out, struct bch_fs *c, struct ope
 		   ob->dev, ob->bucket, ob->gen,
 		   ca->mi.bucket_size - ob->sectors_free, ca->mi.bucket_size);
 	if (ob->ec)
-		prt_printf(out, " ec idx %llu", ob->ec->idx);
+		prt_printf(out, " ec idx %llu", ob->ec->new_stripe.key.k.p.offset);
 	if (ob->on_partial_list)
 		prt_str(out, " partial");
 	prt_newline(out);
