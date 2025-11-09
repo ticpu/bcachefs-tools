@@ -232,7 +232,8 @@ create_lostfound:
 				BTREE_UPDATE_internal_snapshot_node|
 				STR_HASH_must_create) ?:
 		bch2_inode_write_flags(trans, &lostfound_iter, lostfound,
-				       BTREE_UPDATE_internal_snapshot_node);
+				       BTREE_UPDATE_internal_snapshot_node) ?:
+		bch2_trans_commit_lazy(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc);
 err:
 	bch_err_msg(c, ret, "creating lost+found");
 	return ret;
@@ -1130,9 +1131,7 @@ static int find_oldest_inode_needs_reattach(struct btree_trans *trans,
 			break;
 
 		struct bch_inode_unpacked parent_inode;
-		ret = bch2_inode_unpack(k, &parent_inode);
-		if (ret)
-			break;
+		try(bch2_inode_unpack(k, &parent_inode));
 
 		if (!inode_should_reattach(&parent_inode))
 			break;
@@ -1165,7 +1164,7 @@ static int check_unreachable_inode(struct btree_trans *trans,
 		     "unreachable inode:\n%s",
 		     (bch2_inode_unpacked_to_text(&buf, &inode),
 		      buf.buf)))
-		ret = bch2_reattach_inode(trans, &inode);
+		try(bch2_reattach_inode(trans, &inode));
 fsck_err:
 	return ret;
 }
