@@ -536,53 +536,55 @@ void bch2_bucket_gens_to_text(struct printbuf *out, struct bch_fs *c, struct bke
 	}
 }
 
+static int bucket_gens_init_iter(struct btree_trans *trans, struct bkey_s_c k,
+				 struct bkey_i_bucket_gens *g,
+				 bool *have_bucket_gens_key)
+{
+	/*
+	 * Not a fsck error because this is checked/repaired by
+	 * bch2_check_alloc_key() which runs later:
+	 */
+	if (!bch2_dev_bucket_exists(trans->c, k.k->p))
+		return 0;
+
+	unsigned offset;
+	struct bpos pos = alloc_gens_pos(k.k->p, &offset);
+
+	if (*have_bucket_gens_key && !bkey_eq(g->k.p, pos)) {
+		try(bch2_btree_insert_trans(trans, BTREE_ID_bucket_gens, &g->k_i, 0));
+		try(bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc));
+
+		*have_bucket_gens_key = false;
+	}
+
+	if (!*have_bucket_gens_key) {
+		bkey_bucket_gens_init(&g->k_i);
+		g->k.p = pos;
+		*have_bucket_gens_key = true;
+	}
+
+	struct bch_alloc_v4 a;
+	g->v.gens[offset] = bch2_alloc_to_v4(k, &a)->gen;
+	return 0;
+}
+
 int bch2_bucket_gens_init(struct bch_fs *c)
 {
 	struct bkey_i_bucket_gens g;
 	bool have_bucket_gens_key = false;
-	int ret;
 
 	CLASS(btree_trans, trans)(c);
-	ret = for_each_btree_key(trans, iter, BTREE_ID_alloc, POS_MIN,
+	try(for_each_btree_key(trans, iter, BTREE_ID_alloc, POS_MIN,
 				 BTREE_ITER_prefetch, k, ({
-		/*
-		 * Not a fsck error because this is checked/repaired by
-		 * bch2_check_alloc_key() which runs later:
-		 */
-		if (!bch2_dev_bucket_exists(c, k.k->p))
-			continue;
+		bucket_gens_init_iter(trans, k, &g, &have_bucket_gens_key);
+	})));
 
-		struct bch_alloc_v4 a;
-		u8 gen = bch2_alloc_to_v4(k, &a)->gen;
-		unsigned offset;
-		struct bpos pos = alloc_gens_pos(iter.pos, &offset);
-		int ret2 = 0;
-
-		if (have_bucket_gens_key && !bkey_eq(g.k.p, pos)) {
-			ret2 =  bch2_btree_insert_trans(trans, BTREE_ID_bucket_gens, &g.k_i, 0) ?:
-				bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc);
-			if (ret2)
-				goto iter_err;
-			have_bucket_gens_key = false;
-		}
-
-		if (!have_bucket_gens_key) {
-			bkey_bucket_gens_init(&g.k_i);
-			g.k.p = pos;
-			have_bucket_gens_key = true;
-		}
-
-		g.v.gens[offset] = gen;
-iter_err:
-		ret2;
-	}));
-
-	if (have_bucket_gens_key && !ret)
-		ret = commit_do(trans, NULL, NULL,
+	if (have_bucket_gens_key)
+		try(commit_do(trans, NULL, NULL,
 				BCH_TRANS_COMMIT_no_enospc,
-			bch2_btree_insert_trans(trans, BTREE_ID_bucket_gens, &g.k_i, 0));
+			bch2_btree_insert_trans(trans, BTREE_ID_bucket_gens, &g.k_i, 0)));
 
-	return ret;
+	return 0;
 }
 
 int bch2_alloc_read(struct bch_fs *c)
@@ -766,13 +768,21 @@ int bch2_alloc_key_to_dev_counters(struct btree_trans *trans, struct bch_dev *ca
 	return 0;
 }
 
+static noinline int inval_bucket_key(struct btree_trans *trans, struct bkey_s_c k)
+{
+	struct bch_fs *c = trans->c;
+	CLASS(printbuf, buf)();
+	bch2_fs_inconsistent(c, "reference to invalid bucket\n%s",
+			     (bch2_bkey_val_to_text(&buf, c, k), buf.buf));
+	return bch_err_throw(c, trigger_alloc);
+}
+
 int bch2_trigger_alloc(struct btree_trans *trans,
 		       enum btree_id btree, unsigned level,
 		       struct bkey_s_c old, struct bkey_s new,
 		       enum btree_iter_update_trigger_flags flags)
 {
 	struct bch_fs *c = trans->c;
-	CLASS(printbuf, buf)();
 	int ret = 0;
 
 	CLASS(bch2_dev_bucket_tryget, ca)(c, new.k->p);
@@ -849,6 +859,7 @@ int bch2_trigger_alloc(struct btree_trans *trans,
 		u64 transaction_seq = trans->journal_res.seq;
 		BUG_ON(!transaction_seq);
 
+		CLASS(printbuf, buf)();
 		if (log_fsck_err_on(transaction_seq && new_a->journal_seq_nonempty > transaction_seq,
 				    trans, alloc_key_journal_seq_in_future,
 				    "bucket journal seq in future (currently at %llu)\n%s",
@@ -901,7 +912,7 @@ int bch2_trigger_alloc(struct btree_trans *trans,
 			guard(rcu)();
 			u8 *gen = bucket_gen(ca, new.k->p.offset);
 			if (unlikely(!gen))
-				goto invalid_bucket;
+				return inval_bucket_key(trans, new.s_c);
 			*gen = new_a->gen;
 		}
 
@@ -931,16 +942,12 @@ int bch2_trigger_alloc(struct btree_trans *trans,
 		guard(rcu)();
 		struct bucket *g = gc_bucket(ca, new.k->p.offset);
 		if (unlikely(!g))
-			goto invalid_bucket;
+			return inval_bucket_key(trans, new.s_c);
 		g->gen_valid	= 1;
 		g->gen		= new_a->gen;
 	}
 fsck_err:
 	return ret;
-invalid_bucket:
-	bch2_fs_inconsistent(c, "reference to invalid bucket\n%s",
-			     (bch2_bkey_val_to_text(&buf, c, new.s_c), buf.buf));
-	return bch_err_throw(c, trigger_alloc);
 }
 
 static int discard_in_flight_add(struct bch_dev *ca, u64 bucket, bool in_progress)
@@ -1278,13 +1285,12 @@ static int invalidate_one_bucket(struct btree_trans *trans,
 	struct bch_fs *c = trans->c;
 	CLASS(printbuf, buf)();
 	struct bpos bucket = u64_to_bucket(lru_k.k->p.offset);
-	int ret = 0;
 
 	if (*nr_to_invalidate <= 0)
 		return 1;
 
 	if (!bch2_dev_bucket_exists(c, bucket)) {
-		if (fsck_err(trans, lru_entry_to_invalid_bucket,
+		if (ret_fsck_err(trans, lru_entry_to_invalid_bucket,
 			     "lru key points to nonexistent device:bucket %llu:%llu",
 			     bucket.inode, bucket.offset))
 			return bch2_btree_bit_mod_buffered(trans, BTREE_ID_lru, lru_iter->pos, false);
@@ -1329,23 +1335,21 @@ static int invalidate_one_bucket(struct btree_trans *trans,
 		trace_and_count(c, bucket_invalidate, c, bucket.inode, bucket.offset, cached_sectors);
 		--*nr_to_invalidate;
 	}
-fsck_err:
-	return ret;
+
+	return 0;
 }
 
 static struct bkey_s_c next_lru_key(struct btree_trans *trans, struct btree_iter *iter,
 				    struct bch_dev *ca, bool *wrapped)
 {
-	struct bkey_s_c k;
-again:
-	k = bch2_btree_iter_peek_max(iter, lru_pos(ca->dev_idx, U64_MAX, LRU_TIME_MAX));
-	if (!k.k && !*wrapped) {
+	while (true) {
+		struct bkey_s_c k = bch2_btree_iter_peek_max(iter, lru_pos(ca->dev_idx, U64_MAX, LRU_TIME_MAX));
+		if (k.k || *wrapped)
+			return k;
+
 		bch2_btree_iter_set_pos(iter, lru_pos(ca->dev_idx, 0, 0));
 		*wrapped = true;
-		goto again;
 	}
-
-	return k;
 }
 
 static void __bch2_do_invalidates(struct bch_dev *ca)
