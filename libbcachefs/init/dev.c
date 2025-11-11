@@ -397,21 +397,56 @@ int bch2_dev_alloc(struct bch_fs *c, unsigned dev_idx)
 	return 0;
 }
 
-static int __bch2_dev_attach_bdev(struct bch_dev *ca, struct bch_sb_handle *sb,
-				  struct printbuf *err)
+static int read_file_str(const char *path, darray_char *ret)
+{
+	/*
+	 * TODO: unify this with read_file_str() in bcachefs-tools tools-util.c
+	 *
+	 * Unfortunately, we don't have openat() in kernel
+	 */
+#ifdef __KERNEL__
+	struct file *file = errptr_try(filp_open(path, O_RDONLY, 0));
+
+	loff_t pos = 0;
+	ssize_t r = kernel_read(file, ret->data, ret->size, &pos);
+	fput(file);
+#else
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return fd;
+
+	ssize_t r = read(fd, ret->data, ret->size);
+	close(fd);
+#endif
+
+	if (r > 0) {
+		ret->nr = r;
+		if (ret->data[r - 1]) {
+			/* null terminate */
+			if (ret->nr >= ret->size)
+				ret->nr = ret->size -1;
+			ret->data[ret->nr] = '\0';
+		}
+	}
+	return r < 0 ? r : 0;
+}
+
+static int __bch2_dev_attach_bdev(struct bch_fs *c, struct bch_dev *ca,
+				  struct bch_sb_handle *sb, struct printbuf *err)
 {
 	if (bch2_dev_is_online(ca)) {
-		prt_printf(err, "already have device online in slot %u\n",
-			   sb->sb->dev_idx);
+		prt_printf(err, "Cannot attach %s: already have device %s online in slot %u\n",
+			   sb->sb_name, ca->name, sb->sb->dev_idx);
 		return bch_err_throw(ca->fs, device_already_online);
 	}
 
 	if (get_capacity(sb->bdev->bd_disk) <
 	    ca->mi.bucket_size * ca->mi.nbuckets) {
-		prt_printf(err, "cannot online: device too small (capacity %llu filesystem size %llu nbuckets %llu)\n",
-			get_capacity(sb->bdev->bd_disk),
-			ca->mi.bucket_size * ca->mi.nbuckets,
-			ca->mi.nbuckets);
+		prt_printf(err, "Cannot online %s: device too small (capacity %llu filesystem size %llu nbuckets %llu)\n",
+			   sb->sb_name,
+			   get_capacity(sb->bdev->bd_disk),
+			   ca->mi.bucket_size * ca->mi.nbuckets,
+			   ca->mi.nbuckets);
 		return bch_err_throw(ca->fs, device_size_too_small);
 	}
 
@@ -423,6 +458,26 @@ static int __bch2_dev_attach_bdev(struct bch_dev *ca, struct bch_sb_handle *sb,
 	CLASS(printbuf, name)();
 	prt_bdevname(&name, sb->bdev);
 	strscpy(ca->name, name.buf, sizeof(ca->name));
+
+	CLASS(darray_char, model)();
+	darray_make_room(&model, 128);
+
+	CLASS(printbuf, model_path)();
+	prt_printf(&model_path, "/sys/block/%s/device/model", name.buf);
+
+	read_file_str(model_path.buf, &model);
+
+	if (model.nr && model.data[model.nr - 1] == '\n')
+		model.data[--model.nr] = '\0';
+
+	scoped_guard(mutex, &c->sb_lock) {
+		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
+
+		strtomem_pad(m->device_name, name.buf, '\0');
+
+		if (model.nr)
+			strtomem_pad(m->device_model, model.data, '\0');
+	}
 
 	/* Commit: */
 	ca->disk_sb = *sb;
@@ -459,7 +514,7 @@ int bch2_dev_attach_bdev(struct bch_fs *c, struct bch_sb_handle *sb, struct prin
 
 	struct bch_dev *ca = bch2_dev_locked(c, sb->sb->dev_idx);
 
-	try(__bch2_dev_attach_bdev(ca, sb, err));
+	try(__bch2_dev_attach_bdev(c, ca, sb, err));
 
 	set_bit(ca->dev_idx, c->online_devs.d);
 
@@ -691,7 +746,7 @@ err:
 int bch2_dev_add(struct bch_fs *c, const char *path, struct printbuf *err)
 {
 	struct bch_opts opts = bch2_opts_empty();
-	struct bch_sb_handle sb = {};
+	struct bch_sb_handle sb __cleanup(bch2_free_super) = {};
 	struct bch_dev *ca = NULL;
 	CLASS(printbuf, label)();
 	int ret = 0;
@@ -736,7 +791,7 @@ int bch2_dev_add(struct bch_fs *c, const char *path, struct printbuf *err)
 		goto err;
 	}
 
-	ret = __bch2_dev_attach_bdev(ca, &sb, err);
+	ret = __bch2_dev_attach_bdev(c, ca, &sb, err);
 	if (ret)
 		goto err;
 
@@ -830,7 +885,6 @@ out:
 err:
 	if (ca)
 		bch2_dev_free(ca);
-	bch2_free_super(&sb);
 	goto out;
 err_late:
 	ca = NULL;
@@ -841,9 +895,7 @@ err_late:
 int bch2_dev_online(struct bch_fs *c, const char *path, struct printbuf *err)
 {
 	struct bch_opts opts = bch2_opts_empty();
-	struct bch_sb_handle sb = { NULL };
-	struct bch_dev *ca;
-	unsigned dev_idx;
+	struct bch_sb_handle sb __cleanup(bch2_free_super) = {};
 	int ret;
 
 	guard(rwsem_write)(&c->state_lock);
@@ -854,24 +906,22 @@ int bch2_dev_online(struct bch_fs *c, const char *path, struct printbuf *err)
 		return ret;
 	}
 
-	dev_idx = sb.sb->dev_idx;
+	unsigned dev_idx = sb.sb->dev_idx;
 
 	ret = bch2_dev_in_fs(&c->disk_sb, &sb, &c->opts);
 	if (ret) {
 		prt_printf(err, "device not a member of fs: %s\n", bch2_err_str(ret));
-		goto err;
+		return ret;
 	}
 
-	ret = bch2_dev_attach_bdev(c, &sb, err);
-	if (ret)
-		goto err;
+	try(bch2_dev_attach_bdev(c, &sb, err));
 
-	ca = bch2_dev_locked(c, dev_idx);
+	struct bch_dev *ca = bch2_dev_locked(c, dev_idx);
 
 	ret = bch2_trans_mark_dev_sb(c, ca, BTREE_TRIGGER_transactional);
 	if (ret) {
 		prt_printf(err, "bch2_trans_mark_dev_sb() error: %s\n", bch2_err_str(ret));
-		goto err;
+		return ret;
 	}
 
 	if (ca->mi.state == BCH_MEMBER_STATE_rw)
@@ -881,7 +931,7 @@ int bch2_dev_online(struct bch_fs *c, const char *path, struct printbuf *err)
 		ret = bch2_dev_freespace_init(c, ca, 0, ca->mi.nbuckets);
 		if (ret) {
 			prt_printf(err, "bch2_dev_freespace_init() error: %s\n", bch2_err_str(ret));
-			goto err;
+			return ret;
 		}
 	}
 
@@ -889,7 +939,7 @@ int bch2_dev_online(struct bch_fs *c, const char *path, struct printbuf *err)
 		ret = bch2_dev_journal_alloc(ca, false);
 		if (ret) {
 			prt_printf(err, "bch2_dev_journal_alloc() error: %s\n", bch2_err_str(ret));
-			goto err;
+			return ret;
 		}
 	}
 
@@ -900,9 +950,6 @@ int bch2_dev_online(struct bch_fs *c, const char *path, struct printbuf *err)
 	}
 
 	return 0;
-err:
-	bch2_free_super(&sb);
-	return ret;
 }
 
 int bch2_dev_offline(struct bch_fs *c, struct bch_dev *ca, int flags, struct printbuf *err)

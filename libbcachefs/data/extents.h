@@ -481,6 +481,13 @@ static inline bool bkey_extent_is_direct_data(const struct bkey *k)
 	}
 }
 
+static inline bool bkey_is_user_data(const struct bkey *k)
+{
+	return  k->type == KEY_TYPE_extent ||
+		k->type == KEY_TYPE_inline_data ||
+		k->type == KEY_TYPE_reservation;
+}
+
 static inline bool bkey_extent_is_inline_data(const struct bkey *k)
 {
 	return  k->type == KEY_TYPE_inline_data ||
@@ -625,6 +632,7 @@ void bch2_extent_ptr_decoded_append(const struct bch_fs *, struct bkey_i *,
 void bch2_bkey_drop_ptr_noerror(const struct bch_fs *, struct bkey_s, struct bch_extent_ptr *);
 void bch2_bkey_drop_ptr(const struct bch_fs *, struct bkey_s, struct bch_extent_ptr *);
 
+void bch2_bkey_drop_device_noerror(const struct bch_fs *, struct bkey_s, unsigned);
 void bch2_bkey_drop_device(const struct bch_fs *, struct bkey_s, unsigned);
 void bch2_bkey_drop_ec(const struct bch_fs *, struct bkey_i *k, unsigned);
 

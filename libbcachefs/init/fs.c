@@ -122,6 +122,7 @@ static bool should_print_loglevel(struct bch_fs *c, const char *fmt)
 
 void bch2_print_str(struct bch_fs *c, const char *prefix, const char *str)
 {
+	BUG_ON(!str);
 	if (!should_print_loglevel(c, prefix))
 		return;
 
@@ -708,52 +709,37 @@ void bch2_fs_stop(struct bch_fs *c)
 
 static int bch2_fs_online(struct bch_fs *c)
 {
-	int ret = 0;
-
 	lockdep_assert_held(&bch2_fs_list_lock);
 
 	if (c->sb.multi_device &&
-	    __bch2_uuid_to_fs(c->sb.uuid)) {
-		bch_err(c, "filesystem UUID already open");
+	    __bch2_uuid_to_fs(c->sb.uuid))
 		return bch_err_throw(c, filesystem_uuid_already_open);
-	}
 
-	ret = bch2_fs_chardev_init(c);
-	if (ret) {
-		bch_err(c, "error creating character device");
-		return ret;
-	}
+	try(bch2_fs_chardev_init(c));
 
 	bch2_fs_debug_init(c);
 
-	ret = (c->sb.multi_device
-	       ? kobject_add(&c->kobj, NULL, "%pU", c->sb.user_uuid.b)
-	       : kobject_add(&c->kobj, NULL, "%s", c->name)) ?:
+	if ((c->sb.multi_device
+	     ? kobject_add(&c->kobj, NULL, "%pU", c->sb.user_uuid.b)
+	     : kobject_add(&c->kobj, NULL, "%s", c->name)) ?:
 	    kobject_add(&c->internal, &c->kobj, "internal") ?:
 	    kobject_add(&c->opts_dir, &c->kobj, "options") ?:
 #ifndef CONFIG_BCACHEFS_NO_LATENCY_ACCT
 	    kobject_add(&c->time_stats, &c->kobj, "time_stats") ?:
 #endif
 	    kobject_add(&c->counters_kobj, &c->kobj, "counters") ?:
-	    bch2_opts_create_sysfs_files(&c->opts_dir, OPT_FS);
-	if (ret) {
-		bch_err(c, "error creating sysfs objects");
-		return ret;
-	}
+	    bch2_opts_create_sysfs_files(&c->opts_dir, OPT_FS))
+		return bch_err_throw(c, sysfs_init_error);
 
 	guard(rwsem_write)(&c->state_lock);
 
-	for_each_member_device(c, ca) {
-		ret = bch2_dev_sysfs_online(c, ca);
-		if (ret) {
-			bch_err(c, "error creating sysfs objects");
-			return ret;
-		}
-	}
+	for_each_member_device(c, ca)
+		if (bch2_dev_sysfs_online(c, ca))
+			return bch_err_throw(c, sysfs_init_error);
 
 	BUG_ON(!list_empty(&c->list));
 	list_add(&c->list, &bch2_fs_list);
-	return ret;
+	return 0;
 }
 
 int bch2_fs_init_rw(struct bch_fs *c)
@@ -788,7 +774,7 @@ int bch2_fs_init_rw(struct bch_fs *c)
 	return 0;
 }
 
-static bool check_version_upgrade(struct bch_fs *c)
+static bool check_version_upgrade(struct bch_fs *c, struct printbuf *out)
 {
 	unsigned latest_version	= bcachefs_metadata_version_current;
 	unsigned latest_compatible = min(latest_version,
@@ -818,26 +804,24 @@ static bool check_version_upgrade(struct bch_fs *c)
 	}
 
 	if (new_version > old_version) {
-		CLASS(printbuf, buf)();
-
 		if (old_version < bcachefs_metadata_required_upgrade_below)
-			prt_str(&buf, "Version upgrade required:\n");
+			prt_str_indented(out, "Version upgrade required:\n");
 
 		if (old_version != c->sb.version) {
-			prt_str(&buf, "Version upgrade from ");
-			bch2_version_to_text(&buf, c->sb.version_upgrade_complete);
-			prt_str(&buf, " to ");
-			bch2_version_to_text(&buf, c->sb.version);
-			prt_str(&buf, " incomplete\n");
+			prt_str_indented(out, "Version upgrade from ");
+			bch2_version_to_text(out, c->sb.version_upgrade_complete);
+			prt_str_indented(out, " to ");
+			bch2_version_to_text(out, c->sb.version);
+			prt_str_indented(out, " incomplete\n");
 		}
 
-		prt_printf(&buf, "Doing %s version upgrade from ",
+		prt_printf(out, "Doing %s version upgrade from ",
 			   BCH_VERSION_MAJOR(old_version) != BCH_VERSION_MAJOR(new_version)
 			   ? "incompatible" : "compatible");
-		bch2_version_to_text(&buf, old_version);
-		prt_str(&buf, " to ");
-		bch2_version_to_text(&buf, new_version);
-		prt_newline(&buf);
+		bch2_version_to_text(out, old_version);
+		prt_str_indented(out, " to ");
+		bch2_version_to_text(out, new_version);
+		prt_newline(out);
 
 		struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
 		__le64 passes = ext->recovery_passes_required[0];
@@ -845,26 +829,23 @@ static bool check_version_upgrade(struct bch_fs *c)
 		passes = ext->recovery_passes_required[0] & ~passes;
 
 		if (passes) {
-			prt_str(&buf, "  running recovery passes: ");
-			prt_bitflags(&buf, bch2_recovery_passes,
+			prt_str_indented(out, "Upgrade requires recovery passes: ");
+			prt_bitflags(out, bch2_recovery_passes,
 				     bch2_recovery_passes_from_stable(le64_to_cpu(passes)));
+			prt_newline(out);
 		}
 
-		bch_notice(c, "%s", buf.buf);
 		ret = true;
 	}
 
 	if (new_version > c->sb.version_incompat_allowed &&
 	    c->opts.version_upgrade == BCH_VERSION_UPGRADE_incompatible) {
-		CLASS(printbuf, buf)();
+		prt_str_indented(out, "Now allowing incompatible features up to ");
+		bch2_version_to_text(out, new_version);
+		prt_str_indented(out, ", previously allowed up to ");
+		bch2_version_to_text(out, c->sb.version_incompat_allowed);
+		prt_newline(out);
 
-		prt_str(&buf, "Now allowing incompatible features up to ");
-		bch2_version_to_text(&buf, new_version);
-		prt_str(&buf, ", previously allowed up to ");
-		bch2_version_to_text(&buf, c->sb.version_incompat_allowed);
-		prt_newline(&buf);
-
-		bch_notice(c, "%s", buf.buf);
 		ret = true;
 	}
 
@@ -876,7 +857,7 @@ static bool check_version_upgrade(struct bch_fs *c)
 }
 
 noinline_for_stack
-static int bch2_fs_opt_version_init(struct bch_fs *c)
+static int bch2_fs_opt_version_init(struct bch_fs *c, struct printbuf *out)
 {
 	if (c->opts.norecovery) {
 		c->opts.recovery_pass_last = c->opts.recovery_pass_last
@@ -894,11 +875,9 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 	bool may_upgrade_downgrade = !(c->sb.features & BIT_ULL(BCH_FEATURE_small_image)) ||
 		bch2_fs_will_resize_on_mount(c);
 
-	CLASS(printbuf, p)();
-	bch2_log_msg_start(c, &p);
-
-	prt_str(&p, "starting version ");
-	bch2_version_to_text(&p, c->sb.version);
+	prt_str_indented(out, "starting version ");
+	bch2_version_to_text(out, c->sb.version);
+	prt_newline(out);
 
 	bool first = true;
 	for (enum bch_opt_id i = 0; i < bch2_opts_nr; i++) {
@@ -911,41 +890,45 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 		if (v == bch2_opt_get_by_id(&bch2_opts_default, i))
 			continue;
 
-		prt_str(&p, first ? " opts=" : ",");
+		prt_str_indented(out, first ? "with options: " : ",");
 		first = false;
-		bch2_opt_to_text(&p, c, c->disk_sb.sb, opt, v, OPT_SHOW_MOUNT_STYLE);
+		bch2_opt_to_text(out, c, c->disk_sb.sb, opt, v, OPT_SHOW_MOUNT_STYLE);
 	}
 
+	if (!first)
+		prt_newline(out);
+
 	if (c->sb.version_incompat_allowed != c->sb.version) {
-		prt_printf(&p, "\nallowing incompatible features up to ");
-		bch2_version_to_text(&p, c->sb.version_incompat_allowed);
+		prt_printf(out, "allowing incompatible features up to ");
+		bch2_version_to_text(out, c->sb.version_incompat_allowed);
+		prt_newline(out);
 	}
 
 	if (c->opts.verbose) {
-		prt_printf(&p, "\nfeatures: ");
-		prt_bitflags(&p, bch2_sb_features, c->sb.features);
+		prt_printf(out, "features: ");
+		prt_bitflags(out, bch2_sb_features, c->sb.features);
+		prt_newline(out);
 	}
 
 	if (c->sb.multi_device) {
-		prt_printf(&p, "\nwith devices");
+		first = true;
+		prt_printf(out, "with devices: ");
 		for_each_online_member(c, ca, BCH_DEV_READ_REF_bch2_online_devs) {
-			prt_char(&p, ' ');
-			prt_str(&p, ca->name);
+			if (!first)
+				prt_char(out, ',');
+			first = false;
+			prt_str(out, ca->name);
 		}
+		prt_newline(out);
 	}
 
 	/* cf_encoding log message should be here, but it breaks xfstests - sigh */
 
 	if (c->opts.journal_rewind)
-		prt_printf(&p, "\nrewinding journal, fsck required");
+		prt_printf(out, "rewinding journal, fsck required\n");
 
 	scoped_guard(mutex, &c->sb_lock) {
-		struct bch_sb_field_ext *ext = bch2_sb_field_get_minsize(&c->disk_sb, ext,
-				sizeof(struct bch_sb_field_ext) / sizeof(u64));
-		if (!ext)
-			return bch_err_throw(c, ENOSPC_sb);
-
-		try(bch2_sb_members_v2_init(c));
+		struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
 
 		__le64 now = cpu_to_le64(ktime_get_real_seconds());
 		scoped_guard(rcu)
@@ -958,19 +941,21 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 
 		u64 sb_passes = bch2_recovery_passes_from_stable(le64_to_cpu(ext->recovery_passes_required[0]));
 		if (sb_passes) {
-			prt_str(&p, "\nsuperblock requires following recovery passes to be run:\n  ");
-			prt_bitflags(&p, bch2_recovery_passes, sb_passes);
+			prt_str_indented(out, "superblock requires following recovery passes to be run: ");
+			prt_bitflags(out, bch2_recovery_passes, sb_passes);
+			prt_newline(out);
 		}
 
 		u64 btrees_lost_data = le64_to_cpu(ext->btrees_lost_data);
 		if (btrees_lost_data) {
-			prt_str(&p, "\nsuperblock indicates damage to following btrees:\n  ");
-			prt_bitflags(&p, __bch2_btree_ids, btrees_lost_data);
+			prt_str_indented(out, "superblock indicates damage to following btrees:  ");
+			prt_bitflags(out, __bch2_btree_ids, btrees_lost_data);
+			prt_newline(out);
 		}
 
 		if (may_upgrade_downgrade) {
 			if (bch2_check_version_downgrade(c)) {
-				prt_str(&p, "\nVersion downgrade required:");
+				prt_str_indented(out, "Version downgrade required");
 
 				__le64 passes = ext->recovery_passes_required[0];
 				bch2_sb_set_downgrade(c,
@@ -978,13 +963,14 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 						      BCH_VERSION_MINOR(c->sb.version));
 				passes = ext->recovery_passes_required[0] & ~passes;
 				if (passes) {
-					prt_str(&p, "\nrunning recovery passes: ");
-					prt_bitflags(&p, bch2_recovery_passes,
+					prt_str_indented(out, ", running recovery passes: ");
+					prt_bitflags(out, bch2_recovery_passes,
 						     bch2_recovery_passes_from_stable(le64_to_cpu(passes)));
 				}
+				prt_newline(out);
 			}
 
-			check_version_upgrade(c);
+			check_version_upgrade(c, out);
 		}
 
 		c->opts.recovery_passes |= bch2_recovery_passes_from_stable(le64_to_cpu(ext->recovery_passes_required[0]));
@@ -1001,8 +987,6 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 		set_bit(BCH_FS_in_fsck, &c->flags);
 	set_bit(BCH_FS_in_recovery, &c->flags);
 
-	bch2_print_str(c, KERN_INFO, p.buf);
-
 	/* this really should be part of our one multi line mount message, but -
 	 * xfstests... */
 	if (c->cf_encoding)
@@ -1013,13 +997,13 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 
 	if (BCH_SB_INITIALIZED(c->disk_sb.sb)) {
 		if (!(c->sb.features & (1ULL << BCH_FEATURE_new_extent_overwrite))) {
-			bch_err(c, "feature new_extent_overwrite not set, filesystem no longer supported");
+			prt_str_indented(out, "feature new_extent_overwrite not set, filesystem no longer supported\n");
 			return -EINVAL;
 		}
 
 		if (!c->sb.clean &&
 		    !(c->sb.features & (1ULL << BCH_FEATURE_extents_above_btree_updates))) {
-			bch_err(c, "filesystem needs recovery from older version; run fsck from older bcachefs-tools to fix");
+			prt_str_indented(out, "filesystem needs recovery from older version; run fsck from older bcachefs-tools to fix\n");
 			return -EINVAL;
 		}
 	}
@@ -1028,7 +1012,8 @@ static int bch2_fs_opt_version_init(struct bch_fs *c)
 }
 
 static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
-			struct bch_opts *opts, bch_sb_handles *sbs)
+			struct bch_opts *opts, bch_sb_handles *sbs,
+			struct printbuf *out)
 {
 	unsigned i, iter_size;
 	CLASS(printbuf, name)();
@@ -1129,7 +1114,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 #ifdef __KERNEL__
 	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) &&
 	    c->opts.block_size > PAGE_SIZE) {
-		bch_err(c, "cannot mount bs > ps filesystem without CONFIG_TRANSPARENT_HUGEPAGE");
+		prt_printf(out, "cannot mount bs > ps filesystem without CONFIG_TRANSPARENT_HUGEPAGE\n");
 		return -EINVAL;
 	}
 #endif
@@ -1143,7 +1128,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	c->btree_foreground_merge_threshold = BTREE_FOREGROUND_MERGE_THRESHOLD(c);
 
 	if (bch2_fs_init_fault("fs_alloc")) {
-		bch_err(c, "fs_alloc fault injected");
+		prt_printf(out, "fs_alloc fault injected\n");
 		return -EFAULT;
 	}
 
@@ -1201,16 +1186,16 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 		/* Default encoding until we can potentially have more as an option. */
 		c->cf_encoding = utf8_load(BCH_FS_DEFAULT_UTF8_ENCODING);
 		if (IS_ERR(c->cf_encoding)) {
-			printk(KERN_ERR "Cannot load UTF-8 encoding for filesystem. Version: %u.%u.%u",
-			       unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
-			       unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
-			       unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
+			prt_printf(out, "Cannot load UTF-8 encoding for filesystem. Version: %u.%u.%u\n",
+				   unicode_major(BCH_FS_DEFAULT_UTF8_ENCODING),
+				   unicode_minor(BCH_FS_DEFAULT_UTF8_ENCODING),
+				   unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
 			return -EINVAL;
 		}
 	}
 #else
 	if (c->sb.features & BIT_ULL(BCH_FEATURE_casefolding)) {
-		printk(KERN_ERR "Cannot mount a filesystem with casefolding on a kernel without CONFIG_UNICODE\n");
+		prt_printf(out, "Cannot mount a filesystem with casefolding on a kernel without CONFIG_UNICODE\n");
 		return -EINVAL;
 	}
 #endif
@@ -1228,17 +1213,19 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 			&c->clock_journal_res,
 			(sizeof(struct jset_entry_clock) / sizeof(u64)) * 2);
 
-	scoped_guard(rwsem_write, &c->state_lock)
-		darray_for_each(*sbs, sb) {
-			CLASS(printbuf, err)();
-			int ret = bch2_dev_attach_bdev(c, sb, &err);
-			if (ret) {
-				bch_err(bch2_dev_locked(c, sb->sb->dev_idx), "%s", err.buf);
-				return ret;
-			}
-		}
+	scoped_guard(mutex, &c->sb_lock) {
+		if (!bch2_sb_field_get_minsize(&c->disk_sb, ext,
+				sizeof(struct bch_sb_field_ext) / sizeof(u64)))
+			return bch_err_throw(c, ENOSPC_sb);
 
-	try(bch2_fs_opt_version_init(c));
+		try(bch2_sb_members_v2_init(c));
+	}
+
+	scoped_guard(rwsem_write, &c->state_lock)
+		darray_for_each(*sbs, sb)
+			try(bch2_dev_attach_bdev(c, sb, out));
+
+	try(bch2_fs_opt_version_init(c, out));
 
 	/*
 	 * just make sure this is always allocated if we might need it - mount
@@ -1255,13 +1242,14 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 }
 
 static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
-				    bch_sb_handles *sbs)
+				    bch_sb_handles *sbs,
+				    struct printbuf *out)
 {
-	struct bch_fs *c = kvmalloc(sizeof(struct bch_fs), GFP_KERNEL|__GFP_ZERO);
+	struct bch_fs *c = kvzalloc(sizeof(struct bch_fs), GFP_KERNEL);
 	if (!c)
 		return ERR_PTR(-BCH_ERR_ENOMEM_fs_alloc);
 
-	int ret = bch2_fs_init(c, sb, opts, sbs);
+	int ret = bch2_fs_init(c, sb, opts, sbs, out);
 	if (ret) {
 		bch2_fs_free(c);
 		return ERR_PTR(ret);
@@ -1270,9 +1258,8 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 	return c;
 }
 
-static bool bch2_fs_may_start(struct bch_fs *c)
+static bool bch2_fs_may_start(struct bch_fs *c, struct printbuf *err)
 {
-	struct bch_dev *ca;
 	unsigned flags = 0;
 
 	switch (c->opts.degraded) {
@@ -1282,65 +1269,56 @@ static bool bch2_fs_may_start(struct bch_fs *c)
 	case BCH_DEGRADED_yes:
 		flags |= BCH_FORCE_IF_DEGRADED;
 		break;
-	default: {
-		guard(mutex)(&c->sb_lock);
-		for (unsigned i = 0; i < c->disk_sb.sb->nr_devices; i++) {
-			if (!bch2_member_exists(c->disk_sb.sb, i))
-				continue;
-
-			ca = bch2_dev_locked(c, i);
-
+	default:
+		for_each_member_device(c, ca)
 			if (!bch2_dev_is_online(ca) &&
-			    (ca->mi.state == BCH_MEMBER_STATE_rw ||
-			     ca->mi.state == BCH_MEMBER_STATE_ro))
-				return false;
-		}
-		break;
-	}
+			    (ca->mi.state != BCH_MEMBER_STATE_failed ||
+			     bch2_dev_has_data(c, ca))) {
+				prt_printf(err, "Cannot mount without device %u\n", ca->dev_idx);
+				guard(printbuf_indent)(err);
+				bch2_member_to_text_short(err, c, ca);
+				return bch_err_throw(c, insufficient_devices_to_start);
+			}
 	}
 
-	CLASS(printbuf, err)();
-	bool ret = bch2_have_enough_devs(c, c->online_devs, flags, &err, !c->opts.read_only);
-	if (!ret)
-		bch2_print_str(c, KERN_ERR, err.buf);
-	return ret;
+	if (!bch2_have_enough_devs(c, c->online_devs, flags, err, !c->opts.read_only)) {
+		prt_printf(err, "Missing devices\n");
+		for_each_member_device(c, ca)
+			if (!bch2_dev_is_online(ca) && bch2_dev_has_data(c, ca)) {
+				prt_printf(err, "Device %u\n", ca->dev_idx);
+				guard(printbuf_indent)(err);
+				bch2_member_to_text_short(err, c, ca);
+			}
+
+		return bch_err_throw(c, insufficient_devices_to_start);
+	}
+
+	return 0;
 }
 
-int bch2_fs_start(struct bch_fs *c)
+static int __bch2_fs_start(struct bch_fs *c, struct printbuf *err)
 {
-	int ret = 0;
-
 	BUG_ON(test_bit(BCH_FS_started, &c->flags));
 
-	if (!bch2_fs_may_start(c))
-		return bch_err_throw(c, insufficient_devices_to_start);
+	try(bch2_fs_may_start(c, err));
 
 	scoped_guard(rwsem_write, &c->state_lock) {
 		scoped_guard(rcu)
-			for_each_online_member_rcu(c, ca) {
+			for_each_online_member_rcu(c, ca)
 				if (ca->mi.state == BCH_MEMBER_STATE_rw)
 					bch2_dev_allocator_add(c, ca);
-			}
 
 		bch2_recalc_capacity(c);
 	}
 
-	ret = BCH_SB_INITIALIZED(c->disk_sb.sb)
-		? bch2_fs_recovery(c)
-		: bch2_fs_initialize(c);
-	c->recovery_task = NULL;
+	try(BCH_SB_INITIALIZED(c->disk_sb.sb)
+	    ? bch2_fs_recovery(c)
+	    : bch2_fs_initialize(c));
 
-	if (ret)
-		goto err;
+	try(bch2_opts_hooks_pre_set(c));
 
-	ret = bch2_opts_hooks_pre_set(c);
-	if (ret)
-		goto err;
-
-	if (bch2_fs_init_fault("fs_start")) {
-		ret = bch_err_throw(c, injected_fs_start);
-		goto err;
-	}
+	if (bch2_fs_init_fault("fs_start"))
+		return bch_err_throw(c, injected_fs_start);
 
 	set_bit(BCH_FS_started, &c->flags);
 	wake_up(&c->ro_ref_wait);
@@ -1349,13 +1327,24 @@ int bch2_fs_start(struct bch_fs *c)
 		if (c->opts.read_only)
 			bch2_fs_read_only(c);
 		else if (!test_bit(BCH_FS_rw, &c->flags))
-			ret = bch2_fs_read_write(c);
+			try(bch2_fs_read_write(c));
 	}
-err:
+
+	return 0;
+}
+
+int bch2_fs_start(struct bch_fs *c)
+{
+	CLASS(printbuf, err)();
+	bch2_log_msg_start(c, &err);
+
+	int ret = __bch2_fs_start(c, &err);
+	c->recovery_task = NULL;
+
 	if (ret)
-		bch_err_msg(c, ret, "starting filesystem");
-	else
-		bch_verbose(c, "done starting filesystem");
+		prt_printf(&err, "error starting filesystem: %s", bch2_err_str(ret));
+	bch2_print_str(c, KERN_ERR, err.buf);
+
 	return ret;
 }
 
@@ -1422,8 +1411,9 @@ static inline int sb_cmp(struct bch_sb *l, struct bch_sb *r)
 		cmp_int(le64_to_cpu(l->write_time), le64_to_cpu(r->write_time));
 }
 
-struct bch_fs *bch2_fs_open(darray_const_str *devices,
-			    struct bch_opts *opts)
+static struct bch_fs *__bch2_fs_open(darray_const_str *devices,
+				     struct bch_opts *opts,
+				     struct printbuf *out)
 {
 	bch_sb_handles sbs = {};
 	struct bch_fs *c = NULL;
@@ -1461,6 +1451,8 @@ struct bch_fs *bch2_fs_open(darray_const_str *devices,
 
 		if (ret == -BCH_ERR_device_has_been_removed ||
 		    ret == -BCH_ERR_device_splitbrain) {
+			prt_printf(out, "Not using device %s: %s\n",
+				   sb->sb_name, bch2_err_str(ret));
 			bch2_free_super(sb);
 			darray_remove_item(&sbs, sb);
 			best -= best > sb;
@@ -1468,17 +1460,21 @@ struct bch_fs *bch2_fs_open(darray_const_str *devices,
 			continue;
 		}
 
-		if (ret)
-			goto err_print;
+		if (ret) {
+			prt_printf(out, "Cannot mount with device %s: %s\n",
+				   sb->sb_name, bch2_err_str(ret));
+			goto err;
+		}
 	}
 
-	c = bch2_fs_alloc(best->sb, opts, &sbs);
+	c = bch2_fs_alloc(best->sb, opts, &sbs, out);
 	ret = PTR_ERR_OR_ZERO(c);
 	if (ret)
 		goto err;
 
 	if (!c->opts.nostart) {
-		ret = bch2_fs_start(c);
+		ret = __bch2_fs_start(c, out);
+		c->recovery_task = NULL;
 		if (ret)
 			goto err;
 	}
@@ -1488,14 +1484,33 @@ out:
 	darray_exit(&sbs);
 	module_put(THIS_MODULE);
 	return c;
-err_print:
-	pr_err("bch_fs_open err opening %s: %s",
-	       devices->data[0], bch2_err_str(ret));
 err:
 	if (!IS_ERR_OR_NULL(c))
 		bch2_fs_stop(c);
 	c = ERR_PTR(ret);
 	goto out;
+}
+
+struct bch_fs *bch2_fs_open(darray_const_str *devices,
+			    struct bch_opts *opts)
+{
+	CLASS(printbuf, msg)();
+	printbuf_indent_add_nextline(&msg, 2);
+
+	struct bch_fs *c = __bch2_fs_open(devices, opts, &msg);
+	int ret = PTR_ERR_OR_ZERO(c);
+
+	if (ret) {
+		prt_printf(&msg, "error starting filesystem: %s", bch2_err_str(ret));
+		bch2_print_string_as_lines(KERN_ERR, msg.buf);
+	} else {
+		CLASS(printbuf, msg_with_prefix)();
+		bch2_log_msg_start(c, &msg_with_prefix);
+		prt_str(&msg_with_prefix, msg.buf);
+		bch2_print_str(c, KERN_INFO, msg_with_prefix.buf);
+	}
+
+	return c;
 }
 
 /* Global interfaces/init */
