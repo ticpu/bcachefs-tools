@@ -667,6 +667,7 @@ struct bch_dev {
 	x(btree_running)		\
 	x(accounting_replay_done)	\
 	x(may_go_rw)			\
+	x(may_upgrade_downgrade)	\
 	x(rw)				\
 	x(rw_init_done)			\
 	x(was_rw)			\
@@ -811,8 +812,6 @@ struct bch_fs {
 	struct bch_accounting_mem accounting;
 
 	struct bch_replicas_cpu replicas;
-	struct bch_replicas_cpu replicas_gc;
-	struct mutex		replicas_gc_lock;
 
 	struct journal_entry_res btree_root_journal_res;
 	struct journal_entry_res clock_journal_res;

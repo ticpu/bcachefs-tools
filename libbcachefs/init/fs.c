@@ -122,7 +122,10 @@ static bool should_print_loglevel(struct bch_fs *c, const char *fmt)
 
 void bch2_print_str(struct bch_fs *c, const char *prefix, const char *str)
 {
-	BUG_ON(!str);
+	/* Nothing to print? Nothing to do: */
+	if (!str)
+		return;
+
 	if (!should_print_loglevel(c, prefix))
 		return;
 
@@ -371,14 +374,13 @@ void bch2_fs_read_only(struct bch_fs *c)
 	    test_bit(BCH_FS_clean_shutdown, &c->flags) &&
 	    c->recovery.pass_done >= BCH_RECOVERY_PASS_journal_replay) {
 		BUG_ON(c->journal.last_empty_seq != journal_cur_seq(&c->journal));
+		BUG_ON(!c->sb.clean);
 		BUG_ON(atomic_long_read(&c->btree_cache.nr_dirty));
 		BUG_ON(atomic_long_read(&c->btree_key_cache.nr_dirty));
 		BUG_ON(c->btree_write_buffer.inc.keys.nr);
 		BUG_ON(c->btree_write_buffer.flushing.keys.nr);
+		bch2_verify_replicas_refs_clean(c);
 		bch2_verify_accounting_clean(c);
-
-		bch_verbose(c, "marking filesystem clean");
-		bch2_fs_mark_clean(c);
 	} else {
 		/* Make sure error counts/counters are persisted */
 		guard(mutex)(&c->sb_lock);
@@ -457,6 +459,8 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 	if (WARN_ON(c->sb.features & BIT_ULL(BCH_FEATURE_no_alloc_info)))
 		return bch_err_throw(c, erofs_no_alloc_info);
 
+	BUG_ON(!test_bit(BCH_FS_may_upgrade_downgrade, &c->flags));
+
 	if (test_bit(BCH_FS_initial_gc_unfixed, &c->flags)) {
 		bch_err(c, "cannot go rw, unfixed btree errors");
 		return bch_err_throw(c, erofs_unfixed_errors);
@@ -474,7 +478,6 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 
 	try(bch2_fs_init_rw(c));
 	try(bch2_sb_members_v2_init(c));
-	try(bch2_fs_mark_dirty(c));
 
 	clear_bit(BCH_FS_clean_shutdown, &c->flags);
 
@@ -872,8 +875,9 @@ static int bch2_fs_opt_version_init(struct bch_fs *c, struct printbuf *out)
 	if (c->opts.journal_rewind)
 		c->opts.fsck = true;
 
-	bool may_upgrade_downgrade = !(c->sb.features & BIT_ULL(BCH_FEATURE_small_image)) ||
-		bch2_fs_will_resize_on_mount(c);
+	if (!(c->sb.features & BIT_ULL(BCH_FEATURE_small_image)) ||
+	    bch2_fs_will_resize_on_mount(c))
+		set_bit(BCH_FS_may_upgrade_downgrade, &c->flags);
 
 	prt_str_indented(out, "starting version ");
 	bch2_version_to_text(out, c->sb.version);
@@ -953,7 +957,7 @@ static int bch2_fs_opt_version_init(struct bch_fs *c, struct printbuf *out)
 			prt_newline(out);
 		}
 
-		if (may_upgrade_downgrade) {
+		if (test_bit(BCH_FS_may_upgrade_downgrade, &c->flags)) {
 			if (bch2_check_version_downgrade(c)) {
 				prt_str_indented(out, "Version downgrade required");
 
@@ -1036,7 +1040,6 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 
 	init_rwsem(&c->state_lock);
 	mutex_init(&c->sb_lock);
-	mutex_init(&c->replicas_gc_lock);
 	mutex_init(&c->btree_root_lock);
 	INIT_WORK(&c->read_only_work, bch2_fs_read_only_work);
 
@@ -1269,7 +1272,8 @@ static bool bch2_fs_may_start(struct bch_fs *c, struct printbuf *err)
 	case BCH_DEGRADED_yes:
 		flags |= BCH_FORCE_IF_DEGRADED;
 		break;
-	default:
+	default: {
+		bool missing = false;
 		for_each_member_device(c, ca)
 			if (!bch2_dev_is_online(ca) &&
 			    (ca->mi.state != BCH_MEMBER_STATE_failed ||
@@ -1277,8 +1281,10 @@ static bool bch2_fs_may_start(struct bch_fs *c, struct printbuf *err)
 				prt_printf(err, "Cannot mount without device %u\n", ca->dev_idx);
 				guard(printbuf_indent)(err);
 				bch2_member_to_text_short(err, c, ca);
-				return bch_err_throw(c, insufficient_devices_to_start);
+				missing = true;
 			}
+		return missing ? bch_err_throw(c, insufficient_devices_to_start) : 0;
+	}
 	}
 
 	if (!bch2_have_enough_devs(c, c->online_devs, flags, err, !c->opts.read_only)) {
@@ -1311,6 +1317,12 @@ static int __bch2_fs_start(struct bch_fs *c, struct printbuf *err)
 		bch2_recalc_capacity(c);
 	}
 
+	/*
+	 * check mount options as early as possible; some can only be checked
+	 * after starting
+	 */
+	try(bch2_opts_hooks_pre_set(c));
+
 	try(BCH_SB_INITIALIZED(c->disk_sb.sb)
 	    ? bch2_fs_recovery(c)
 	    : bch2_fs_initialize(c));
@@ -1337,13 +1349,15 @@ int bch2_fs_start(struct bch_fs *c)
 {
 	CLASS(printbuf, err)();
 	bch2_log_msg_start(c, &err);
+	unsigned pos = err.pos;
 
 	int ret = __bch2_fs_start(c, &err);
 	c->recovery_task = NULL;
 
 	if (ret)
 		prt_printf(&err, "error starting filesystem: %s", bch2_err_str(ret));
-	bch2_print_str(c, KERN_ERR, err.buf);
+	if (err.pos != pos)
+		bch2_print_str(c, KERN_ERR, err.buf);
 
 	return ret;
 }

@@ -74,7 +74,8 @@ static int create_or_update_link(struct bch_fs *c,
 				 struct bch_inode_unpacked *dir,
 				 const char *name, subvol_inum inum, mode_t mode)
 {
-	struct bch_hash_info dir_hash = bch2_hash_info_init(c, dir);
+	struct bch_hash_info dir_hash;
+	try(bch2_hash_info_init(c, dir, &dir_hash));
 
 	struct qstr qstr = QSTR(name);
 	struct bch_inode_unpacked dir_u;
@@ -109,14 +110,16 @@ static struct bch_inode_unpacked create_or_update_file(struct bch_fs *c,
 			uid_t uid, gid_t gid,
 			mode_t mode, dev_t rdev)
 {
-	struct bch_hash_info dir_hash = bch2_hash_info_init(c, dir);
+	struct bch_hash_info dir_hash;
+	int ret = bch2_hash_info_init(c, dir, &dir_hash);
+	if (ret)
+		die("hash_info_init() error: %s", bch2_err_str(ret));
 
 	struct qstr qname = QSTR(name);
 	struct bch_inode_unpacked child_inode;
 	subvol_inum child_inum;
 
-	int ret = bch2_dirent_lookup(c, dir_inum, &dir_hash,
-				     &qname, &child_inum);
+	ret = bch2_dirent_lookup(c, dir_inum, &dir_hash, &qname, &child_inum);
 	if (!ret) {
 		/* Already exists, update */
 
@@ -191,8 +194,6 @@ static void copy_times(struct bch_fs *c, struct bch_inode_unpacked *dst,
 static void copy_xattrs(struct bch_fs *c, struct bch_inode_unpacked *dst,
 			char *src)
 {
-	struct bch_hash_info hash_info = bch2_hash_info_init(c, dst);
-
 	char attrs[XATTR_LIST_MAX];
 	ssize_t attrs_size = llistxattr(src, attrs, sizeof(attrs));
 	if (attrs_size < 0)
@@ -217,7 +218,7 @@ static void copy_xattrs(struct bch_fs *c, struct bch_inode_unpacked *dst,
 		int ret = bch2_trans_commit_do(c, NULL, NULL, 0,
 				bch2_xattr_set(trans,
 					       (subvol_inum) { 1, dst->bi_inum },
-					       dst, &hash_info, attr,
+					       dst, attr,
 					       val, val_size, h->flags, 0));
 		if (ret < 0)
 			die("error creating xattr: %s", bch2_err_str(ret));
@@ -630,7 +631,8 @@ static int simple_readdir(struct bch_fs *c,
 {
 	darray_init(dirents);
 
-	struct bch_hash_info hash_info = bch2_hash_info_init(c, dir);
+	struct bch_hash_info hash_info;
+	try(bch2_hash_info_init(c, dir, &hash_info));
 	struct readdir_out dst_dirents = { .ctx.actor = readdir_actor, .dirents = dirents };
 
 	int ret = bch2_readdir(c, dir_inum, &hash_info, &dst_dirents.ctx);
