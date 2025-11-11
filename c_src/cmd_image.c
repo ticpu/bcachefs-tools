@@ -379,8 +379,9 @@ static int finish_image(struct bch_fs *c,
 	 * sb->nr_devices must be 1 so that it can be mounted without UUID
 	 * conflicts
 	 */
+	struct bch_sb_field_members_v2 *mi = bch2_sb_field_get(c->disk_sb.sb, members_v2);
 	unsigned u64s = DIV_ROUND_UP(sizeof(struct bch_sb_field_members_v2) +
-				     sizeof(struct bch_member), sizeof(u64));
+				     le16_to_cpu(mi->member_bytes), sizeof(u64));
 	bch2_sb_field_resize(&c->disk_sb, members_v2, u64s);
 	c->disk_sb.sb->nr_devices = 1;
 	SET_BCH_SB_MULTI_DEVICE(c->disk_sb.sb, false);
