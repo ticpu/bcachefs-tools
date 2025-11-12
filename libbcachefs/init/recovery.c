@@ -16,7 +16,7 @@
 
 #include "data/move.h"
 #include "data/copygc.h"
-#include "data/rebalance.h"
+#include "data/reconcile.h"
 
 #include "fs/dirent.h"
 #include "fs/logged_ops.h"
@@ -875,21 +875,6 @@ use_clean:
 			bch2_write_super(c);
 	}
 
-	if (!(c->sb.compat & (1ULL << BCH_COMPAT_extents_above_btree_updates_done)) ||
-	    c->sb.version_min < bcachefs_metadata_version_btree_ptr_sectors_written) {
-		struct bch_move_stats stats;
-
-		bch2_move_stats_init(&stats, "recovery");
-
-		CLASS(printbuf, buf)();
-		bch2_version_to_text(&buf, c->sb.version_min);
-		bch_info(c, "scanning for old btree nodes: min_version %s", buf.buf);
-
-		try(bch2_fs_read_write_early(c));
-		try(bch2_scan_old_btree_nodes(c, &stats));
-		bch_info(c, "scanning for old btree nodes done");
-	}
-
 	if (test_bit(BCH_FS_need_delete_dead_snapshots, &c->flags) &&
 	    !c->opts.nochanges) {
 		bch2_fs_read_write_early(c);
@@ -1009,7 +994,7 @@ int bch2_fs_initialize(struct bch_fs *c)
 	c->recovery.pass_done = BCH_RECOVERY_PASS_NR - 1;
 
 	bch2_copygc_wakeup(c);
-	bch2_rebalance_wakeup(c);
+	bch2_reconcile_wakeup(c);
 
 	if (enabled_qtypes(c))
 		try(bch2_fs_quota_read(c));

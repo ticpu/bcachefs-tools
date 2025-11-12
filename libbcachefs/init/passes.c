@@ -13,7 +13,7 @@
 
 #include "data/copygc.h"
 #include "data/ec.h"
-#include "data/rebalance.h"
+#include "data/reconcile.h"
 
 #include "fs/check.h"
 #include "fs/inode.h"
@@ -571,7 +571,7 @@ static int __bch2_run_recovery_passes(struct bch_fs *c, u64 orig_passes_to_run,
 		if (prev_done <= BCH_RECOVERY_PASS_check_snapshots &&
 		    r->pass_done > BCH_RECOVERY_PASS_check_snapshots) {
 			bch2_copygc_wakeup(c);
-			bch2_rebalance_wakeup(c);
+			bch2_reconcile_wakeup(c);
 		}
 	}
 

@@ -462,7 +462,7 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 
 	struct bch_opts opts = bch2_opts_empty();
 	opt_set(opts, copygc_enabled,		false);
-	opt_set(opts, rebalance_enabled,	false);
+	opt_set(opts, reconcile_enabled,	false);
 	opt_set(opts, nostart,			true);
 
 	struct bch_fs *c = bch2_fs_open(&device_paths, &opts);
@@ -655,7 +655,7 @@ static int image_update(const char *src_path, const char *dst_image,
 
 	struct bch_opts opts = bch2_opts_empty();
 	opt_set(opts, copygc_enabled,		false);
-	opt_set(opts, rebalance_enabled,	false);
+	opt_set(opts, reconcile_enabled,	false);
 	opt_set(opts, nostart,			true);
 
 	struct bch_fs *c = bch2_fs_open(&device_paths, &opts);

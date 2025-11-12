@@ -33,7 +33,7 @@
 #include "data/move.h"
 #include "data/nocow_locking.h"
 #include "data/read.h"
-#include "data/rebalance.h"
+#include "data/reconcile.h"
 #include "data/write.h"
 
 #include "debug/async_objs.h"
@@ -266,7 +266,7 @@ static void __bch2_fs_read_only(struct bch_fs *c)
 
 	bch2_fs_ec_stop(c);
 	bch2_open_buckets_stop(c, NULL, true);
-	bch2_rebalance_stop(c);
+	bch2_reconcile_stop(c);
 	bch2_copygc_stop(c);
 	bch2_fs_ec_flush(c);
 
@@ -514,7 +514,7 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 
 	int ret = bch2_journal_reclaim_start(&c->journal) ?:
 		  bch2_copygc_start(c) ?:
-		  bch2_rebalance_start(c);
+		  bch2_reconcile_start(c);
 	if (ret) {
 		bch2_fs_read_only(c);
 		return ret;
@@ -559,7 +559,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 	utf8_unload(c->cf_encoding);
 #endif
 
-	bch2_rebalance_stop(c);
+	bch2_reconcile_stop(c);
 	bch2_copygc_stop(c);
 	bch2_find_btree_nodes_exit(&c->found_btree_nodes);
 	bch2_free_pending_node_rewrites(c);
@@ -568,7 +568,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_fs_snapshots_exit(c);
 	bch2_fs_sb_errors_exit(c);
 	bch2_fs_replicas_exit(c);
-	bch2_fs_rebalance_exit(c);
+	bch2_fs_reconcile_exit(c);
 	bch2_fs_quota_exit(c);
 	bch2_fs_nocow_locking_exit(c);
 	bch2_fs_journal_exit(&c->journal);
@@ -769,7 +769,7 @@ int bch2_fs_init_rw(struct bch_fs *c)
 		bch2_fs_journal_init(&c->journal) ?:
 		bch2_journal_reclaim_start(&c->journal) ?:
 		bch2_copygc_start(c) ?:
-		bch2_rebalance_start(c);
+		bch2_reconcile_start(c);
 	if (ret)
 		return ret;
 
@@ -1000,16 +1000,17 @@ static int bch2_fs_opt_version_init(struct bch_fs *c, struct printbuf *out)
 			   unicode_rev(BCH_FS_DEFAULT_UTF8_ENCODING));
 
 	if (BCH_SB_INITIALIZED(c->disk_sb.sb)) {
-		if (!(c->sb.features & (1ULL << BCH_FEATURE_new_extent_overwrite))) {
+		if (!(c->sb.features & BIT_ULL(BCH_FEATURE_new_extent_overwrite))) {
 			prt_str_indented(out, "feature new_extent_overwrite not set, filesystem no longer supported\n");
 			return -EINVAL;
 		}
 
-		if (!c->sb.clean &&
-		    !(c->sb.features & (1ULL << BCH_FEATURE_extents_above_btree_updates))) {
-			prt_str_indented(out, "filesystem needs recovery from older version; run fsck from older bcachefs-tools to fix\n");
+		if (c->sb.version_min < bcachefs_metadata_version_btree_ptr_sectors_written) {
+			prt_str_indented(out, "version_min < version_btree_ptr_sectors_written\n");
+			prt_str_indented(out, "filesystem needs upgrade from older version; run fsck from older bcachefs-tools to fix\n");
 			return -EINVAL;
 		}
+
 	}
 
 	return 0;
@@ -1179,7 +1180,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	try(bch2_fs_fsio_init(c));
 	try(bch2_fs_fs_io_direct_init(c));
 	try(bch2_fs_io_read_init(c));
-	try(bch2_fs_rebalance_init(c));
+	try(bch2_fs_reconcile_init(c));
 	try(bch2_fs_sb_errors_init(c));
 	try(bch2_fs_vfs_init(c));
 
