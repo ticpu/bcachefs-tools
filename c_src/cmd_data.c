@@ -438,7 +438,7 @@ static bool reconcile_status(struct printbuf *out,
 
 	for (unsigned i = 0; i < ARRAY_SIZE(v); i++)
 		if (types & BIT(i)) {
-			prt_printf(out, "Pending %s:\t", __bch2_reconcile_accounting_types[i]);
+			prt_printf(out, "  %s:\t", __bch2_reconcile_accounting_types[i]);
 			prt_human_readable_u64(out, v[i] << 9);
 			prt_newline(out);
 			have_pending |= v[i] != 0;
