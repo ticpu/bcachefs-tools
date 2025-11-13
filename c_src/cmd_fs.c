@@ -273,6 +273,8 @@ static void replicas_usage_to_text(struct printbuf *out,
 			prt_char(out, ' ');
 		if (dev && dev->dev)
 			prt_str(out, dev->dev);
+		else if (dev_idx == BCH_SB_MEMBER_INVALID)
+			prt_str(out, "none");
 		else
 			prt_printf(out, "%u", dev_idx);
 	}
