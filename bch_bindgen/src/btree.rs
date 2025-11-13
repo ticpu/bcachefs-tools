@@ -82,6 +82,33 @@ impl<'t> BtreeIter<'t> {
         }
     }
 
+    pub fn new_level(
+        trans: &'t BtreeTrans<'t>,
+        btree: c::btree_id,
+        pos: c::bpos,
+        level: u32,
+        flags: BtreeIterFlags,
+    ) -> BtreeIter<'t> {
+        unsafe {
+            let mut iter: MaybeUninit<c::btree_iter> = MaybeUninit::uninit();
+
+            c::__bch2_trans_node_iter_init(
+                trans.raw,
+                iter.as_mut_ptr(),
+                btree,
+                pos,
+                0,
+                level,
+                c::btree_iter_update_trigger_flags(flags.bits)
+            );
+
+            BtreeIter {
+                raw:   iter.assume_init(),
+                trans: PhantomData,
+            }
+        }
+    }
+
     pub fn peek_max<'i>(&'i mut self, end: c::bpos) -> Result<Option<BkeySC<'i>>, bch_errcode> {
         unsafe {
             let k = c::bch2_btree_iter_peek_max(&mut self.raw, end);

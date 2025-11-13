@@ -22,10 +22,11 @@ fn list_keys(fs: &Fs, opt: &Cli) -> anyhow::Result<()> {
         flags |= BtreeIterFlags::ALL_SNAPSHOTS;
     }
 
-    let mut iter = BtreeIter::new(
+    let mut iter = BtreeIter::new_level(
         &trans,
         opt.btree,
         opt.start,
+        opt.level,
         flags,
     );
 
