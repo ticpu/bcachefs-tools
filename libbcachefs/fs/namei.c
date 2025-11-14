@@ -528,27 +528,9 @@ static int __bch2_inum_to_path(struct btree_trans *trans,
 	DARRAY(subvol_inum) inums = {};
 
 	if (!snapshot) {
-		if (subvol) {
-			ret = bch2_subvolume_get_snapshot(trans, subvol, &snapshot);
-			if (ret)
-				goto disconnected;
-		} else {
-			struct bkey_s_c k;
-			for_each_btree_key_max_norestart(trans, iter,
-					BTREE_ID_inodes,
-					POS(0, inum),
-					SPOS(0, inum, U32_MAX),
-					BTREE_ITER_all_snapshots, k, ret) {
-				if (bkey_is_inode(k.k)) {
-					snapshot = k.k->p.snapshot;
-					break;
-				}
-			}
-			if (ret)
-				return ret;
-			if (!snapshot)
-				goto disconnected;
-		}
+		ret = bch2_subvolume_get_snapshot(trans, subvol, &snapshot);
+		if (ret)
+			goto disconnected;
 	}
 
 	while (true) {
