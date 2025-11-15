@@ -410,7 +410,7 @@ static bool reconcile_status(struct printbuf *out,
 {
 	bool scan_pending = read_file_u64(fs.sysfs_fd, "reconcile_scan_pending");
 
-	u64 v[BCH_REBALANCE_ACCOUNTING_NR];
+	u64 v[BCH_REBALANCE_ACCOUNTING_NR][2];
 	memset(v, 0, sizeof(v));
 
 	struct bch_ioctl_query_accounting *a =
@@ -426,22 +426,32 @@ static bool reconcile_status(struct printbuf *out,
 		struct disk_accounting_pos acc_k;
 		bpos_to_disk_accounting_pos(&acc_k, k->k.p);
 
-		v[acc_k.reconcile_work.type] = k->v.d[0];
+		v[acc_k.reconcile_work.type][0] = k->v.d[0];
+		v[acc_k.reconcile_work.type][1] = k->v.d[1];
 	}
 	free(a);
 
-	if (!out->nr_tabstops)
+	if (!out->nr_tabstops) {
 		printbuf_tabstop_push(out, 32);
+		printbuf_tabstop_push(out, 12);
+		printbuf_tabstop_push(out, 12);
+	}
 
 	prt_printf(out, "Scan pending:\t%u\n", scan_pending);
+	prt_printf(out, "\tdata\rmetadata\r\n");
+
 	bool have_pending = scan_pending;
 
 	for (unsigned i = 0; i < ARRAY_SIZE(v); i++)
 		if (types & BIT(i)) {
 			prt_printf(out, "  %s:\t", __bch2_reconcile_accounting_types[i]);
-			prt_human_readable_u64(out, v[i] << 9);
+			prt_human_readable_u64(out, v[i][0] << 9);
+			prt_tab_rjust(out);
+			prt_human_readable_u64(out, v[i][1] << 9);
+			prt_tab_rjust(out);
 			prt_newline(out);
-			have_pending |= v[i] != 0;
+			have_pending |= v[i][0] != 0;
+			have_pending |= v[i][1] != 0;
 		}
 
 	return have_pending;

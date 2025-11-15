@@ -546,15 +546,18 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 			break;
 		case BCH_DISK_ACCOUNTING_reconcile_work:
 			if (new_type) {
-				prt_printf(out, "\nPending rebalance work:\n");
 				printbuf_tabstops_reset(out);
-				printbuf_tabstop_push(out, 16);
-				printbuf_tabstop_push(out, 16);
+				printbuf_tabstop_push(out, 32);
+				printbuf_tabstop_push(out, 12);
+				printbuf_tabstop_push(out, 12);
+				prt_printf(out, "\nPending reconcile:\tdata\rmetadata\r\n");
 			}
 			bch2_prt_reconcile_accounting_type(out, acc_k.reconcile_work.type);
 			prt_char(out, ':');
 			prt_tab(out);
 			prt_units_u64(out, a->v.d[0] << 9);
+			prt_tab_rjust(out);
+			prt_units_u64(out, a->v.d[1] << 9);
 			prt_tab_rjust(out);
 			prt_newline(out);
 			break;
