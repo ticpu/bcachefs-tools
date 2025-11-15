@@ -3,6 +3,7 @@
 #include "cmds.h"
 #include "libbcachefs.h"
 #include "init/fs.h"
+#include "sb/counters.h"
 #include "sb/io.h"
 
 static void reset_counters_usage(void)
@@ -11,6 +12,7 @@ static void reset_counters_usage(void)
 	     "Usage: bcachefs reset-counters device\n"
 	     "\n"
 	     "Options:\n"
+	     "  -c, --counters=<counters>   reset specific counters, not all\n"
 	     "  -h, --help                  display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
@@ -20,13 +22,26 @@ static void reset_counters_usage(void)
 int cmd_reset_counters(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
-		{ "help",			no_argument, NULL, 'h' },
+		{ "counters",			required_argument,	NULL, 'c' },
+		{ "help",			no_argument,		NULL, 'h' },
 		{ NULL }
 	};
 	int opt;
 
+	DARRAY(enum bch_persistent_counters) to_reset = {};
+
 	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
 		switch (opt) {
+		case 'c': {
+			char *p;
+			while ((p = strsep(&optarg, ","))) {
+				ssize_t v = match_string(bch2_counter_names, BCH_COUNTER_NR, p);
+				if (v < 0)
+					die("invalid counter %s", p);
+				darray_push(&to_reset, v);
+			}
+			break;
+		}
 		case 'h':
 			reset_counters_usage();
 			break;
@@ -54,10 +69,16 @@ int cmd_reset_counters(int argc, char *argv[])
 	if (ret)
 		die("Error opening filesystem: %s", bch2_err_str(ret));
 
-	scoped_guard(mutex, &c->sb_lock) {
-		bch2_sb_field_resize(&c->disk_sb, counters, 0);
-		bch2_write_super(c);
+	if (!to_reset.nr) {
+		for (unsigned i = 0; i < BCH_COUNTER_NR; i++)
+			percpu_u64_set(&c->counters[i], 0);
+	} else {
+		darray_for_each(to_reset, i)
+			percpu_u64_set(&c->counters[*i], 0);
 	}
+
+	scoped_guard(mutex, &c->sb_lock)
+		bch2_write_super(c);
 	bch2_fs_stop(c);
 	return 0;
 }
