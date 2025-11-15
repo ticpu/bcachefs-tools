@@ -119,7 +119,12 @@ static void bcachefs_fuse_lookup(fuse_req_t req, fuse_ino_t dir_ino,
 		return;
 	}
 
-	struct bch_hash_info hash_info = bch2_hash_info_init(c, &bi);
+	struct bch_hash_info hash_info;
+	ret = bch2_hash_info_init(c, &bi, &hash_info);
+	if (ret) {
+		fuse_reply_err(req, -ret);
+		return;
+	}
 
 	ret = bch2_dirent_lookup(c, dir, &hash_info, &qstr, &inum);
 	if (ret) {
@@ -947,9 +952,9 @@ static void bcachefs_fuse_readdir(fuse_req_t req, fuse_ino_t dir_ino,
 	if (!handle_dots(&ctx, dir.inum))
 		goto reply;
 
-	struct bch_hash_info dir_hash = bch2_hash_info_init(c, &bi);
-
-	ret = bch2_readdir(c, dir, &dir_hash, &ctx.ctx);
+	struct bch_hash_info dir_hash;
+	ret =   bch2_hash_info_init(c, &bi, &dir_hash) ?:
+		bch2_readdir(c, dir, &dir_hash, &ctx.ctx);
 reply:
 	if (!ret) {
 		fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_readdir reply %zd\n",
