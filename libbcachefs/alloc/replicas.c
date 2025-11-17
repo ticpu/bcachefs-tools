@@ -879,7 +879,7 @@ bool bch2_can_write_fs_with_devs(struct bch_fs *c, struct bch_devs_mask devs,
 		}
 	}
 
-	return bch2_can_read_fs_with_devs(c, devs, flags, err);
+	return true;
 }
 
 bool bch2_sb_has_journal(struct bch_sb *sb)
