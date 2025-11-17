@@ -777,34 +777,27 @@ bool bch2_can_read_fs_with_devs(struct bch_fs *c, struct bch_devs_mask devs,
 	for_each_cpu_replicas_entry(&c->replicas, i) {
 		struct bch_replicas_entry_v1 *e = &i->e;
 
-		unsigned nr_online = 0, nr_failed = 0, dflags = 0;
+		unsigned nr_online = 0, nr_invalid = 0, dflags = 0;
 		bool metadata = e->data_type < BCH_DATA_user;
 
 		if (e->data_type == BCH_DATA_cached)
 			continue;
 
-		scoped_guard(rcu)
-			for (unsigned i = 0; i < e->nr_devs; i++) {
-				if (e->devs[i] == BCH_SB_MEMBER_INVALID) {
-					nr_failed++;
-					continue;
-				}
-
-				nr_online += test_bit(e->devs[i], devs.d);
-
-				struct bch_dev *ca = bch2_dev_rcu_noerror(c, e->devs[i]);
-				nr_failed += !ca || ca->mi.state == BCH_MEMBER_STATE_failed;
+		for (unsigned i = 0; i < e->nr_devs; i++) {
+			if (e->devs[i] == BCH_SB_MEMBER_INVALID) {
+				nr_invalid++;
+				continue;
 			}
 
-		if (nr_online + nr_failed == e->nr_devs)
-			continue;
+			nr_online += test_bit(e->devs[i], devs.d);
+		}
 
 		if (nr_online < e->nr_required)
 			dflags |= metadata
 				? BCH_FORCE_IF_METADATA_LOST
 				: BCH_FORCE_IF_DATA_LOST;
 
-		if (nr_online < e->nr_devs)
+		if (nr_online + nr_invalid < e->nr_devs)
 			dflags |= metadata
 				? BCH_FORCE_IF_METADATA_DEGRADED
 				: BCH_FORCE_IF_DATA_DEGRADED;
@@ -823,71 +816,66 @@ bool bch2_can_read_fs_with_devs(struct bch_fs *c, struct bch_devs_mask devs,
 	return true;
 }
 
-bool bch2_have_enough_devs(struct bch_fs *c, struct bch_devs_mask devs,
-			   unsigned flags, struct printbuf *err,
-			   bool write)
+bool bch2_can_write_fs_with_devs(struct bch_fs *c, struct bch_devs_mask devs,
+				 unsigned flags, struct printbuf *err)
 {
-	if (write) {
-		unsigned nr_have[BCH_DATA_NR];
-		memset(nr_have, 0, sizeof(nr_have));
+	unsigned nr_have[BCH_DATA_NR];
+	memset(nr_have, 0, sizeof(nr_have));
 
-		unsigned nr_online[BCH_DATA_NR];
-		memset(nr_online, 0, sizeof(nr_online));
+	unsigned nr_online[BCH_DATA_NR];
+	memset(nr_online, 0, sizeof(nr_online));
 
-		scoped_guard(rcu)
-			for_each_member_device_rcu(c, ca, &devs) {
-				if (!ca->mi.durability)
-					continue;
+	scoped_guard(rcu)
+		for_each_member_device_rcu(c, ca, &devs) {
+			if (!ca->mi.durability)
+				continue;
 
-				bool online = ca->mi.state == BCH_MEMBER_STATE_rw &&
-					test_bit(ca->dev_idx, devs.d);
+			bool online = test_bit(ca->dev_idx, devs.d);
+			for (unsigned i = 0; i < BCH_DATA_NR; i++) {
+				nr_have[i] += ca->mi.data_allowed & BIT(i) ? ca->mi.durability : 0;
 
-				for (unsigned i = 0; i < BCH_DATA_NR; i++) {
-					nr_have[i] += ca->mi.data_allowed & BIT(i) ? ca->mi.durability : 0;
-
-					if (online)
-						nr_online[i] += ca->mi.data_allowed & BIT(i) ? ca->mi.durability : 0;
-				}
+				if (online)
+					nr_online[i] += ca->mi.data_allowed & BIT(i) ? ca->mi.durability : 0;
 			}
+		}
 
-		if (!nr_online[BCH_DATA_journal]) {
-			prt_printf(err, "No rw journal devices online\n");
+	if (!nr_online[BCH_DATA_journal]) {
+		prt_printf(err, "No rw journal devices online\n");
+		return false;
+	}
+
+	if (!nr_online[BCH_DATA_btree]) {
+		prt_printf(err, "No rw btree devices online\n");
+		return false;
+	}
+
+	if (!nr_online[BCH_DATA_user]) {
+		prt_printf(err, "No rw user data devices online\n");
+		return false;
+	}
+
+	if (!(flags & BCH_FORCE_IF_METADATA_DEGRADED)) {
+		if (nr_online[BCH_DATA_journal] < nr_have[BCH_DATA_journal] &&
+		    nr_online[BCH_DATA_journal] < c->opts.metadata_replicas) {
+			prt_printf(err, "Insufficient rw journal devices (%u) online\n",
+				   nr_online[BCH_DATA_journal]);
 			return false;
 		}
 
-		if (!nr_online[BCH_DATA_btree]) {
-			prt_printf(err, "No rw btree devices online\n");
+		if (nr_online[BCH_DATA_btree] < nr_have[BCH_DATA_btree] &&
+		    nr_online[BCH_DATA_btree] < c->opts.metadata_replicas) {
+			prt_printf(err, "Insufficient rw btree devices (%u) online\n",
+				   nr_online[BCH_DATA_btree]);
 			return false;
 		}
+	}
 
-		if (!nr_online[BCH_DATA_user]) {
-			prt_printf(err, "No rw user data devices online\n");
+	if (!(flags & BCH_FORCE_IF_DATA_DEGRADED)) {
+		if (nr_online[BCH_DATA_user] < nr_have[BCH_DATA_user] &&
+		    nr_online[BCH_DATA_user] < c->opts.data_replicas) {
+			prt_printf(err, "Insufficient rw user data devices (%u) online\n",
+				   nr_online[BCH_DATA_user]);
 			return false;
-		}
-
-		if (!(flags & BCH_FORCE_IF_METADATA_DEGRADED)) {
-			if (nr_online[BCH_DATA_journal] < nr_have[BCH_DATA_journal] &&
-			    nr_online[BCH_DATA_journal] < c->opts.metadata_replicas) {
-				prt_printf(err, "Insufficient rw journal devices (%u) online\n",
-					   nr_online[BCH_DATA_journal]);
-				return false;
-			}
-
-			if (nr_online[BCH_DATA_btree] < nr_have[BCH_DATA_btree] &&
-			    nr_online[BCH_DATA_btree] < c->opts.metadata_replicas) {
-				prt_printf(err, "Insufficient rw btree devices (%u) online\n",
-					   nr_online[BCH_DATA_btree]);
-				return false;
-			}
-		}
-
-		if (!(flags & BCH_FORCE_IF_DATA_DEGRADED)) {
-			if (nr_online[BCH_DATA_user] < nr_have[BCH_DATA_user] &&
-			    nr_online[BCH_DATA_user] < c->opts.data_replicas) {
-				prt_printf(err, "Insufficient rw user data devices (%u) online\n",
-					   nr_online[BCH_DATA_user]);
-				return false;
-			}
 		}
 	}
 

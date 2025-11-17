@@ -350,8 +350,8 @@ static int cmd_device_evacuate(int argc, char *argv[])
 	if (bcachefs_kernel_version() < bcachefs_metadata_version_reconcile)
 		return evacuate_v0(fs, dev_idx, dev_path);
 
-	printf("Setting %s failed\n", dev_path);
-	bchu_disk_set_state(fs, dev_idx, BCH_MEMBER_STATE_failed, BCH_FORCE_IF_DEGRADED);
+	printf("Setting %s evacuating \n", dev_path);
+	bchu_disk_set_state(fs, dev_idx, BCH_MEMBER_STATE_evacuating, BCH_FORCE_IF_DEGRADED);
 
 	while (true) {
 		struct bch_ioctl_dev_usage_v2 *u = bchu_dev_usage(fs, dev_idx);
@@ -382,7 +382,7 @@ static void device_set_state_usage(void)
 	puts("bcachefs device set-state\n"
 	     "Usage: bcachefs device set-state <new-state> <device>|<devid> <path>\n"
 	     "\n"
-	     "<new-state>: one of rw, ro, failed or spare\n"
+	     "<new-state>: one of rw, ro, evacuating or spare\n"
 	     "<path>: path to mounted filesystem, optional unless specifying device by id\n"
 	     "\n"
 	     "Options:\n"
@@ -716,7 +716,7 @@ static int device_usage(void)
             "  online                       Re-add an existing member to a filesystem\n"
             "  offline                      Take a device offline, without removing it\n"
             "  evacuate                     Migrate data off a specific device\n"
-            "  set-state                    Mark a device as failed\n"
+            "  set-state                    Change device state (rw, ro, evacuating, spare)\n"
             "  resize                       Resize filesystem on a device\n"
             "  resize-journal               Resize journal on a device\n"
             "\n"

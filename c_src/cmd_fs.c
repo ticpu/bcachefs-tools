@@ -237,7 +237,7 @@ static struct durability_x_degraded replicas_durability(const struct bch_replica
 
 		unsigned durability = dev ? dev->durability : 1;
 
-		if (!dev || !dev->dev || dev->state == BCH_MEMBER_STATE_failed)
+		if (!dev || !dev->dev || dev->state == BCH_MEMBER_STATE_evacuating)
 			degraded += durability;
 		ret.durability += durability;
 	}
