@@ -6,7 +6,8 @@
 #include "btree/types.h"
 
 void bch2_trans_updates_to_text(struct printbuf *, struct btree_trans *);
-void bch2_btree_path_to_text(struct printbuf *, struct btree_trans *, btree_path_idx_t);
+void bch2_btree_path_to_text(struct printbuf *, struct btree_trans *,
+			     btree_path_idx_t, struct btree_path *);
 void bch2_trans_paths_to_text(struct printbuf *, struct btree_trans *);
 void bch2_dump_trans_paths_updates(struct btree_trans *);
 
@@ -550,9 +551,9 @@ static inline void __bch2_trans_iter_init(struct btree_trans *trans,
 	    __builtin_constant_p(flags))
 		bch2_trans_iter_init_common(trans, iter, btree, pos, 0, 0,
 				bch2_btree_iter_flags(trans, btree, 0, flags),
-				_RET_IP_);
+				_THIS_IP_);
 	else
-		bch2_trans_iter_init_outlined(trans, iter, btree, pos, flags, _RET_IP_);
+		bch2_trans_iter_init_outlined(trans, iter, btree, pos, flags, _THIS_IP_);
 }
 
 static inline void bch2_trans_iter_init(struct btree_trans *trans,
@@ -564,6 +565,13 @@ static inline void bch2_trans_iter_init(struct btree_trans *trans,
 	__bch2_trans_iter_init(trans, iter, btree, pos, flags);
 }
 
+#define DEFINE_CLASS2(_name, _type, _exit, _init, _init_args...)		\
+typedef _type class_##_name##_t;					\
+static __always_inline void class_##_name##_destructor(_type *p)			\
+{ _type _T = *p; _exit; }						\
+static __always_inline _type class_##_name##_constructor(_init_args)		\
+{ _type t = _init; return t; }
+
 #define bch2_trans_iter_class_init(_trans, _btree, _pos, _flags)		\
 ({										\
 	struct btree_iter iter;							\
@@ -571,7 +579,7 @@ static inline void bch2_trans_iter_init(struct btree_trans *trans,
 	iter;									\
 })
 
-DEFINE_CLASS(btree_iter, struct btree_iter,
+DEFINE_CLASS2(btree_iter, struct btree_iter,
 	     bch2_trans_iter_exit(&_T),
 	     bch2_trans_iter_class_init(trans, btree, pos, flags),
 	     struct btree_trans *trans,

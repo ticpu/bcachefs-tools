@@ -821,7 +821,7 @@ static inline int do_bch2_trans_commit(struct btree_trans *trans,
 				       unsigned long trace_ip)
 {
 	struct bch_fs *c = trans->c;
-	int  u64s_delta = 0;
+	int u64s_delta = 0;
 
 	for (unsigned idx = 0; idx < trans->nr_updates; idx++) {
 		struct btree_insert_entry *i = trans->updates + idx;
@@ -832,8 +832,8 @@ static inline int do_bch2_trans_commit(struct btree_trans *trans,
 		u64s_delta -= i->old_btree_u64s;
 
 		if (!same_leaf_as_next(trans, i)) {
-			if (u64s_delta <= 0)
-				try(bch2_foreground_maybe_merge(trans, i->path, i->level, flags));
+			try(bch2_foreground_maybe_merge(trans, i->path, i->level,
+							flags, u64s_delta, NULL));
 
 			u64s_delta = 0;
 		}
@@ -909,8 +909,13 @@ static int __bch2_trans_commit_error(struct btree_trans *trans, unsigned flags,
 		trace_and_count(c, trans_blocked_journal_reclaim, trans, trace_ip);
 		track_event_change(&c->times[BCH_TIME_blocked_key_cache_flush], true);
 
-		wait_event_freezable(c->journal.reclaim_wait,
-				     (ret = journal_reclaim_wait_done(c)));
+		if (!wait_event_freezable_timeout(c->journal.reclaim_wait,
+						  (ret = journal_reclaim_wait_done(c)),
+						  HZ)) {
+			bch2_trans_unlock_long(trans);
+			wait_event_freezable(c->journal.reclaim_wait,
+					     (ret = journal_reclaim_wait_done(c)));
+		}
 
 		track_event_change(&c->times[BCH_TIME_blocked_key_cache_flush], false);
 

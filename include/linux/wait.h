@@ -103,6 +103,8 @@ do {									\
 		      TASK_UNINTERRUPTIBLE, 0, timeout,			\
 		      __ret = schedule_timeout(__ret))
 
+#define wait_event_freezable_timeout(wq, condition, timeout)	wait_event_timeout(wq, condition, timeout)
+
 #define wait_event_timeout(wq, condition, timeout)			\
 ({									\
 	long __ret = timeout;						\
