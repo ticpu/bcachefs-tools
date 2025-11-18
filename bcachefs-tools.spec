@@ -112,6 +112,8 @@ check, modify and correct any inconsistencies in the bcachefs filesystem.
 Summary:        FUSE implementation of bcachefs
 Requires:       %{name}%{?_isa} = %{version}-%{release}
 
+BuildArch:      noarch
+
 %description -n fuse-bcachefs
 This package is an experimental implementation of bcachefs leveraging FUSE to
 mount, create, check, modify and correct any inconsistencies in the bcachefs filesystem.
