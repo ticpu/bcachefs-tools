@@ -280,6 +280,7 @@ jobs:
           addFilter("dkms-bcachefs.noarch: E: devel-file-in-non-devel-package")
           EOT
           tar -xvf *.tar.xz -C "$OBS_REPO_DIR" --wildcards '*/bcachefs-tools.spec' --strip-components=1
+          tar -xvf *.tar.xz -C "$OBS_REPO_DIR" --wildcards '*/bcachefs-kmp.spec-preambule' --strip-components=1
           tar -xvf *.tar.xz -C "$OBS_REPO_DIR" --wildcards '*/debian/cargo.config' --strip-components=2
           patch "$OBS_REPO_DIR/bcachefs-tools.spec" <<EOF
           --- a/bcachefs-tools.spec
