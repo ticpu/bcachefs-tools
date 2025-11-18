@@ -37,8 +37,9 @@ static void dump_node(struct bch_fs *c, dump_devs *devs, struct bkey_s_c k)
 #endif
 
 	bkey_for_each_ptr(ptrs, ptr)
-		range_add(&devs->data[ptr->dev].btree,
-			  ptr->offset << 9, bytes);
+		if (bch2_dev_exists(c, ptr->dev))
+			range_add(&devs->data[ptr->dev].btree,
+				  ptr->offset << 9, bytes);
 }
 
 static void get_sb_journal(struct bch_fs *c, struct bch_dev *ca,
