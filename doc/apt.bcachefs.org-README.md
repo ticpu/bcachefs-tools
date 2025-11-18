@@ -2,14 +2,14 @@ To add this repository to your computer, do:
 ```bash
 wget -qO- https://apt.bcachefs.org/apt.bcachefs.org.asc | sudo tee /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
 # Fingerprint: $GPG_SIGNING_SUBKEY_FINGERPRINT
-sudo cat > /etc/apt/sources.list.d/apt.bcachefs.org.sources <<EOS
+sudo tee /etc/apt/sources.list.d/apt.bcachefs.org.sources > /dev/null <<EOF
 Types: deb deb-src
 URIs: https://apt.bcachefs.org/unstable/
 # Or replace unstable with your distro's release name
 Suites: bcachefs-tools-release
 Components: main
 Signed-By: /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc
-EOS
+EOF
 sudo apt update
 sudo apt install bcachefs-tools
 ```
@@ -32,11 +32,11 @@ sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-sn
 If you want to ensure that the packages from this repository are always preferred, do:
 ```bash
 mkdir -p /etc/apt/preferences.d
-sudo cat > /etc/apt/preferences.d/apt.bcachefs.org.pref <<EOP
+sudo tee /etc/apt/preferences.d/apt.bcachefs.org.pref > /dev/null <<EOF
 Package: *
 Pin: origin apt.bcachefs.org
 Pin-Priority: 1000
-EOP
+EOF
 ```
 
 > **_NOTE:_**
