@@ -111,6 +111,7 @@ static int move_btree_pred(struct btree_trans *trans, void *_arg,
 	if (!args->move_alloc && btree_id_is_alloc(btree))
 		return false;
 
+	data_opts->write_flags |= BCH_WRITE_only_specified_devs;
 	return true;
 	return k.k->type == KEY_TYPE_btree_ptr_v2 && !btree_id_is_alloc(btree);
 }
