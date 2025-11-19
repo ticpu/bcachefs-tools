@@ -31,7 +31,7 @@ sudo add-apt-repository "deb https://apt.bcachefs.org/unstable bcachefs-tools-sn
 
 If you want to ensure that the packages from this repository are always preferred, do:
 ```bash
-mkdir -p /etc/apt/preferences.d
+sudo mkdir -p /etc/apt/preferences.d
 sudo tee /etc/apt/preferences.d/apt.bcachefs.org.pref > /dev/null <<EOF
 Package: *
 Pin: origin apt.bcachefs.org
