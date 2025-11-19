@@ -27,7 +27,7 @@ on:
       GPG_SIGNING_SUBKEY_FINGERPRINT:
 
 jobs:
-  linux:
+  buildd:
     runs-on: ${{ inputs.runs-on }}
     env:
       CONTAINER_DISTRO: trixie
@@ -73,7 +73,6 @@ jobs:
           apt install eatmydata
           eatmydata apt install \
             podman \
-            qemu-user-static \
           ;
           apt clean
       - name: Start the container
@@ -131,32 +130,17 @@ jobs:
           eatmydata apt full-upgrade
           eatmydata apt install \
             ${{ inputs.dist-name }}-keyring \
-            arch-test \
-            autopkgtest \
             curl \
             debsig-verify \
             devscripts \
-            dosfstools \
-            e2fsprogs \
-            fakemachine \
-            fdisk \
             gnupg \
             iproute2 \
-            ipxe-qemu \
-            libarchive13 \
             mmdebstrap \
-            mtools \
-            ovmf \
-            qemu-efi-aarch64 \
-            qemu-kvm \
-            qemu-utils \
             sbuild \
             sudo \
-            systemd-boot-efi \
             tar \
             uidmap \
             xz-utils \
-            zerofree \
             zip \
           ;
           apt clean
@@ -495,20 +479,295 @@ jobs:
         with:
           subject-name: artifact-bin-${{ inputs.dist-version }}-${{ inputs.host-arch }}.tar.zip
           subject-digest: sha256:${{ steps.deb-bin-upload.outputs.artifact-digest }}
-      - name: Build Qemu image for autopkgtest
-        timeout-minutes: 2
-        id: qemu-image
-        if: inputs.dist-name == 'debian' && inputs.dist-version != 'trixie' && inputs.machine-arch == 'amd64' && inputs.build-arch == inputs.machine-arch && inputs.host-arch == inputs.build-arch
+    outputs:
+      deb-bin-artifact-id: ${{ steps.deb-bin-upload.outputs.artifact-id }}
+  autopkgtest:
+    needs: buildd
+    if: inputs.dist-name == 'debian' && inputs.dist-version != 'trixie' && inputs.machine-arch == 'amd64' && inputs.build-arch == inputs.machine-arch && inputs.host-arch == inputs.build-arch
+    runs-on: ${{ inputs.runs-on }}
+    env:
+      CONTAINER_DISTRO: trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [ GNU, LLVM ]
+    steps:
+      - name: Configure baseline system
+        timeout-minutes: 1
+        shell: sudo sh "{0}"
+        run: |
+          set -xe
+          mount -t tmpfs tmpfs ${{ github.workspace }}
+          echo "set man-db/auto-update false" | debconf-communicate
+          dpkg-reconfigure man-db
+          mkdir -p /etc/apt/apt.conf.d
+          mkdir -p /etc/dpkg/dpkg.cfg.d
+          tee /etc/apt/apt.conf.d/99gh > /dev/null <<EOT
+          APT::ExtractTemplates::TempDir "/tmp/apt/temp";
+          Acquire::Retries "10";
+          APT::Install-Recommends "false";
+          APT::Install-Suggests "false";
+          APT::Get::Assume-Yes "true";
+          APT::Get::Fix-Missing "true";
+          EOT
+          tee /etc/dpkg/dpkg.cfg.d/99gh > /dev/null <<EOT
+          force-unsafe-io
+          force-confdef
+          EOT
+          rm -rf /var/lib/apt/lists/*
+          rm -rf /etc/apt/sources.list*
+          if [ "${{ inputs.machine-arch }}" = "amd64" ];
+          then
+          MIRROR="http://archive.ubuntu.com/ubuntu"
+          else
+          MIRROR="http://ports.ubuntu.com/ubuntu-ports"
+          fi
+          tee /etc/apt/sources.list > /dev/null <<EOT
+          deb $MIRROR noble main universe
+          EOT
+          apt update
+          apt install eatmydata
+          eatmydata apt install \
+            podman \
+            qemu-user-static \
+          ;
+          apt clean
+      - name: Start the container
+        timeout-minutes: 1
+        shell: sudo eatmydata sh "{0}"
+        run: |
+          set -xe
+          export IMAGE=debian:${{ env.CONTAINER_DISTRO }}-slim
+          podman pull ${IMAGE}
+          podman run \
+            --name container \
+            --image-volume=tmpfs \
+            --tmpfs=/run \
+            --tmpfs=/tmp \
+            --tmpfs=/var/tmp \
+            --volume=/home/runner:/home/runner \
+            --volume=${{ github.workspace }}:${{ github.workspace }} \
+            --privileged \
+            --cap-add=SYS_ADMIN \
+            --security-opt=apparmor:unconfined \
+            --interactive \
+            --tty \
+            --detach \
+            ${IMAGE} \
+            /usr/bin/sh \
+          ;
+      - name: Install necessary packages
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container sh "{0}"
+        run: |
+          set -xe
+          mkdir -p /etc/apt/apt.conf.d
+          mkdir -p /etc/dpkg/dpkg.cfg.d
+          tee /etc/apt/apt.conf.d/99gh > /dev/null <<EOT
+          APT::ExtractTemplates::TempDir "/tmp/apt/temp";
+          Acquire::Retries "10";
+          APT::Install-Recommends "false";
+          APT::Install-Suggests "false";
+          APT::Get::Assume-Yes "true";
+          APT::Get::Fix-Missing "true";
+          EOT
+          tee /etc/dpkg/dpkg.cfg.d/99gh > /dev/null <<EOT
+          force-unsafe-io
+          force-confdef
+          EOT
+          rm -rf /var/lib/apt/lists/*
+          rm -rf /etc/apt/sources.list*
+          tee /etc/apt/sources.list > /dev/null <<EOT
+          deb http://deb.debian.org/debian ${{ env.CONTAINER_DISTRO }} main
+          deb http://deb.debian.org/debian ${{ env.CONTAINER_DISTRO }}-updates main
+          deb http://deb.debian.org/debian ${{ env.CONTAINER_DISTRO }}-backports main
+          EOT
+          apt update
+          apt install eatmydata
+          eatmydata apt full-upgrade
+          eatmydata apt install \
+            ${{ inputs.dist-name }}-keyring \
+            arch-test \
+            autopkgtest \
+            curl \
+            debsig-verify \
+            dosfstools \
+            dpkg-dev \
+            e2fsprogs \
+            fakemachine \
+            fdisk \
+            gnupg \
+            ipxe-qemu \
+            libarchive13 \
+            mmdebstrap \
+            mtools \
+            ovmf \
+            qemu-efi-aarch64 \
+            qemu-kvm \
+            qemu-utils \
+            sudo \
+            systemd-boot-efi \
+            tar \
+            uidmap \
+            xz-utils \
+            zerofree \
+            zip \
+          ;
+          apt clean
+      - name: Import/Configure GPG
+        timeout-minutes: 1
+        id: gpg
+        if: github.event_name != 'pull_request'
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
-          . ~/.env
+          gpg --import <<EOT
+          ${{ secrets.GPG_SECRET_SUBKEYS }}
+          EOT
+          gpg \
+            --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.gpg \
+            --export \
+            ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }} \
+          ;
+          gpg \
+            --output /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc \
+            --armor \
+            --export \
+            ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }} \
+          ;
+          rm -f ~/.gnupg/trustedkeys.gpg
+          gpg \
+            --no-default-keyring \
+            --keyring ~/.gnupg/trustedkeys.gpg \
+            --import \
+            /etc/apt/trusted.gpg.d/apt.bcachefs.org.asc \
+          ;
+          tee -a ~/.gnupg/gpg.conf > /dev/null <<EOT
+          default-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          trusted-key ${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}
+          EOT
+      - name: Ensure that the download directory does not exist
+        timeout-minutes: 1
+        run: |
+          set -xe
+          rm -rf "${{ github.workspace }}/packed-artifacts"
+      - name: Download source-only .deb
+        timeout-minutes: 1
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: ${{ inputs.deb-src-artifact-id }}
+          path: packed-artifacts
+      - name: Download built .deb
+        timeout-minutes: 1
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: ${{ needs.buildd.outputs.deb-bin-artifact-id }}
+          path: packed-artifacts
+      - name: Check attestation of all incoming artifact archives
+        timeout-minutes: 2
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -xe
+          cd "${{ github.workspace }}/packed-artifacts"
+          find . -type f -print0 | xargs --null -I'{}' sh -c "                 \
+            echo '::group::Attestation check for {}' &&                        \
+            (                                                                  \
+              gh attestation verify                                            \
+                {}                                                             \
+                --repo        ${{ github.repository }}                         \
+                --signer-repo ${{ github.repository }}                         \
+                --source-digest ${{ github.sha }}                              \
+                --signer-digest ${{ github.sha }}                              \
+              ||                                                               \
+              (                                                                \
+                echo '::error file={}::NOT ATTESTED!' &&                       \
+                echo '::endgroup::' &&                                         \
+                exit 1                                                         \
+              )                                                                \
+            ) &&                                                               \
+            echo 'ok.' &&                                                      \
+            echo '::endgroup::'                                                \
+          "
+      - name: Unpack all artifacts
+        timeout-minutes: 1
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          SRC_DIR="${{ github.workspace }}/incoming/src-artifacts"
+          mkdir -p "$SRC_DIR"
+          find "${{ github.workspace }}/packed-artifacts" -type f -name artifact-src.tar -exec tar -xf {} -C "$SRC_DIR" ';' -delete
+          BIN_DIR="${{ github.workspace }}/incoming/bin-artifacts"
+          mkdir -p "$BIN_DIR"
+          find "${{ github.workspace }}/packed-artifacts" -type f -name 'artifact-bin-*.tar' -exec tar -xf {} -C "$BIN_DIR" ';' -delete
+          rm -rf "${{ github.workspace }}/packed-artifacts"
+      - name: Ensure that all incoming artifacts are signed
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          cd "${{ github.workspace }}/incoming"
+          find . -type f -not -iname '*.sig' -print0 | xargs --null -I'{}' sh -c "                     \
+            echo '::group::Signature check for {}' &&                                                  \
+            (                                                                                          \
+              gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}     || \
+              gpg --verbose --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --verify {}.sig || \
+              (                                                                                        \
+                echo '::error file={}::NOT SIGNED!' &&                                                 \
+                echo '::endgroup::' &&                                                                 \
+                exit 1                                                                                 \
+              )                                                                                        \
+            ) &&                                                                                       \
+            echo 'ok.' &&                                                                              \
+            echo '::endgroup::'                                                                        \
+          "
+      - name: Ensure that all incoming deb's are signed
+        timeout-minutes: 1
+        if: steps.gpg.conclusion != 'skipped'
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
+          POL_DIR="/etc/debsig/policies/${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"
+          KEY_DIR="/usr/share/debsig/keyrings/${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"
+          mkdir $POL_DIR
+          mkdir $KEY_DIR
+          cp /etc/apt/trusted.gpg.d/apt.bcachefs.org.gpg $KEY_DIR/
+          tee $POL_DIR/pol.pol > /dev/null <<EOT
+          <?xml version="1.0"?>
+          <!DOCTYPE Policy SYSTEM "https://www.debian.org/debsig/1.0/policy.dtd">
+          <Policy xmlns="https://www.debian.org/debsig/1.0/">
+            <Origin Name="apt.bcachefs.org" id="${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"/>
+            <Selection>
+              <Required Type="origin" File="apt.bcachefs.org.gpg" id="${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"/>
+            </Selection>
+            <Verification MinOptional="0">
+              <Required Type="origin" File="apt.bcachefs.org.gpg" id="${{ secrets.GPG_SIGNING_SUBKEY_FINGERPRINT }}"/>
+            </Verification>
+          </Policy>
+          EOT
+          cd "${{ github.workspace }}/incoming"
+          find . -type f \( -name '*.deb' -or -name '*.ddeb' \) -print0 | xargs --null -I'{}' sh -c "  \
+            echo '::group::Checking signature on {}' &&                                                \
+            (                                                                                          \
+              debsig-verify --verbose {}                                                               \
+            ) &&                                                                                       \
+            echo '::endgroup::'                                                                        \
+          "
+      - name: Build QEMU image for autopkgtest
+        timeout-minutes: 2
+        shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
+        run: |
+          set -xe
           IMAGE="/tmp/autopkgtest-qemu-image.qcow2"
           echo "IMAGE=$(echo ${IMAGE})" >> ~/.env
+          MIRROR="http://deb.debian.org/debian"
+          echo '::group::Building QEMU image for autopkgtest'
           mmdebstrap-autopkgtest-build-qemu --boot=efi --mirror "$MIRROR" "${{ inputs.dist-version }}" "$IMAGE"
+          echo '::endgroup::'
       - name: Run autopkgtest
         timeout-minutes: 10
-        if: steps.qemu-image.conclusion != 'skipped'
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
         run: |
           set -xe
@@ -522,12 +781,39 @@ jobs:
           else
           exit 1
           fi
+          tee "${{ github.workspace }}/setup-commands.sh" > /dev/null <<EOF
+          set -xe
+          apt update
+          apt install openssl
+          if [ "${{ matrix.toolchain }}" = "GNU" ]; then
+          /bin/true
+          elif [ "${{ matrix.toolchain }}" = "LLVM" ]; then
+          apt install -y \
+            clang \
+            ;
+          mkdir -p /usr/local/bin
+          DEB_HOST_MULTIARCH="$(dpkg-architecture -q DEB_HOST_MULTIARCH)"
+          for basename in cc c++ gcc g++; do
+          for prefix in "" "\$DEB_HOST_MULTIARCH-"; do
+          f="\$prefix\$basename"
+          dpkg-divert --add --rename --divert /usr/bin/\$f.original /usr/bin/\$f
+          update-alternatives --install /usr/bin/\$f \$f /bin/false 1000
+          update-alternatives --set                  \$f /bin/false
+          ln -s /bin/false /usr/local/bin/\$f
+          done
+          done
+          ln -fs /usr/bin/clang /usr/local/bin/\$DEB_HOST_MULTIARCH-cc
+          else
+          exit 1
+          fi
+          EOF
+          echo '::group::Running autopkgtest'
           autopkgtest \
             --no-built-binaries \
-            --setup-commands "apt update && apt install openssl" \
+            --setup-commands "${{ github.workspace }}/setup-commands.sh" \
             --apt-upgrade \
-            "${{ github.workspace }}/deb-src"/*.dsc \
-            "$BUILD_DIR"/*.changes \
+            "${{ github.workspace }}/incoming/src-artifacts"/*.dsc \
+            "${{ github.workspace }}/incoming/bin-artifacts/${{ inputs.dist-version }}/${{ inputs.host-arch }}"/*.changes \
             -- \
             autopkgtest-virt-qemu \
             --cpus=$(nproc --all) \
@@ -535,3 +821,4 @@ jobs:
             --boot=efi \
             "$IMAGE" \
           ;
+          echo '::endgroup::'
