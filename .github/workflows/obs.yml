@@ -289,6 +289,7 @@ jobs:
           -Version:        0%{?_version}
           +Version:        $VER
           EOF
+          rm -f "$OBS_REPO_DIR/bcachefs-tools.spec.orig"
           git add .
       - name: Ensure that all OBS repo state entries are signed, or sign them
         timeout-minutes: 1
