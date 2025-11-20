@@ -476,7 +476,7 @@ int cmd_reconcile_wait(int argc, char *argv[])
 		{ "help",		no_argument,		NULL, 'h' },
 		{ NULL }
 	};
-	unsigned types = ~0U;
+	unsigned types = ~0U & ~BIT(BCH_REBALANCE_ACCOUNTING_pending);
 	int opt;
 
 	while ((opt = getopt_long(argc, argv, "t:h", longopts, NULL)) != -1)
