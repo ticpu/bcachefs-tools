@@ -39,9 +39,25 @@ static inline bool entry_is_transaction_start(struct jset_entry *entry)
 	return entry->type == BCH_JSET_ENTRY_log && !entry->level;
 }
 
+static inline bool entry_log_str_eq(struct jset_entry_log *l, const char *s)
+{
+	return !strncmp(s, l->d, jset_entry_log_msg_bytes(l));
+}
+
 static inline bool entry_is_log_msg(struct jset_entry *entry)
 {
-	return entry->type == BCH_JSET_ENTRY_log && entry->level;
+	if (!(entry->type == BCH_JSET_ENTRY_log && entry->level))
+		return false;
+
+	struct jset_entry_log *l = container_of(entry, struct jset_entry_log, entry);
+
+	if (entry_log_str_eq(l, "rebalance") ||
+	    entry_log_str_eq(l, "reconcile") ||
+	    entry_log_str_eq(l, "copygc") ||
+	    entry_log_str_eq(l, "promote"))
+		return false;
+
+	return true;
 }
 
 static inline bool entry_is_print_key(struct jset_entry *entry)
@@ -84,6 +100,8 @@ typedef struct {
 	bool				blacklisted;
 	bool				flush_only;
 	bool				datetime_only;
+	bool				headers_only;
+	bool				all_headers;
 	bool				log;
 	bool				log_only;
 	bool				print_offset;
@@ -189,10 +207,9 @@ static bool entry_matches_msg_filter(transaction_msg_filter f,
 				     struct jset_entry *entry)
 {
 	struct jset_entry_log *l = container_of(entry, struct jset_entry_log, entry);
-	unsigned b = jset_entry_log_msg_bytes(l);
 
 	darray_for_each(f.f, i)
-		if (!strncmp(*i, l->d, b))
+		if (entry_log_str_eq(l, *i))
 			return true;
 	return false;
 }
@@ -274,12 +291,16 @@ static void journal_entry_header_to_text(struct printbuf *out, struct bch_fs *c,
 	prt_printf(out,
 		   "\n%s"
 		   "journal entry     %llu\n"
+		   "  bytes           %zu\n"
+		   "  sectors         %zu\n"
 		   "  version         %u\n"
 		   "  last seq        %llu\n"
 		   "  flush           %u\n"
 		   "  written at      ",
 		   blacklisted ? "blacklisted " : "",
 		   le64_to_cpu(p->j.seq),
+		   vstruct_bytes(&p->j),
+		   vstruct_sectors(&p->j, c->block_bits),
 		   le32_to_cpu(p->j.version),
 		   le64_to_cpu(p->j.last_seq),
 		   !JSET_NO_FLUSH(&p->j));
@@ -380,12 +401,19 @@ static void journal_replay_print(struct bch_fs *c,
 	if (!f.filtering) {
 		journal_entry_header_to_text(&buf, c, p, blacklisted);
 
-		while (entry < end &&
-		       vstruct_next(entry) <= end) {
-			print_one_entry(&buf, c, f, p, blacklisted, entry);
-			entry = vstruct_next(entry);
+		if (!f.headers_only) {
+			while (entry < end &&
+			       vstruct_next(entry) <= end) {
+				print_one_entry(&buf, c, f, p, blacklisted, entry);
+				entry = vstruct_next(entry);
+			}
 		}
 	} else {
+		if (f.all_headers) {
+			journal_entry_header_to_text(&buf, c, p, blacklisted);
+			printed_header = true;
+		}
+
 		while (true) {
 			entry = transaction_start(entry, end);
 			if (entry >= end ||
@@ -430,6 +458,8 @@ static void list_journal_usage(void)
 	     "  -B, --blacklisted                Include blacklisted entries\n"
 	     "  -F, --flush-only                 Only print flush entries/commits\n"
 	     "  -D, --datetime                   Print datetime entries only\n"
+	     "  -H, --headers-only               Print journal entry headers only\n"
+	     "      --all-headers                Print all journal entry headers, even if no transactions matched\n"
 	     "  -l, --log                        When filtering, include log-only entries\n"
 	     "  -L, --log-only                   Only print transactions containing log messages\n"
 	     "  -o, --offset                     Print offset of each subentry\n"
@@ -453,6 +483,8 @@ int cmd_list_journal(int argc, char *argv[])
 		{ "blacklisted",	no_argument,		NULL, 'B' },
 		{ "flush-only",		no_argument,		NULL, 'F' },
 		{ "datetime",		no_argument,		NULL, 'D' },
+		{ "headers-only",	no_argument,		NULL, 'H' },
+		{ "all-headers",	no_argument,		NULL, 127 },
 		{ "log",		no_argument,		NULL, 'l' },
 		{ "log-only",		no_argument,		NULL, 'L' },
 		{ "offset",		no_argument,		NULL, 'o' },
@@ -482,7 +514,7 @@ int cmd_list_journal(int argc, char *argv[])
 	opt_set(opts, read_journal_only,true);
 	opt_set(opts, read_entire_journal, true);
 
-	while ((opt = getopt_long(argc, argv, "adn:BFMDlLob:t:k:V:vh",
+	while ((opt = getopt_long(argc, argv, "adn:BFMDHlLob:t:k:V:vh",
 				  longopts, NULL)) != -1)
 		switch (opt) {
 		case 'a':
@@ -504,6 +536,12 @@ int cmd_list_journal(int argc, char *argv[])
 			break;
 		case 'D':
 			f.datetime_only = true;
+			break;
+		case 'H':
+			f.headers_only = true;
+			break;
+		case 127:
+			f.all_headers = true;
 			break;
 		case 'l':
 			f.log = true;
