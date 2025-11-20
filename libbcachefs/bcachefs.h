@@ -593,6 +593,7 @@ struct bch_dev {
 	 * Committed by bch2_write_super() -> bch_fs_mi_update()
 	 */
 	struct bch_member_cpu	mi;
+	u64			btree_allocated_bitmap_gc;
 	atomic64_t		errors[BCH_MEMBER_ERROR_NR];
 	unsigned long		write_errors_start;
 
@@ -865,6 +866,8 @@ struct bch_fs {
 	struct closure		sb_write;
 	struct mutex		sb_lock;
 
+	struct delayed_work	maybe_schedule_btree_bitmap_gc;
+
 	/* snapshot.c: */
 	struct snapshot_table __rcu *snapshots;
 	struct mutex		snapshot_table_lock;
@@ -1037,7 +1040,7 @@ struct bch_fs {
 	struct bio_set		bio_write;
 	struct bio_set		replica_set;
 	struct mutex		bio_bounce_pages_lock;
-	mempool_t		bio_bounce_pages;
+	mempool_t		bio_bounce_bufs;
 	struct bucket_nocow_lock_table
 				nocow_locks;
 	struct rhashtable	promote_table;
