@@ -13,7 +13,10 @@
 # Disable LTO for now until more testing can be done.
 %global _lto_cflags %{nil}
 
-%global make_opts VERSION="%{version}" BCACHEFS_FUSE=1 BUILD_VERBOSE=1 PREFIX=%{_prefix} ROOT_SBINDIR=%{_sbindir}
+# We don't want FUSE parts built.
+# BCACHEFS_FUSE=1
+
+%global make_opts VERSION="%{version}" BUILD_VERBOSE=1 PREFIX=%{_prefix} ROOT_SBINDIR=%{_sbindir}
 
 %global MSRV 1.77
 %global MINIMAL_KERNEL_VERSION_FOR_TOOLS 6.11.3
@@ -82,7 +85,7 @@ BuildRequires:  kernel-headers >= %{MINIMAL_KERNEL_VERSION_FOR_TOOLS}
 BuildRequires:  libaio-devel >= 0.3.111
 BuildRequires:  libattr-devel
 BuildRequires:  pkgconfig(blkid)
-BuildRequires:  pkgconfig(fuse3) >= 3.7
+# BuildRequires:  pkgconfig(fuse3) >= 3.7
 BuildRequires:  pkgconfig(libkeyutils)
 BuildRequires:  pkgconfig(liblz4)
 BuildRequires:  pkgconfig(libsodium)
@@ -126,21 +129,21 @@ check, modify and correct any inconsistencies in the bcachefs filesystem.
 
 # ----------------------------------------------------------------------------
 
-%package -n fuse-bcachefs
-Summary:        FUSE implementation of bcachefs
-Requires:       %{name}%{?_isa} = %{version}-%{release}
-
-BuildArch:      noarch
-
-%description -n fuse-bcachefs
-This package is an experimental implementation of bcachefs leveraging FUSE to
-mount, create, check, modify and correct any inconsistencies in the bcachefs filesystem.
-
-%files -n fuse-bcachefs
-%license COPYING
-%{_sbindir}/mount.fuse.bcachefs
-%{_sbindir}/fsck.fuse.bcachefs
-%{_sbindir}/mkfs.fuse.bcachefs
+# %package -n fuse-bcachefs
+# Summary:        FUSE implementation of bcachefs
+# Requires:       %{name}%{?_isa} = %{version}-%{release}
+#
+# BuildArch:      noarch
+#
+# %description -n fuse-bcachefs
+# This package is an experimental implementation of bcachefs leveraging FUSE to
+# mount, create, check, modify and correct any inconsistencies in the bcachefs filesystem.
+#
+# %files -n fuse-bcachefs
+# %license COPYING
+# %{_sbindir}/mount.fuse.bcachefs
+# %{_sbindir}/fsck.fuse.bcachefs
+# %{_sbindir}/mkfs.fuse.bcachefs
 
 # ----------------------------------------------------------------------------
 
