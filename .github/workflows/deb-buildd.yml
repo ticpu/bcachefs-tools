@@ -486,7 +486,7 @@ jobs:
     if: inputs.dist-name == 'debian' && inputs.dist-version != 'trixie' && inputs.machine-arch == 'amd64' && inputs.build-arch == inputs.machine-arch && inputs.host-arch == inputs.build-arch
     runs-on: ${{ inputs.runs-on }}
     env:
-      CONTAINER_DISTRO: trixie
+      CONTAINER_DISTRO: forky
     strategy:
       fail-fast: false
       matrix:
@@ -807,7 +807,9 @@ jobs:
           exit 1
           fi
           EOF
+          mkdir ${{ github.workspace }}/dkms
           echo '::group::Running autopkgtest'
+          set +e
           autopkgtest \
             --no-built-binaries \
             --setup-commands "${{ github.workspace }}/setup-commands.sh" \
@@ -819,6 +821,19 @@ jobs:
             --cpus=$(nproc --all) \
             --qemu-options="$QEMU_OPTIONS" \
             --boot=efi \
+            --shared-dir src=${{ github.workspace }}/dkms,dst=/var/lib/dkms/bcachefs,rw \
             "$IMAGE" \
           ;
+          AUTOPKGTEST_STATUS=$?
+          set -e
           echo '::endgroup::'
+          if [ ${AUTOPKGTEST_STATUS} -ne 0 ]; then
+            cd "${{ github.workspace }}/dkms"
+            find . -type f -name '*.log' -print0 | xargs --null -I'{}' sh -c "   \
+              echo '::group::DKMS log {}' &&                                     \
+              cat '{}' &&                                                        \
+              echo '::error file={}::dkms failed!' &&                            \
+              echo '::endgroup::'                                                \
+            "
+          fi
+          exit ${AUTOPKGTEST_STATUS}
