@@ -730,6 +730,7 @@ int bch2_btree_node_read_done(struct bch_fs *c, struct bch_dev *ca,
 					     btree_node_bad_seq,
 					     "got wrong btree node: got\n%s",
 					     (printbuf_reset(&buf),
+					      printbuf_indent_add(&buf, 2),
 					      bch2_btree_node_header_to_text(&buf, b->data),
 					      buf.buf));
 			} else {

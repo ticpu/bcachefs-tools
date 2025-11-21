@@ -151,30 +151,28 @@ journal_error_check_stuck(struct journal *j, int error, unsigned flags)
 	return stuck;
 }
 
+void bch2_journal_do_writes_locked(struct journal *j)
+{
+	lockdep_assert_held(&j->lock);
+
+	struct bch_fs *c = container_of(j, struct bch_fs, journal);
+	u64 seq = journal_last_unallocated_seq(j);
+	struct journal_buf *w = j->buf + (seq & JOURNAL_BUF_MASK);
+
+	if (seq &&
+	    !w->write_started &&
+	    !journal_state_seq_count(j, j->reservations, seq)) {
+		j->seq_write_started = seq;
+		w->write_started = true;
+		closure_get(&c->cl);
+		closure_call(&w->io, bch2_journal_write, j->wq, NULL);
+	}
+}
+
 void bch2_journal_do_writes(struct journal *j)
 {
-	struct bch_fs *c = container_of(j, struct bch_fs, journal);
-
-	for (u64 seq = journal_last_unwritten_seq(j);
-	     seq <= journal_cur_seq(j);
-	     seq++) {
-		unsigned idx = seq & JOURNAL_BUF_MASK;
-		struct journal_buf *w = j->buf + idx;
-
-		if (w->write_started && !w->write_allocated)
-			break;
-		if (w->write_started)
-			continue;
-
-		if (!journal_state_seq_count(j, j->reservations, seq)) {
-			j->seq_write_started = seq;
-			w->write_started = true;
-			closure_get(&c->cl);
-			closure_call(&w->io, bch2_journal_write, j->wq, NULL);
-		}
-
-		break;
-	}
+	guard(spinlock)(&j->lock);
+	bch2_journal_do_writes_locked(j);
 }
 
 /*
@@ -188,7 +186,7 @@ void bch2_journal_buf_put_final(struct journal *j, u64 seq)
 
 	if (__bch2_journal_pin_put(j, seq))
 		bch2_journal_update_last_seq(j);
-	bch2_journal_do_writes(j);
+	bch2_journal_do_writes_locked(j);
 
 	/*
 	 * for __bch2_next_write_buffer_flush_journal_buf(), when quiescing an
@@ -820,11 +818,14 @@ recheck_need_open:
 
 		seq = res.seq;
 		buf = journal_seq_to_buf(j, seq);
-		buf->must_flush = true;
 
-		if (!buf->flush_time) {
-			buf->flush_time	= local_clock() ?: 1;
-			buf->expires = jiffies;
+		scoped_guard(spinlock, &j->lock) {
+			buf->must_flush = true;
+
+			if (!buf->flush_time) {
+				buf->flush_time	= local_clock() ?: 1;
+				buf->expires = jiffies;
+			}
 		}
 
 		if (parent && !closure_wait(&buf->wait, parent))
@@ -936,11 +937,14 @@ int __bch2_journal_meta(struct journal *j)
 	try(bch2_journal_res_get(j, &res, jset_u64s(0), 0, NULL));
 
 	struct journal_buf *buf = j->buf + (res.seq & JOURNAL_BUF_MASK);
-	buf->must_flush = true;
 
-	if (!buf->flush_time) {
-		buf->flush_time	= local_clock() ?: 1;
-		buf->expires = jiffies;
+	scoped_guard(spinlock, &j->lock) {
+		buf->must_flush = true;
+
+		if (!buf->flush_time) {
+			buf->flush_time	= local_clock() ?: 1;
+			buf->expires = jiffies;
+		}
 	}
 
 	bch2_journal_res_put(j, &res);
