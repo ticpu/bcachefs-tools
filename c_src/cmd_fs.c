@@ -428,9 +428,12 @@ static int fs_usage_v1_to_text(struct printbuf *out,
 		accounting_types |= BIT(BCH_DISK_ACCOUNTING_btree);
 
 	if (fields & FS_USAGE_rebalance_work) {
-		accounting_types |= BIT(BCH_DISK_ACCOUNTING_rebalance_work);
-		accounting_types |= BIT(BCH_DISK_ACCOUNTING_reconcile_work);
-		accounting_types |= BIT(BCH_DISK_ACCOUNTING_dev_leaving);
+		if (bcachefs_kernel_version() < bcachefs_metadata_version_reconcile) {
+			accounting_types |= BIT(BCH_DISK_ACCOUNTING_rebalance_work);
+		} else {
+			accounting_types |= BIT(BCH_DISK_ACCOUNTING_reconcile_work);
+			accounting_types |= BIT(BCH_DISK_ACCOUNTING_dev_leaving);
+		}
 	}
 
 	struct bch_ioctl_query_accounting *a =
