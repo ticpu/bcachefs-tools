@@ -253,11 +253,6 @@ cp %{_sourcedir}/cargo.config $PWD/.cargo/config.toml
 # Purge unneeded debian stuff
 rm -rfv %{buildroot}/%{_datadir}/initramfs-tools
 
-%if ! %{with fuse}
-# Purge useless symlink stubs
-rm -rf %{buildroot}%{_sbindir}/*.fuse.bcachefs
-%endif
-
 %if 0%{?_with_kmp} != 0
 for kmp_flavor in %{?flavors_to_build}; do
   %make_build \
