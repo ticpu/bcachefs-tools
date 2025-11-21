@@ -10,10 +10,13 @@
 %global dist .suse%{?suse_version}
 %endif
 
+# Disable the build for FUSE-based bcachefs
+%bcond_with fuse
+
 # Disable LTO for now until more testing can be done.
 %global _lto_cflags %{nil}
 
-%global make_opts VERSION="%{version}" BCACHEFS_FUSE=1 BUILD_VERBOSE=1 PREFIX=%{_prefix} ROOT_SBINDIR=%{_sbindir}
+%global make_opts VERSION="%{version}" %{?with_fuse:BCACHEFS_FUSE=1} BUILD_VERBOSE=1 PREFIX=%{_prefix} ROOT_SBINDIR=%{_sbindir}
 
 %global MSRV 1.77
 %global MINIMAL_KERNEL_VERSION_FOR_TOOLS 6.11.3
@@ -82,7 +85,9 @@ BuildRequires:  kernel-headers >= %{MINIMAL_KERNEL_VERSION_FOR_TOOLS}
 BuildRequires:  libaio-devel >= 0.3.111
 BuildRequires:  libattr-devel
 BuildRequires:  pkgconfig(blkid)
+%if %{with fuse}
 BuildRequires:  pkgconfig(fuse3) >= 3.7
+%endif
 BuildRequires:  pkgconfig(libkeyutils)
 BuildRequires:  pkgconfig(liblz4)
 BuildRequires:  pkgconfig(libsodium)
@@ -124,6 +129,7 @@ check, modify and correct any inconsistencies in the bcachefs filesystem.
 %{_mandir}/man8/bcachefs.8*
 %{_udevrulesdir}/64-bcachefs.rules
 
+%if %{with fuse}
 # ----------------------------------------------------------------------------
 
 %package -n fuse-bcachefs
@@ -143,6 +149,7 @@ mount, create, check, modify and correct any inconsistencies in the bcachefs fil
 %{_sbindir}/mkfs.fuse.bcachefs
 
 # ----------------------------------------------------------------------------
+%endif
 
 %package -n %{dkmsname}
 Summary:        Bcachefs kernel module managed by DKMS
@@ -153,6 +160,12 @@ Requires:       gcc
 Requires:       make
 Requires:       perl
 Requires:       python3
+
+%if ! %{with fuse}
+# Ensure that fuse-bcachefs is removed when it is disabled
+Conflicts:      fuse-bcachefs < %{version}-%{release}
+Obsoletes:      fuse-bcachefs < %{version}-%{release}
+%endif
 
 Requires:       %{name} = %{version}-%{release}
 
@@ -240,6 +253,11 @@ cp %{_sourcedir}/cargo.config $PWD/.cargo/config.toml
 # Purge unneeded debian stuff
 rm -rfv %{buildroot}/%{_datadir}/initramfs-tools
 
+%if ! %{with fuse}
+# Purge useless symlink stubs
+rm -rf %{buildroot}%{_sbindir}/*.fuse.bcachefs
+%endif
+
 %if 0%{?_with_kmp} != 0
 for kmp_flavor in %{?flavors_to_build}; do
   %make_build \
@@ -251,6 +269,8 @@ done
 %endif
 
 %changelog
+* Fri Nov 21 2025 Neal Gompa <neal@gompa.dev>
+- Turn off fuse-bcachefs by default
 * Sun Nov 19 2025 Roman Lebedev <lebedev.ri@gmail.com>
 - Implement KMP package for OpenSUSE Tumbleweed
 * Sun Oct 19 2025 Roman Lebedev <lebedev.ri@gmail.com>
