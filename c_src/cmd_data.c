@@ -499,6 +499,8 @@ int cmd_reconcile_wait(int argc, char *argv[])
 
 	struct bchfs_handle fs = bcache_fs_open(fs_path);
 
+	write_file_str(fs.sysfs_fd, "internal/trigger_reconcile_wakeup", "1");
+
 	while (true) {
 		CLASS(printbuf, buf)();
 		bool pending = reconcile_status(&buf, fs, types);
