@@ -71,10 +71,10 @@ int cmd_reset_counters(int argc, char *argv[])
 
 	if (!to_reset.nr) {
 		for (unsigned i = 0; i < BCH_COUNTER_NR; i++)
-			percpu_u64_set(&c->counters[i], 0);
+			percpu_u64_set(&c->counters.now[i], 0);
 	} else {
 		darray_for_each(to_reset, i)
-			percpu_u64_set(&c->counters[*i], 0);
+			percpu_u64_set(&c->counters.now[*i], 0);
 	}
 
 	scoped_guard(mutex, &c->sb_lock)

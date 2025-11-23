@@ -5,6 +5,8 @@
 #include "btree/bset.h"
 #include "btree/types.h"
 
+#include "sb/counters.h"
+
 void bch2_trans_updates_to_text(struct printbuf *, struct btree_trans *);
 void bch2_btree_path_to_text(struct printbuf *, struct btree_trans *,
 			     btree_path_idx_t, struct btree_path *);
@@ -485,12 +487,20 @@ static inline void bch2_btree_iter_set_snapshot(struct btree_iter *iter, u32 sna
 
 void bch2_trans_iter_exit(struct btree_iter *);
 
+static inline bool btree_id_cached(enum btree_id btree)
+{
+	return BIT_ULL(btree) &
+		(BIT_ULL(BTREE_ID_alloc)|
+		 BIT_ULL(BTREE_ID_inodes)|
+		 BIT_ULL(BTREE_ID_logged_ops));
+}
+
 static inline enum btree_iter_update_trigger_flags
 bch2_btree_iter_flags(struct btree_trans *trans,
 		      unsigned btree_id, unsigned level,
 		      enum btree_iter_update_trigger_flags flags)
 {
-	if (level || !btree_id_cached(trans->c, btree_id)) {
+	if (level || !btree_id_cached(btree_id)) {
 		flags &= ~BTREE_ITER_cached;
 		flags &= ~BTREE_ITER_with_key_cache;
 	} else if (!(flags & BTREE_ITER_cached))

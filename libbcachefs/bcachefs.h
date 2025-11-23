@@ -261,19 +261,12 @@
 
 #include "journal/types.h"
 
+#include "sb/counters_types.h"
 #include "sb/errors_types.h"
 #include "sb/members_types.h"
 
 #include "snapshots/snapshot_types.h"
 #include "snapshots/subvolume_types.h"
-
-#define count_event(_c, _name)	this_cpu_inc((_c)->counters[BCH_COUNTER_##_name])
-
-#define trace_and_count(_c, _name, ...)					\
-do {									\
-	count_event(_c, _name);						\
-	trace_##_name(__VA_ARGS__);					\
-} while (0)
 
 #define bch2_fs_init_fault(name)					\
 	dynamic_fault("bcachefs:bch_fs_init:" name)
@@ -288,8 +281,8 @@ do {									\
 
 #ifdef BCACHEFS_LOG_PREFIX
 
-#define bch2_log_msg(_c, fmt)			"bcachefs (%s): " fmt, ((_c)->name)
-#define bch2_fmt_dev(_ca, fmt)			"bcachefs (%s): " fmt "\n", ((_ca)->name)
+#define bch2_log_msg(_c, fmt)			"bcachefs (%s): " fmt, bch2_fs_name(_c)
+#define bch2_fmt_dev(_ca, fmt)			"bcachefs (%s): " fmt "\n", bch2_dev_name(_ca)
 #define bch2_fmt_dev_offset(_ca, _offset, fmt)	"bcachefs (%s sector %llu): " fmt "\n", ((_ca)->name), (_offset)
 #define bch2_fmt_inum(_c, _inum, fmt)		"bcachefs (%s inum %llu): " fmt "\n", ((_c)->name), (_inum)
 #define bch2_fmt_inum_offset(_c, _inum, _offset, fmt)			\
@@ -357,6 +350,10 @@ do {									\
 #define bch_verbose(c, ...)		bch_log(c, KERN_DEBUG, __VA_ARGS__)
 #define bch_verbose_ratelimited(c, ...)	bch_log_ratelimited(c, KERN_DEBUG, __VA_ARGS__)
 
+#define bch_info_dev(ca, fmt, ...) \
+	bch2_print(c, KERN_INFO bch2_fmt_dev(ca, fmt), ##__VA_ARGS__)
+#define bch_notice_dev(ca, fmt, ...) \
+	bch2_print(c, KERN_NOTICE bch2_fmt_dev(ca, fmt), ##__VA_ARGS__)
 #define bch_err_dev(ca, fmt, ...) \
 	bch2_print(c, KERN_ERR bch2_fmt_dev(ca, fmt), ##__VA_ARGS__)
 #define bch_err_dev_offset(ca, _offset, fmt, ...) \
@@ -396,6 +393,19 @@ do {									\
 do {									\
 	if (should_print_err(_ret))					\
 		bch_err(_c, "%s(): error " _msg " %s", __func__,	\
+			##__VA_ARGS__, bch2_err_str(_ret));		\
+} while (0)
+
+#define bch_err_fn_dev(_ca, _ret)					\
+do {									\
+	if (should_print_err(_ret))					\
+		bch_err_dev(_ca, "%s(): error %s", __func__, bch2_err_str(_ret));\
+} while (0)
+
+#define bch_err_msg_dev(_ca, _ret, _msg, ...)				\
+do {									\
+	if (should_print_err(_ret))					\
+		bch_err_dev(_ca, "%s(): error " _msg " %s", __func__,	\
 			##__VA_ARGS__, bch2_err_str(_ret));		\
 } while (0)
 
@@ -934,7 +944,6 @@ struct bch_fs {
 	bool			btree_trans_barrier_initialized;
 
 	struct btree_key_cache	btree_key_cache;
-	unsigned		btree_key_cache_btrees;
 
 	struct btree_write_buffer btree_write_buffer;
 
@@ -948,6 +957,9 @@ struct bch_fs {
 	 * draining, such as read-only transition.
 	 */
 	struct workqueue_struct *write_ref_wq;
+
+	struct workqueue_struct *promote_wq;
+	struct semaphore __percpu *promote_limit;
 
 	/* ALLOCATION */
 	struct bch_devs_mask	online_devs;
@@ -1034,7 +1046,6 @@ struct bch_fs {
 	struct mutex		gc_gens_lock;
 
 	/* IO PATH */
-	struct semaphore	io_in_flight;
 	struct bio_set		bio_read;
 	struct bio_set		bio_read_split;
 	struct bio_set		bio_write;
@@ -1147,8 +1158,7 @@ struct bch_fs {
 
 	u64			last_bucket_seq_cleanup;
 
-	u64			counters_on_mount[BCH_COUNTER_NR];
-	u64 __percpu		*counters;
+	struct bch_fs_counters	counters;
 
 	struct bch2_time_stats	times[BCH_TIME_STAT_NR];
 
@@ -1165,7 +1175,7 @@ struct bch_fs {
 
 static inline int __bch2_err_trace(struct bch_fs *c, int err)
 {
-	this_cpu_inc(c->counters[BCH_COUNTER_error_throw]);
+	this_cpu_inc(c->counters.now[BCH_COUNTER_error_throw]);
 	trace_error_throw(c, err, _THIS_IP_);
 	return err;
 }
@@ -1207,11 +1217,6 @@ static inline unsigned block_bytes(const struct bch_fs *c)
 static inline unsigned block_sectors(const struct bch_fs *c)
 {
 	return c->opts.block_size >> 9;
-}
-
-static inline bool btree_id_cached(const struct bch_fs *c, enum btree_id btree)
-{
-	return c->btree_key_cache_btrees & (1U << btree);
 }
 
 static inline struct timespec64 bch2_time_to_timespec(const struct bch_fs *c, s64 time)
@@ -1299,6 +1304,16 @@ static inline const char *strip_bch2(const char *msg)
 	if (!strncmp("bch2_", msg, 5))
 		return msg + 5;
 	return msg;
+}
+
+static inline const char *bch2_fs_name(const struct bch_fs *c)
+{
+	return c->name;
+}
+
+static inline const char *bch2_dev_name(const struct bch_dev *ca)
+{
+	return ca->name;
 }
 
 #endif /* _BCACHEFS_H */

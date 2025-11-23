@@ -614,6 +614,8 @@ static void __bch2_fs_free(struct bch_fs *c)
 	kfree(rcu_dereference_protected(c->disk_groups, 1));
 	kfree(c->journal_seq_blacklist_table);
 
+	if (c->promote_wq)
+		destroy_workqueue(c->promote_wq);
 	if (c->write_ref_wq)
 		destroy_workqueue(c->write_ref_wq);
 	if (c->btree_write_submit_wq)
@@ -761,7 +763,9 @@ int bch2_fs_init_rw(struct bch_fs *c)
 	    !(c->btree_write_submit_wq = alloc_workqueue("bcachefs_btree_write_sumit",
 				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM, 1)) ||
 	    !(c->write_ref_wq = alloc_workqueue("bcachefs_write_ref",
-				WQ_FREEZABLE, 0)))
+				WQ_FREEZABLE, 0)) ||
+	    !(c->promote_wq = alloc_workqueue("bcachefs_promotes",
+				WQ_FREEZABLE, 2)))
 		return bch_err_throw(c, ENOMEM_fs_other_alloc);
 
 	int ret = bch2_fs_btree_interior_update_init(c) ?:
@@ -1088,8 +1092,6 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 
 	seqcount_init(&c->usage_lock);
 
-	sema_init(&c->io_in_flight, 128);
-
 	INIT_LIST_HEAD(&c->vfs_inodes_list);
 	mutex_init(&c->vfs_inodes_lock);
 
@@ -1125,11 +1127,6 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 		return -EINVAL;
 	}
 #endif
-
-	c->btree_key_cache_btrees |= 1U << BTREE_ID_alloc;
-	if (c->opts.inodes_use_key_cache)
-		c->btree_key_cache_btrees |= 1U << BTREE_ID_inodes;
-	c->btree_key_cache_btrees |= 1U << BTREE_ID_logged_ops;
 
 	c->block_bits		= ilog2(block_sectors(c));
 	c->btree_foreground_merge_threshold = BTREE_FOREGROUND_MERGE_THRESHOLD(c);
@@ -1232,6 +1229,10 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 		darray_for_each(*sbs, sb)
 			try(bch2_dev_attach_bdev(c, sb, out));
 
+	/*
+	 * Do this early, so that we never expose a filesystem object that
+	 * hasn't been version downgraded
+	 */
 	try(bch2_fs_opt_version_init(c, out));
 
 	/*
@@ -1391,9 +1392,9 @@ int bch2_fs_resize_on_mount(struct bch_fs *c)
 			u64 new_nbuckets = div64_u64(get_capacity(ca->disk_sb.bdev->bd_disk),
 						     ca->mi.bucket_size);
 
-			bch_info(ca, "resizing to size %llu", new_nbuckets * ca->mi.bucket_size);
+			bch_info_dev(ca, "resizing to size %llu", new_nbuckets * ca->mi.bucket_size);
 			int ret = bch2_dev_buckets_resize(c, ca, new_nbuckets);
-			bch_err_fn(ca, ret);
+			bch_err_fn_dev(ca, ret);
 			if (ret) {
 				enumerated_ref_put(&ca->io_ref[READ],
 						   BCH_DEV_READ_REF_fs_resize_on_mount);
@@ -1491,6 +1492,12 @@ static struct bch_fs *__bch2_fs_open(darray_const_str *devices,
 	ret = PTR_ERR_OR_ZERO(c);
 	if (ret)
 		goto err;
+
+	/* Log opt_version_init() message before doing actual filesystem startup */
+	CLASS(printbuf, msg_with_prefix)();
+	prt_str(&msg_with_prefix, out->buf);
+	bch2_print_str(c, KERN_INFO, msg_with_prefix.buf);
+	printbuf_reset(out);
 
 	if (!c->opts.nostart) {
 		ret = __bch2_fs_start(c, out);

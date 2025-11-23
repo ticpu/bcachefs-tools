@@ -28,6 +28,8 @@
 
 #include "init/error.h"
 
+#include "sb/counters.h"
+
 #include "snapshots/subvolume.h"
 
 #include "util/clock.h"
@@ -223,6 +225,8 @@ static noinline void promote_free(struct bch_read_bio *rbio, int ret)
 	async_object_list_del(c, promote, op->list_idx);
 	async_object_list_del(c, rbio, rbio->list_idx);
 
+	up(per_cpu_ptr(c->promote_limit, op->cpu));
+
 	bch2_data_update_exit(&op->write, ret);
 
 	enumerated_ref_put(&c->writes, BCH_WRITE_REF_promote);
@@ -252,7 +256,7 @@ static noinline void promote_start(struct bch_read_bio *rbio)
 	trace_and_count(op->write.op.c, io_read_promote, &rbio->bio);
 
 	INIT_WORK(&op->work, promote_start_work);
-	queue_work(rbio->c->write_ref_wq, &op->work);
+	queue_work(rbio->c->promote_wq, &op->work);
 }
 
 static struct bch_read_bio *__promote_alloc(struct btree_trans *trans,
@@ -299,16 +303,23 @@ static struct bch_read_bio *__promote_alloc(struct btree_trans *trans,
 	}
 
 	if (!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_promote))
-		return ERR_PTR(-BCH_ERR_nopromote_no_writes);
+		return ERR_PTR(bch_err_throw(c, nopromote_no_writes));
+
+	int cpu = raw_smp_processor_id();
+	if (down_trylock(per_cpu_ptr(c->promote_limit, cpu))) {
+		ret = bch_err_throw(c, nopromote_ratelimited);
+		goto err_put;
+	}
 
 	struct promote_op *op = kzalloc(sizeof(*op), GFP_KERNEL);
 	if (!op) {
 		ret = bch_err_throw(c, nopromote_enomem);
-		goto err_put;
+		goto err_up_limit;
 	}
 
 	op->start_time = local_clock();
 	op->pos = pos;
+	op->cpu	= cpu;
 
 	if (rhashtable_lookup_insert_fast(&c->promote_table, &op->hash,
 					  bch_promote_params)) {
@@ -347,6 +358,8 @@ err:
 	bch2_bio_free_pages_pool(c, &op->write.op.wbio.bio);
 	/* We may have added to the rhashtable and thus need rcu freeing: */
 	kfree_rcu(op, rcu);
+err_up_limit:
+	up(per_cpu_ptr(c->promote_limit, cpu));
 err_put:
 	enumerated_ref_put(&c->writes, BCH_WRITE_REF_promote);
 	return ERR_PTR(ret);
@@ -659,7 +672,7 @@ static void bch2_rbio_retry(struct work_struct *work)
 	struct bch_io_failures failed = { .nr = 0 };
 
 	trace_io_read_retry(&rbio->bio);
-	this_cpu_add(c->counters[BCH_COUNTER_io_read_retry],
+	this_cpu_add(c->counters.now[BCH_COUNTER_io_read_retry],
 		     bvec_iter_sectors(rbio->bvec_iter));
 
 	{
@@ -829,7 +842,7 @@ static void bch2_read_decompress_err(struct work_struct *work)
 
 	struct bch_dev *ca = rbio->have_ioref ? bch2_dev_have_ref(c, rbio->pick.ptr.dev) : NULL;
 	if (ca)
-		bch_err_ratelimited(ca, "%s", buf.buf);
+		bch_err_dev_ratelimited(ca, "%s", buf.buf);
 	else
 		bch_err_ratelimited(c, "%s", buf.buf);
 
@@ -848,7 +861,7 @@ static void bch2_read_decrypt_err(struct work_struct *work)
 
 	struct bch_dev *ca = rbio->have_ioref ? bch2_dev_have_ref(c, rbio->pick.ptr.dev) : NULL;
 	if (ca)
-		bch_err_ratelimited(ca, "%s", buf.buf);
+		bch_err_dev_ratelimited(ca, "%s", buf.buf);
 	else
 		bch_err_ratelimited(c, "%s", buf.buf);
 
@@ -1100,7 +1113,7 @@ int __bch2_read_extent(struct btree_trans *trans, struct bch_read_bio *orig,
 		swap(iter.bi_size, bytes);
 		bio_advance_iter(&orig->bio, &iter, bytes);
 		zero_fill_bio_iter(&orig->bio, iter);
-		this_cpu_add(c->counters[BCH_COUNTER_io_read_inline],
+		this_cpu_add(c->counters.now[BCH_COUNTER_io_read_inline],
 			     bvec_iter_sectors(iter));
 		goto out_read_done;
 	}
@@ -1304,9 +1317,9 @@ retry_pick:
 		trace_and_count(c, io_read_bounce, &rbio->bio);
 
 	if (!u)
-		this_cpu_add(c->counters[BCH_COUNTER_io_read], bio_sectors(&rbio->bio));
+		this_cpu_add(c->counters.now[BCH_COUNTER_io_read], bio_sectors(&rbio->bio));
 	else
-		this_cpu_add(c->counters[BCH_COUNTER_io_move_read], bio_sectors(&rbio->bio));
+		this_cpu_add(c->counters.now[BCH_COUNTER_io_move_read], bio_sectors(&rbio->bio));
 	bch2_increment_clock(c, bio_sectors(&rbio->bio), READ);
 
 	/*
@@ -1400,7 +1413,7 @@ err:
 	goto out_read_done;
 
 hole:
-	this_cpu_add(c->counters[BCH_COUNTER_io_read_hole],
+	this_cpu_add(c->counters.now[BCH_COUNTER_io_read_hole],
 		     bvec_iter_sectors(iter));
 	/*
 	 * won't normally happen in the data update (bch2_move_extent()) path,
@@ -1592,6 +1605,7 @@ void bch2_fs_io_read_exit(struct bch_fs *c)
 	bioset_exit(&c->bio_read_split);
 	bioset_exit(&c->bio_read);
 	mempool_exit(&c->bio_bounce_bufs);
+	free_percpu(c->promote_limit);
 }
 
 static void *bio_bounce_buf_alloc_fn(gfp_t gfp, void *pool_data)
@@ -1606,6 +1620,14 @@ static void bio_bounce_buf_free_fn(void *p, void *pool_data)
 
 int bch2_fs_io_read_init(struct bch_fs *c)
 {
+	c->promote_limit = alloc_percpu(struct semaphore);
+	if (!c->promote_limit)
+		return bch_err_throw(c, ENOMEM_promote_limit_init);
+
+	int cpu;
+	for_each_possible_cpu(cpu)
+		sema_init(per_cpu_ptr(c->promote_limit, cpu), 32);
+
 	if (mempool_init(&c->bio_bounce_bufs,
 			 max_t(unsigned,
 			       c->opts.btree_node_size,

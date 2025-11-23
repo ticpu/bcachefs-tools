@@ -46,6 +46,7 @@
 #include "journal/journal.h"
 #include "journal/reclaim.h"
 
+#include "sb/counters.h"
 #include "sb/errors.h"
 #include "sb/io.h"
 
@@ -164,6 +165,7 @@ write_attribute(trigger_btree_updates);
 write_attribute(trigger_freelist_wakeup);
 write_attribute(trigger_recalc_capacity);
 write_attribute(trigger_reconcile_wakeup);
+write_attribute(trigger_reconcile_pending_wakeup);
 write_attribute(trigger_delete_dead_snapshots);
 write_attribute(trigger_emergency_read_only);
 read_attribute(gc_gens_pos);
@@ -228,6 +230,8 @@ read_attribute(io_timers_read);
 read_attribute(io_timers_write);
 
 read_attribute(moving_ctxts);
+
+read_attribute(recent_counters);
 
 #ifdef CONFIG_BCACHEFS_TESTS
 write_attribute(perf_test);
@@ -386,6 +390,9 @@ SHOW(bch2_fs)
 	if (attr == &sysfs_moving_ctxts)
 		bch2_fs_moving_ctxts_to_text(out, c);
 
+	if (attr == &sysfs_recent_counters)
+		bch2_sb_recent_counters_to_text(out, &c->counters);
+
 	if (attr == &sysfs_write_refs)
 		enumerated_ref_to_text(out, &c->writes, bch2_write_refs);
 
@@ -477,6 +484,9 @@ STORE(bch2_fs)
 	if (attr == &sysfs_trigger_reconcile_wakeup)
 		bch2_reconcile_wakeup(c);
 
+	if (attr == &sysfs_trigger_reconcile_pending_wakeup)
+		bch2_reconcile_pending_wakeup(c);
+
 	if (attr == &sysfs_trigger_delete_dead_snapshots)
 		__bch2_delete_dead_snapshots(c);
 
@@ -545,8 +555,8 @@ SHOW(bch2_fs_counters)
 
 	#define x(t, n, f, ...) \
 		if (attr == &sysfs_##t) {					\
-			counter             = percpu_u64_get(&c->counters[BCH_COUNTER_##t]);\
-			counter_since_mount = counter - c->counters_on_mount[BCH_COUNTER_##t];\
+			counter             = percpu_u64_get(&c->counters.now[BCH_COUNTER_##t]);\
+			counter_since_mount = counter - c->counters.mount[BCH_COUNTER_##t];\
 			if (f & TYPE_SECTORS) {					\
 				counter <<= 9;					\
 				counter_since_mount <<= 9;			\
@@ -625,6 +635,7 @@ struct attribute *bch2_fs_internal_files[] = {
 	&sysfs_trigger_freelist_wakeup,
 	&sysfs_trigger_recalc_capacity,
 	&sysfs_trigger_reconcile_wakeup,
+	&sysfs_trigger_reconcile_pending_wakeup,
 	&sysfs_trigger_delete_dead_snapshots,
 	&sysfs_trigger_emergency_read_only,
 
@@ -633,6 +644,7 @@ struct attribute *bch2_fs_internal_files[] = {
 	&sysfs_copy_gc_wait,
 
 	&sysfs_moving_ctxts,
+	&sysfs_recent_counters,
 
 	&sysfs_internal_uuid,
 

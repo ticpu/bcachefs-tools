@@ -24,6 +24,8 @@
 #include "journal/journal.h"
 #include "journal/read.h"
 
+#include "sb/counters.h"
+
 #include "snapshots/snapshot.h"
 
 #include <linux/random.h>
@@ -3219,7 +3221,7 @@ void __bch2_trans_node_iter_init(struct btree_trans *trans,
 	flags |= BTREE_ITER_snapshot_field;
 	flags |= BTREE_ITER_all_snapshots;
 
-	if (!depth && btree_id_cached(trans->c, btree_id))
+	if (!depth && btree_id_cached(btree_id))
 		flags |= BTREE_ITER_with_key_cache;
 
 	bch2_trans_iter_init_common(trans, iter, btree_id, pos, locks_want, depth,
@@ -3348,9 +3350,15 @@ void *__bch2_trans_kmalloc(struct btree_trans *trans, size_t size, unsigned long
 
 static inline void check_srcu_held_too_long(struct btree_trans *trans)
 {
-	WARN(trans->srcu_held && time_after(jiffies, trans->srcu_lock_time + HZ * 10),
-	     "btree trans held srcu lock (delaying memory reclaim) for %lu seconds",
-	     (jiffies - trans->srcu_lock_time) / HZ);
+	if (unlikely(trans->srcu_held && time_after(jiffies, trans->srcu_lock_time + HZ * 10))) {
+		CLASS(printbuf, buf)();
+
+		prt_printf(&buf, "btree trans held srcu lock (delaying memory reclaim) for %lu seconds\n",
+			   (jiffies - trans->srcu_lock_time) / HZ);
+		bch2_sb_recent_counters_to_text(&buf, &trans->c->counters);
+
+		WARN(true, "%s", buf.buf);
+	}
 }
 
 void bch2_trans_srcu_unlock(struct btree_trans *trans)

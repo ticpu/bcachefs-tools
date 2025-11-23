@@ -36,6 +36,7 @@
 
 #include "journal/journal.h"
 
+#include "sb/counters.h"
 #include "sb/io.h"
 
 #include "util/enumerated_ref.h"
@@ -216,6 +217,7 @@ static int btree_check_node_boundaries(struct btree_trans *trans, struct btree *
 
 	prt_str(&buf, "\nnext: ");
 	bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&cur->key));
+	prt_newline(&buf);
 
 	if (bpos_lt(expected_start, cur->data->min_key)) {				/* gap */
 		size_t nodes_found = 0;
