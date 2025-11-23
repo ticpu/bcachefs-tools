@@ -1493,11 +1493,13 @@ static struct bch_fs *__bch2_fs_open(darray_const_str *devices,
 	if (ret)
 		goto err;
 
-	/* Log opt_version_init() message before doing actual filesystem startup */
-	CLASS(printbuf, msg_with_prefix)();
-	prt_str(&msg_with_prefix, out->buf);
-	bch2_print_str(c, KERN_INFO, msg_with_prefix.buf);
-	printbuf_reset(out);
+	{
+		/* Log opt_version_init() message before doing actual filesystem startup */
+		CLASS(printbuf, msg_with_prefix)();
+		prt_str(&msg_with_prefix, out->buf);
+		bch2_print_str(c, KERN_INFO, msg_with_prefix.buf);
+		printbuf_reset(out);
+	}
 
 	if (!c->opts.nostart) {
 		ret = __bch2_fs_start(c, out);
