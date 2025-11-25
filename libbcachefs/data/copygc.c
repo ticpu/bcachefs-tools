@@ -475,6 +475,8 @@ static int bch2_copygc_thread(void *arg)
 	 */
 	kthread_wait_freezable(c->recovery.pass_done > BCH_RECOVERY_PASS_check_snapshots ||
 			       kthread_should_stop());
+	if (kthread_should_stop())
+		return 0;
 
 	bch2_move_stats_init(&move_stats, "copygc");
 	bch2_moving_ctxt_init(&ctxt, c, NULL, &move_stats,
