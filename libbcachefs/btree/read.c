@@ -146,7 +146,8 @@ static int __btree_err(int ret,
 	int ret2;
 
 	if (ca) {
-		bch2_mark_btree_validate_failure(failed, ca->dev_idx);
+		bch2_dev_io_failures_mut(failed, ca->dev_idx)->errcode =
+			bch_err_throw(c, btree_node_validate_err);
 
 		struct extent_ptr_decoded pick;
 		have_retry = bch2_bkey_pick_read_device(c,
@@ -984,7 +985,8 @@ start:
 		rb->have_ioref = false;
 
 		if (bio->bi_status) {
-			bch2_mark_io_failure(&failed, &rb->pick, false);
+			bch2_mark_io_failure(&failed, &rb->pick,
+				__bch2_err_throw(c, -blk_status_to_bch_err(bio->bi_status)));
 			continue;
 		}
 
@@ -997,7 +999,8 @@ start:
 
 		ret = bch2_btree_node_read_done(c, ca, b, &failed, &buf);
 		if (ret != -BCH_ERR_btree_node_read_err_want_retry &&
-		    ret != -BCH_ERR_btree_node_read_err_must_retry)
+		    ret != -BCH_ERR_btree_node_read_err_must_retry &&
+		    !bch2_err_matches(ret, BCH_ERR_blockdev_io_error))
 			break;
 	}
 

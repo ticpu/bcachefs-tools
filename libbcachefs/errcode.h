@@ -2,7 +2,37 @@
 #ifndef _BCACHEFS_ERRCODE_H
 #define _BCACHEFS_ERRCODE_H
 
+/* we're getting away from reusing bi_status, this should go away */
+#define BLK_STS_REMOVED		((__force blk_status_t)128)
+
+#define BLK_ERRS()				\
+	BLK_STS(NOTSUPP)			\
+	BLK_STS(TIMEOUT)			\
+	BLK_STS(NOSPC)				\
+	BLK_STS(TRANSPORT)			\
+	BLK_STS(TARGET)				\
+	BLK_STS(RESV_CONFLICT)			\
+	BLK_STS(MEDIUM)				\
+	BLK_STS(PROTECTION)			\
+	BLK_STS(RESOURCE)			\
+	BLK_STS(IOERR)				\
+	BLK_STS(DM_REQUEUE)			\
+	BLK_STS(AGAIN)				\
+	BLK_STS(DEV_RESOURCE)			\
+	BLK_STS(ZONE_OPEN_RESOURCE)		\
+	BLK_STS(ZONE_ACTIVE_RESOURCE)		\
+	BLK_STS(OFFLINE)			\
+	BLK_STS(DURATION_LIMIT)			\
+	BLK_STS(INVAL)				\
+	BLK_STS(REMOVED)			\
+
+#define BLK_STS(n)								\
+	x(BCH_ERR_blockdev_io_error,	BLK_STS_##n)
+
 #define BCH_ERRCODES()								\
+	x(EIO,				blockdev_io_error)			\
+	BLK_ERRS()								\
+	x(BCH_ERR_blockdev_io_error,	BLK_STS_UNKNOWN)			\
 	x(ERANGE,			ERANGE_option_too_small)		\
 	x(ERANGE,			ERANGE_option_too_big)			\
 	x(ERANGE,			projid_too_big)				\
@@ -309,6 +339,7 @@
 	x(EIO,				journal_flush_err)			\
 	x(EIO,				journal_write_err)			\
 	x(EIO,				btree_node_read_err)			\
+	x(EIO,				btree_node_validate_err)		\
 	x(BCH_ERR_btree_node_read_err,	btree_node_read_err_cached)		\
 	x(EIO,				sb_not_downgraded)			\
 	x(EIO,				btree_node_write_all_failed)		\
@@ -355,10 +386,11 @@
 	x(BCH_ERR_data_read_retry_avoid,data_read_retry_ec_reconstruct_err)	\
 	x(BCH_ERR_data_read_retry_avoid,data_read_retry_csum_err)		\
 	x(BCH_ERR_data_read_retry,	data_read_retry_csum_err_maybe_userspace)\
-	x(BCH_ERR_data_read,		data_read_decompress_err)		\
-	x(BCH_ERR_data_read,		data_read_decrypt_err)			\
+	x(BCH_ERR_data_read_retry_avoid,data_read_decompress_err)		\
+	x(BCH_ERR_data_read_retry_avoid,data_read_decrypt_err)			\
 	x(BCH_ERR_data_read,		data_read_ptr_stale_race)		\
 	x(BCH_ERR_data_read_retry,	data_read_ptr_stale_retry)		\
+	x(BCH_ERR_data_read_retry,	data_read_ptr_stale_dirty)		\
 	x(BCH_ERR_data_read,		data_read_no_encryption_key)		\
 	x(BCH_ERR_data_read,		data_read_buffer_too_small)		\
 	x(BCH_ERR_data_read,		data_read_key_overwritten)		\
@@ -417,9 +449,8 @@ static inline long bch2_err_class(long err)
 	return err < 0 ? __bch2_err_class(err) : err;
 }
 
-#define BLK_STS_REMOVED		((__force blk_status_t)128)
-
 #include <linux/blk_types.h>
 const char *bch2_blk_status_to_str(blk_status_t);
+enum bch_errcode blk_status_to_bch_err(blk_status_t);
 
 #endif /* _BCACHFES_ERRCODE_H */

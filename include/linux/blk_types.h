@@ -87,7 +87,7 @@ typedef u8 __bitwise blk_status_t;
 #define BLK_STS_NOSPC		((__force blk_status_t)3)
 #define BLK_STS_TRANSPORT	((__force blk_status_t)4)
 #define BLK_STS_TARGET		((__force blk_status_t)5)
-#define BLK_STS_NEXUS		((__force blk_status_t)6)
+#define BLK_STS_RESV_CONFLICT	((__force blk_status_t)6)
 #define BLK_STS_MEDIUM		((__force blk_status_t)7)
 #define BLK_STS_PROTECTION	((__force blk_status_t)8)
 #define BLK_STS_RESOURCE	((__force blk_status_t)9)
@@ -97,6 +97,12 @@ typedef u8 __bitwise blk_status_t;
 #define BLK_STS_DM_REQUEUE    ((__force blk_status_t)11)
 
 #define BLK_STS_AGAIN		((__force blk_status_t)12)
+#define BLK_STS_DEV_RESOURCE	((__force blk_status_t)13)
+#define BLK_STS_ZONE_OPEN_RESOURCE	((__force blk_status_t)14)
+#define BLK_STS_ZONE_ACTIVE_RESOURCE	((__force blk_status_t)15)
+#define BLK_STS_OFFLINE		((__force blk_status_t)16)
+#define BLK_STS_DURATION_LIMIT	((__force blk_status_t)17)
+#define BLK_STS_INVAL	((__force blk_status_t)19)
 
 #define BIO_INLINE_VECS 4
 
