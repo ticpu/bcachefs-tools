@@ -483,7 +483,7 @@ jobs:
       deb-bin-artifact-id: ${{ steps.deb-bin-upload.outputs.artifact-id }}
   autopkgtest:
     needs: buildd
-    if: inputs.dist-name == 'debian' && inputs.dist-version != 'trixie' && inputs.machine-arch == 'amd64' && inputs.build-arch == inputs.machine-arch && inputs.host-arch == inputs.build-arch
+    if: inputs.dist-name == 'debian' && inputs.machine-arch == 'amd64' && inputs.build-arch == inputs.machine-arch && inputs.host-arch == inputs.build-arch
     runs-on: ${{ inputs.runs-on }}
     env:
       CONTAINER_DISTRO: forky
@@ -763,8 +763,37 @@ jobs:
           IMAGE="/tmp/autopkgtest-qemu-image.qcow2"
           echo "IMAGE=$(echo ${IMAGE})" >> ~/.env
           MIRROR="http://deb.debian.org/debian"
+          SCRIPT="${{ github.workspace }}/mmdebstrap-autopkgtest-build-qemu-userscript.sh"
+          touch "${SCRIPT}"
+          if [ "${{ inputs.dist-name }}" = "debian" ] && [ "${{ inputs.dist-version }}" = "trixie" ]; then
+          tee "${SCRIPT}" > /dev/null <<EOF
+          tee "/etc/apt/sources.list.d/updates.sources" > /dev/null <<EOS
+          Types: deb deb-src
+          URIs: ${MIRROR}
+          Suites: ${{ inputs.dist-version }}-updates
+          Components: main
+          Enabled: yes
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          EOS
+          tee "/etc/apt/sources.list.d/backports.sources" > /dev/null <<EOS
+          Types: deb deb-src
+          URIs: ${MIRROR}
+          Suites: ${{ inputs.dist-version }}-backports
+          Components: main
+          Enabled: yes
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          EOS
+          tee "/etc/apt/preferences.d/99debian-backports" > /dev/null <<EOS
+          Package: *
+          Pin: release n=${{ inputs.dist-version }}-backports
+          Pin-Priority: 900
+          EOS
+          apt update
+          apt full-upgrade -y
+          EOF
+          fi
           echo '::group::Building QEMU image for autopkgtest'
-          mmdebstrap-autopkgtest-build-qemu --boot=efi --mirror "$MIRROR" "${{ inputs.dist-version }}" "$IMAGE"
+          mmdebstrap-autopkgtest-build-qemu --boot=efi --mirror "$MIRROR" --script "${SCRIPT}" "${{ inputs.dist-version }}" "$IMAGE"
           echo '::endgroup::'
       - name: Run autopkgtest
         timeout-minutes: 10
@@ -784,7 +813,7 @@ jobs:
           tee "${{ github.workspace }}/setup-commands.sh" > /dev/null <<EOF
           set -xe
           apt update
-          apt install openssl
+          apt install -y openssl
           if [ "${{ matrix.toolchain }}" = "GNU" ]; then
           /bin/true
           elif [ "${{ matrix.toolchain }}" = "LLVM" ]; then
@@ -813,7 +842,6 @@ jobs:
           autopkgtest \
             --no-built-binaries \
             --setup-commands "${{ github.workspace }}/setup-commands.sh" \
-            --apt-upgrade \
             "${{ github.workspace }}/incoming/src-artifacts"/*.dsc \
             "${{ github.workspace }}/incoming/bin-artifacts/${{ inputs.dist-version }}/${{ inputs.host-arch }}"/*.changes \
             -- \
