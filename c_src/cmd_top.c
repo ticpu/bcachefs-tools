@@ -28,6 +28,24 @@ static struct bch_ioctl_query_counters *read_counters(struct bchfs_handle fs, un
 	return ret;
 }
 
+static void prt_counter(struct printbuf *out, u64 v,
+			bool human_readable,
+			enum bch_counters_flags flags)
+{
+	if (flags & TYPE_SECTORS)
+		v <<= 9;
+
+	prt_char(out, ' ');
+
+	if (human_readable)
+		prt_human_readable_u64(out, v);
+	else
+		prt_u64(out, v);
+
+	if (flags & TYPE_SECTORS)
+		prt_char(out, 'B');
+}
+
 static void fs_top(const char *path, bool human_readable)
 {
 	struct bchfs_handle fs = bcache_fs_open(path);
@@ -37,15 +55,30 @@ static void fs_top(const char *path, bool human_readable)
 	struct bch_ioctl_query_counters *curr = read_counters(fs, 0);
 	struct bch_ioctl_query_counters *prev = NULL;
 
+	unsigned interval_secs = 1;
+
 	while (true) {
-		sleep(1);
+		sleep(interval_secs);
 		kfree(prev);
 		prev = curr;
 		curr = read_counters(fs, 0);
 
-		printf("\033[2J");
-		printf("\033[H");
-		printf("%-40s %8s %12s %12s\n", "", "2s", "total", "mount");
+		CLASS(printbuf, buf)();
+		/* clear terminal, move cursor to top */
+		prt_printf(&buf, "\033[2J");
+		prt_printf(&buf, "\033[H");
+
+		printbuf_tabstop_push(&buf, 40);
+		printbuf_tabstop_push(&buf, 14);
+		printbuf_tabstop_push(&buf, 14);
+		printbuf_tabstop_push(&buf, 14);
+
+		prt_printf(&buf,
+			   "All counters have a corresponding tracepoint; for more info on any given event, try e.g.\n"
+			   "  perf trace -e bcachefs:data_update_pred\n"
+			   "\n");
+
+		prt_printf(&buf, "\t%us\rtotal\rmount\r\n", interval_secs);
 
 		for (unsigned i = 0; i < BCH_COUNTER_NR; i++) {
 			unsigned stable = counters_to_stable_map[i];
@@ -62,11 +95,22 @@ static void fs_top(const char *path, bool human_readable)
 			if (!v3)
 				continue;
 
-			printf("%-40s %8llu %12llu %12llu\n",
-			       bch2_counter_names[i],
-			       v1, v2, v3);
+			prt_printf(&buf, "%s\t", bch2_counter_names[i]);
+
+			prt_counter(&buf, v1 / interval_secs, human_readable, bch2_counter_flags[i]);
+			prt_str(&buf, "/sec");
+			prt_tab_rjust(&buf);
+
+			prt_counter(&buf, v2, human_readable, bch2_counter_flags[i]);
+			prt_tab_rjust(&buf);
+
+			prt_counter(&buf, v3, human_readable, bch2_counter_flags[i]);
+			prt_tab_rjust(&buf);
+
+			prt_newline(&buf);
 		}
 
+		write(STDOUT_FILENO, buf.buf, buf.pos);
 		/* XXX: include btree cache size, key cache size, total ram size */
 	}
 
