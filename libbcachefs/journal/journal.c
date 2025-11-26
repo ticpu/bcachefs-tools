@@ -240,16 +240,15 @@ static void __journal_entry_close(struct journal *j, unsigned closed_val, bool t
 	journal_seq_pin(j, journal_cur_seq(j))->bytes = bytes;
 	j->dirty_entry_bytes += bytes;
 
-	if (trace_journal_entry_close_enabled() && trace) {
-		CLASS(printbuf, err)();
-		guard(printbuf_atomic)(&err);
+	if (trace)
+		event_trace(c, journal_entry_close, msg, ({
+			guard(printbuf_atomic)(&msg);
 
-		prt_str(&err, "entry size: ");
-		prt_human_readable_u64(&err, vstruct_bytes(buf->data));
-		prt_newline(&err);
-		bch2_prt_task_backtrace(&err, current, 1, GFP_NOWAIT);
-		trace_journal_entry_close(c, err.buf);
-	}
+			prt_str(&msg, "entry size: ");
+			prt_human_readable_u64(&msg, vstruct_bytes(buf->data));
+			prt_newline(&msg);
+			bch2_prt_task_backtrace(&msg, current, 1, GFP_NOWAIT);
+		}));
 
 	sectors = vstruct_blocks_plus(buf->data, c->block_bits,
 				      buf->u64s_reserved) << c->block_bits;
@@ -613,37 +612,19 @@ out:
 	if (journal_error_check_stuck(j, ret, flags))
 		ret = bch_err_throw(c, journal_stuck);
 
-	if (ret == -BCH_ERR_journal_max_in_flight &&
-	    track_event_change(&c->times[BCH_TIME_blocked_journal_max_in_flight], true) &&
-	    trace_journal_entry_full_enabled()) {
-		CLASS(printbuf, buf)();
+	if ((ret == -BCH_ERR_journal_max_in_flight &&
+	     track_event_change(&c->times[BCH_TIME_blocked_journal_max_in_flight], true)) ||
+	    (ret == -BCH_ERR_journal_max_open &&
+	     track_event_change(&c->times[BCH_TIME_blocked_journal_max_open], true)))
+		event_inc_trace(c, journal_entry_full, buf, ({
+			prt_printf(&buf, "%s\n", bch2_err_str(ret));
+			bch2_printbuf_make_room(&buf, 4096);
 
-		bch2_printbuf_make_room(&buf, 4096);
-
-		scoped_guard(spinlock, &j->lock) {
-			prt_printf(&buf, "seq %llu\n", journal_cur_seq(j));
-			bch2_journal_bufs_to_text(&buf, j);
-		}
-
-		trace_journal_entry_full(c, buf.buf);
-		count_event(c, journal_entry_full);
-	}
-
-	if (ret == -BCH_ERR_journal_max_open &&
-	    track_event_change(&c->times[BCH_TIME_blocked_journal_max_open], true) &&
-	    trace_journal_entry_full_enabled()) {
-		CLASS(printbuf, buf)();
-
-		bch2_printbuf_make_room(&buf, 4096);
-
-		scoped_guard(spinlock, &j->lock) {
-			prt_printf(&buf, "seq %llu\n", journal_cur_seq(j));
-			bch2_journal_bufs_to_text(&buf, j);
-		}
-
-		trace_journal_entry_full(c, buf.buf);
-		count_event(c, journal_entry_full);
-	}
+			scoped_guard(spinlock, &j->lock) {
+				prt_printf(&buf, "seq %llu\n", journal_cur_seq(j));
+				bch2_journal_bufs_to_text(&buf, j);
+			}
+		}));
 
 	/*
 	 * Journal is full - can't rely on reclaim from work item due to

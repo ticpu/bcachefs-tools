@@ -356,7 +356,10 @@ err:
 
 	sectors_seen	= atomic64_read(&ctxt->stats->sectors_seen) - sectors_seen;
 	sectors_moved	= atomic64_read(&ctxt->stats->sectors_moved) - sectors_moved;
-	trace_and_count(c, copygc, c, buckets_in_flight->to_evacuate.nr, sectors_seen, sectors_moved);
+	event_inc_trace(c, copygc, buf, ({
+		prt_printf(&buf, "buckets %zu sectors seen %llu moved %llu",
+			   buckets_in_flight->to_evacuate.nr, sectors_seen, sectors_moved);
+	}));
 
 	darray_for_each(buckets_in_flight->to_evacuate, i)
 		if (*i)
@@ -476,7 +479,7 @@ static int bch2_copygc_thread(void *arg)
 	kthread_wait_freezable(c->recovery.pass_done > BCH_RECOVERY_PASS_check_snapshots ||
 			       kthread_should_stop());
 	if (kthread_should_stop())
-		return 0;
+		goto out;
 
 	bch2_move_stats_init(&move_stats, "copygc");
 	bch2_moving_ctxt_init(&ctxt, c, NULL, &move_stats,
@@ -508,7 +511,6 @@ static int bch2_copygc_thread(void *arg)
 			c->copygc_wait_at = last;
 			c->copygc_wait = last + wait;
 			move_buckets_wait(&ctxt, &buckets, true);
-			trace_and_count(c, copygc_wait, c, wait, last + wait);
 			bch2_kthread_io_clock_wait(clock, last + wait,
 					MAX_SCHEDULE_TIMEOUT);
 			continue;
@@ -535,9 +537,10 @@ static int bch2_copygc_thread(void *arg)
 	}
 
 	move_buckets_wait(&ctxt, &buckets, true);
-	rhashtable_destroy(buckets.table);
 	bch2_moving_ctxt_exit(&ctxt);
 	bch2_move_stats_exit(&move_stats, c);
+out:
+	rhashtable_destroy(buckets.table);
 err:
 	kfree(buckets.table);
 	return ret;

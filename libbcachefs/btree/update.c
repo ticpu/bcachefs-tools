@@ -376,7 +376,12 @@ __btree_trans_update_by_path(struct btree_trans *trans,
 
 	__btree_path_get(trans, trans->paths + i->path, true);
 
-	trace_update_by_path(trans, path, i, overwrite);
+	event_trace(c, update_by_path, buf, ({
+		prt_printf(&buf, "%s overwrite %u\n", trans->fn, overwrite);
+		bch2_btree_path_to_text_short(&buf, trans, path_idx, path);
+		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(k));
+	}));
+
 	return i;
 }
 
@@ -470,7 +475,7 @@ static noinline int bch2_trans_update_get_key_cache(struct btree_trans *trans,
 		struct bkey_cached *ck = (void *) trans->paths[iter->key_cache_path].l[0].b;
 
 		if (test_bit(BKEY_CACHED_DIRTY, &ck->flags)) {
-			trace_and_count(trans->c, trans_restart_key_cache_raced, trans, _RET_IP_);
+			event_inc_trace(trans->c, trans_restart_key_cache_raced, buf, prt_str(&buf, trans->fn));
 			return btree_trans_restart(trans, BCH_ERR_transaction_restart_key_cache_raced);
 		}
 
