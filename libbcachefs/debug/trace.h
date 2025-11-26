@@ -6,16 +6,6 @@
 
 #include <linux/tracepoint.h>
 
-#define TRACE_BPOS_entries(name)				\
-	__field(u64,			name##_inode	)	\
-	__field(u64,			name##_offset	)	\
-	__field(u32,			name##_snapshot	)
-
-#define TRACE_BPOS_assign(dst, src)				\
-	__entry->dst##_inode		= (src).inode;		\
-	__entry->dst##_offset		= (src).offset;		\
-	__entry->dst##_snapshot		= (src).snapshot
-
 DECLARE_EVENT_CLASS(fs_str,
 	TP_PROTO(struct bch_fs *c, const char *str),
 	TP_ARGS(c, str),

@@ -74,6 +74,7 @@ void bch2_journal_set_watermark(struct journal *j)
 	    track_event_change(&c->times[BCH_TIME_blocked_journal_low_on_pin], low_on_pin) ||
 	    track_event_change(&c->times[BCH_TIME_blocked_write_buffer_full], low_on_wb))
 		event_inc_trace(c, journal_full, buf, ({
+			guard(printbuf_atomic)(&buf);
 			prt_printf(&buf, "low_on_space %u\n",	low_on_space);
 			prt_printf(&buf, "low_on_pin%u\n",	low_on_pin);
 			prt_printf(&buf, "low_on_wb%u\n",	low_on_wb);
@@ -349,47 +350,40 @@ void bch2_journal_update_last_seq(struct journal *j)
 	}
 }
 
-void bch2_journal_update_last_seq_ondisk(struct journal *j, u64 last_seq_ondisk,
-					 bool clean)
+int bch2_journal_update_last_seq_ondisk(struct journal *j, u64 last_seq_ondisk,
+					darray_replicas_entry_refs *refs)
 {
-	struct bch_fs *c = container_of(j, struct bch_fs, journal);
-	union bch_replicas_padded replicas;
-	unsigned nr_refs = 0;
-	size_t dirty_entry_bytes = 0;
+	BUG_ON(last_seq_ondisk > j->pin.back);
 
-	scoped_guard(mutex, &j->last_seq_ondisk_lock) {
-		for (u64 seq = j->last_seq_ondisk;
-		     seq < (clean ? j->pin.back : last_seq_ondisk);
-		     seq++) {
-			struct journal_entry_pin_list *pin_list = journal_seq_pin(j, seq);
+	for (u64 seq = j->last_seq_ondisk; seq < last_seq_ondisk; seq++) {
+		struct journal_entry_pin_list *pin_list = journal_seq_pin(j, seq);
 
-			if (pin_list->devs.e.nr_devs) {
-				if (nr_refs &&
-				    !bch2_replicas_entry_eq(&replicas.e, &pin_list->devs.e)) {
-					bch2_replicas_entry_put_many(c, &replicas.e, nr_refs);
-					nr_refs = 0;
-				}
+		BUG_ON(atomic_read(&pin_list->count));
 
-				memcpy(&replicas, &pin_list->devs, replicas_entry_bytes(&pin_list->devs.e));
-				pin_list->devs.e.nr_devs = 0;
-				nr_refs++;
+		if (pin_list->devs.e.nr_devs) {
+			replicas_entry_refs *e = darray_find_p(*refs, i,
+			    bch2_replicas_entry_eq(&i->replicas.e, &pin_list->devs.e));
+
+			if (e) {
+				e->nr_refs++;
+			} else {
+				try(darray_push_gfp(refs, ((replicas_entry_refs) {
+						    .nr_refs = 1,
+						    .replicas = pin_list->devs,
+				}), GFP_ATOMIC));
 			}
 
-			dirty_entry_bytes += pin_list->bytes;
-			pin_list->bytes = 0;
+			pin_list->devs.e.nr_devs = 0;
 		}
 
-		j->last_seq_ondisk = last_seq_ondisk;
+		if (WARN_ON(j->dirty_entry_bytes < pin_list->bytes))
+			pin_list->bytes = j->dirty_entry_bytes;
+
+		j->dirty_entry_bytes -= pin_list->bytes;
+		pin_list->bytes = 0;
 	}
 
-	scoped_guard(spinlock, &j->lock) {
-		if (WARN_ON(j->dirty_entry_bytes < dirty_entry_bytes))
-			dirty_entry_bytes = j->dirty_entry_bytes;
-		j->dirty_entry_bytes -= dirty_entry_bytes;
-	}
-
-	if (nr_refs)
-		bch2_replicas_entry_put_many(c, &replicas.e, nr_refs);
+	return 0;
 }
 
 bool __bch2_journal_pin_put(struct journal *j, u64 seq)
