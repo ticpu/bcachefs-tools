@@ -52,6 +52,12 @@ void strip_fs_alloc(struct bch_fs *c)
 	swap(u64s, clean->field.u64s);
 	bch2_sb_field_resize(&c->disk_sb, clean, u64s);
 
+	scoped_guard(percpu_write, &c->mark_lock) {
+		kfree(c->replicas.entries);
+		c->replicas.entries = NULL;
+		c->replicas.nr = 0;
+	}
+
 	bch2_sb_field_resize(&c->disk_sb, replicas_v0, 0);
 	bch2_sb_field_resize(&c->disk_sb, replicas, 0);
 
