@@ -126,7 +126,7 @@ reopen:
 			fprintf(stderr, "Error starting filesystem: %s\n", bch2_err_str(ret));
 			goto err_stop;
 		}
-		bch2_fs_stop(c);
+		bch2_fs_exit(c);
 		goto reopen;
 	}
 
@@ -146,6 +146,6 @@ reopen:
 	bch2_write_super(c);
 	mutex_unlock(&c->sb_lock);
 err_stop:
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	return ret;
 }

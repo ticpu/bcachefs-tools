@@ -473,7 +473,7 @@ static int cmd_device_set_state(int argc, char *argv[])
 
 			bch2_write_super(c);
 		}
-		bch2_fs_stop(c);
+		bch2_fs_exit(c);
 		return ret;
 	}
 
@@ -601,7 +601,7 @@ static int cmd_device_resize(int argc, char *argv[])
 			fprintf(stderr, "resize error: %s\n%s", bch2_err_str(ret), err.buf);
 
 		enumerated_ref_put(&resize->io_ref[READ], 0);
-		bch2_fs_stop(c);
+		bch2_fs_exit(c);
 	}
 	return 0;
 }
@@ -700,7 +700,7 @@ static int cmd_device_resize_journal(int argc, char *argv[])
 			fprintf(stderr, "resize error: %s\n", bch2_err_str(ret));
 
 		enumerated_ref_put(&resize->io_ref[READ], 0);
-		bch2_fs_stop(c);
+		bch2_fs_exit(c);
 	}
 	return 0;
 }

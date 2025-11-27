@@ -300,7 +300,7 @@ static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 
 	up_read(&c->state_lock);
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 
 	darray_for_each(devs, d) {
 		darray_exit(&d->sb);

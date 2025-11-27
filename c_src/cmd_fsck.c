@@ -154,7 +154,7 @@ static bool should_use_kernel_fsck(darray_const_str devs)
 		printbuf_exit(&buf);
 	}
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 
 	return ret;
 }
@@ -369,7 +369,7 @@ userland_fsck:
 			ret |= 4;
 		}
 
-		bch2_fs_stop(c);
+		bch2_fs_exit(c);
 	}
 
 	printbuf_exit(&opts_str);
@@ -463,7 +463,7 @@ int cmd_recovery_pass(int argc, char *argv[])
 		printf("%s\n", buf.buf);
 	}
 err:
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	return ret;
 }
 

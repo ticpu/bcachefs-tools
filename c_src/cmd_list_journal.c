@@ -660,6 +660,6 @@ int cmd_list_journal(int argc, char *argv[])
 		journal_replay_print(c, f, p);
 	}
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	return 0;
 }

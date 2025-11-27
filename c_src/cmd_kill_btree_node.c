@@ -150,7 +150,7 @@ int cmd_kill_btree_node(int argc, char *argv[])
 	}
 
 	bch2_trans_put(trans);
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	darray_exit(&kill_nodes);
 	return ret < 0 ? ret : 0;
 }

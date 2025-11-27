@@ -159,7 +159,7 @@ int cmd_set_passphrase(int argc, char *argv[])
 
 	bch2_revoke_key(c->disk_sb.sb);
 	bch2_write_super(c);
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	return 0;
 }
 
@@ -217,6 +217,6 @@ int cmd_remove_passphrase(int argc, char *argv[])
 	bch_crypt_update_passphrase(sb, crypt, &key, NULL);
 
 	bch2_write_super(c);
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	return 0;
 }

@@ -35,6 +35,6 @@ impl Fs {
 
 impl Drop for Fs {
     fn drop(&mut self) {
-        unsafe { c::bch2_fs_stop(self.raw) }
+        unsafe { c::bch2_fs_exit(self.raw); }
     }
 }

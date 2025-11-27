@@ -1245,9 +1245,14 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 		return 0;
 
 	data_opts->type			= BCH_DATA_UPDATE_reconcile;
-	if (!r->hipri)
+	data_opts->target		= r->background_target;
+
+	/*
+	 * we can't add/drop replicas from btree nodes incrementally, we always
+	 * need to be able to spill over to the whole fs
+	 */
+	if (!r->hipri && !bkey_is_btree_ptr(k.k))
 		data_opts->write_flags |= BCH_WRITE_only_specified_devs;
-	data_opts->target = r->background_target;
 
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
 	const union bch_extent_entry *entry;
@@ -1460,7 +1465,7 @@ static int do_reconcile_extent(struct moving_context *ctxt,
 		reconcile_set_data_opts(trans, NULL, data_pos.btree, k, &opts, &data_opts);
 
 		struct bch_devs_list devs_have = bch2_data_update_devs_keeping(c, &data_opts, k);
-		int ret = bch2_can_do_write(c, &data_opts, &devs_have);
+		int ret = bch2_can_do_write(c, &data_opts, k, &devs_have);
 		if (ret) {
 			if (is_reconcile_pending_err(c, k, ret))
 				return 0;
@@ -1562,6 +1567,35 @@ static int do_reconcile_scan_bp(struct btree_trans *trans,
 	try(bch2_bkey_get_io_opts(trans, NULL, k, &opts));
 
 	return update_reconcile_opts_scan(trans, NULL, &opts, &iter, bp.v->level, k, s);
+}
+
+static int do_reconcile_scan_bps(struct moving_context *ctxt,
+				 struct reconcile_scan s,
+				 struct wb_maybe_flush *last_flushed)
+{
+	struct btree_trans *trans = ctxt->trans;
+	struct bch_fs *c = trans->c;
+	struct bch_fs_reconcile *r = &c->reconcile;
+
+	r->scan_start	= BBPOS(BTREE_ID_backpointers, POS(s.dev, 0));
+	r->scan_end	= BBPOS(BTREE_ID_backpointers, POS(s.dev, U64_MAX));
+
+	bch2_btree_write_buffer_flush_sync(trans);
+
+	CLASS(disk_reservation, res)(c);
+
+	return for_each_btree_key_max_commit(trans, iter, BTREE_ID_backpointers,
+					  POS(s.dev, 0), POS(s.dev, U64_MAX),
+					  BTREE_ITER_prefetch, k,
+					  &res.r, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+		ctxt->stats->pos = BBPOS(iter.btree_id, iter.pos);
+
+		if (k.k->type != KEY_TYPE_backpointer)
+			continue;
+
+		bch2_disk_reservation_put(c, &res.r);
+		do_reconcile_scan_bp(trans, s, bkey_s_c_to_backpointer(k), last_flushed);
+	}));
 }
 
 static int do_reconcile_scan_indirect(struct moving_context *ctxt,
@@ -1714,25 +1748,7 @@ static int do_reconcile_scan(struct moving_context *ctxt,
 	} else if (s.type == RECONCILE_SCAN_metadata) {
 		try(do_reconcile_scan_fs(ctxt, s, snapshot_io_opts, true));
 	} else if (s.type == RECONCILE_SCAN_device) {
-		r->scan_start	= BBPOS(BTREE_ID_backpointers, POS(s.dev, 0));
-		r->scan_end	= BBPOS(BTREE_ID_backpointers, POS(s.dev, U64_MAX));
-
-		bch2_btree_write_buffer_flush_sync(trans);
-
-		CLASS(disk_reservation, res)(c);
-
-		try(for_each_btree_key_max_commit(trans, iter, BTREE_ID_backpointers,
-						  POS(s.dev, 0), POS(s.dev, U64_MAX),
-						  BTREE_ITER_prefetch, k,
-						  &res.r, NULL, BCH_TRANS_COMMIT_no_enospc, ({
-			ctxt->stats->pos = BBPOS(iter.btree_id, iter.pos);
-
-			if (k.k->type != KEY_TYPE_backpointer)
-				continue;
-
-			bch2_disk_reservation_put(c, &res.r);
-			do_reconcile_scan_bp(trans, s, bkey_s_c_to_backpointer(k), last_flushed);
-		})));
+		try(do_reconcile_scan_bps(ctxt, s, last_flushed));
 	} else if (s.type == RECONCILE_SCAN_inum) {
 		r->scan_start	= BBPOS(BTREE_ID_extents, POS(s.inum, 0));
 		r->scan_end	= BBPOS(BTREE_ID_extents, POS(s.inum, U64_MAX));

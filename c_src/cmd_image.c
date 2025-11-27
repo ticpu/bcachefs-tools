@@ -489,7 +489,7 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 	if (ret)
 		goto err;
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	darray_exit(&device_paths);
 	xclose(src_fd);
 	return;
@@ -731,12 +731,12 @@ static int image_update(const char *src_path, const char *dst_image,
 	if (ret)
 		goto err;
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	unlink(dev_opts.path);
 	xclose(src_fd);
 	return 0;
 err_stop:
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 err:
 	unlink(dev_opts.path);
 	exit(EXIT_FAILURE);

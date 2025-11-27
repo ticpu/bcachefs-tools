@@ -97,7 +97,7 @@ static void bcachefs_fuse_destroy(void *arg)
 {
 	struct bch_fs *c = arg;
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 }
 
 static void bcachefs_fuse_lookup(fuse_req_t req, fuse_ino_t dir_ino,
@@ -1297,7 +1297,7 @@ out:
 	return ret ? 1 : 0;
 
 err:
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	goto out;
 }
 

@@ -297,7 +297,7 @@ static int migrate_fs(const char		*fs_path,
 
 	ret = copy_fs(c, &s, fs_fd, fs_path);
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 
 	if (ret)
 		return ret;
@@ -311,7 +311,7 @@ static int migrate_fs(const char		*fs_path,
 	if (IS_ERR(c))
 		die("Error opening new filesystem: %s", bch2_err_str(PTR_ERR(c)));
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	printf("fsck complete\n");
 
 	printf("To mount the new filesystem, run\n"
@@ -497,7 +497,7 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	if (ret)
 		die("Error marking superblock buckets: %s", bch2_err_str(ret));
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 
 #if CONFIG_BCACHEFS_DEBUG
 	/* Verify that filesystem is clean and consistent */
@@ -515,7 +515,7 @@ int cmd_migrate_superblock(int argc, char *argv[])
 	if (test_bit(BCH_FS_errors, &c->flags) || test_bit(BCH_FS_errors_fixed, &c->flags))
 		die("Filesystem has errors after migration");
 
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 #endif
 	return 0;
 }

@@ -161,7 +161,7 @@ int cmd_set_option(int argc, char *argv[])
 			}
 		}
 
-		bch2_fs_stop(c);
+		bch2_fs_exit(c);
 		return ret;
 	} else {
 		unsigned dev_idx;

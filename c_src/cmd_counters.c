@@ -79,6 +79,6 @@ int cmd_reset_counters(int argc, char *argv[])
 
 	scoped_guard(mutex, &c->sb_lock)
 		bch2_write_super(c);
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	return 0;
 }

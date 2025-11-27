@@ -2033,7 +2033,7 @@ static void bch2_put_super(struct super_block *sb)
 {
 	struct bch_fs *c = sb->s_fs_info;
 
-	__bch2_fs_stop(c);
+	bch2_fs_stop(c);
 }
 
 /*
@@ -2112,7 +2112,7 @@ static int bch2_fs_get_tree(struct fs_context *fc)
 	struct inode *vinode;
 	struct bch2_opts_parse *opts_parse = fc->fs_private;
 	struct bch_opts opts = opts_parse->opts;
-	darray_const_str devs;
+	darray_const_str devs = {};
 	darray_fs devs_to_fs = {};
 	int ret;
 
@@ -2250,7 +2250,7 @@ out:
 	fc->root = dget(sb->s_root);
 err:
 	darray_exit(&devs_to_fs);
-	bch2_darray_str_exit(&devs);
+	darray_exit_free_item(&devs, kfree);
 	if (ret)
 		pr_err("error: %s", bch2_err_str(ret));
 	/*
@@ -2264,12 +2264,12 @@ err:
 	return bch2_err_class(ret);
 
 err_stop_fs:
-	bch2_fs_stop(c);
+	bch2_fs_exit(c);
 	goto err;
 
 err_put_super:
 	if (!sb->s_root)
-		__bch2_fs_stop(c);
+		bch2_fs_stop(c);
 	deactivate_locked_super(sb);
 	goto err;
 }
@@ -2279,7 +2279,7 @@ static void bch2_kill_sb(struct super_block *sb)
 	struct bch_fs *c = sb->s_fs_info;
 
 	generic_shutdown_super(sb);
-	bch2_fs_free(c);
+	bch2_fs_exit(c);
 }
 
 static void bch2_fs_context_free(struct fs_context *fc)

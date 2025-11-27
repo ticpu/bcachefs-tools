@@ -323,7 +323,7 @@ int cmd_format(int argc, char *argv[])
 		if (opts.source)
 			build_fs(c, opts.source);
 
-		bch2_fs_stop(c);
+		bch2_fs_exit(c);
 	}
 	bch2_opt_strs_free(&fs_opt_strs);
 	darray_exit(&devices);
