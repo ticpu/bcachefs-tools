@@ -8,6 +8,8 @@
 #include "libbcachefs.h"
 #include "tools-util.h"
 
+#include "fs/check.h"
+
 #include "init/error.h"
 #include "init/fs.h"
 #include "init/passes.h"
@@ -228,7 +230,7 @@ int cmd_fsck(int argc, char *argv[])
 	};
 	int kernel = -1; /* unset */
 	int opt, ret = 0;
-	struct printbuf opts_str = PRINTBUF;
+	CLASS(printbuf, opts_str)();
 
 	if (getenv("BCACHEFS_KERNEL_ONLY"))
 		kernel = true;
@@ -360,19 +362,18 @@ userland_fsck:
 		if (IS_ERR(c))
 			exit(8);
 
-		if (test_bit(BCH_FS_errors_fixed, &c->flags)) {
-			fprintf(stderr, "%s: errors fixed\n", c->name);
-			ret |= 1;
-		}
-		if (test_bit(BCH_FS_error, &c->flags)) {
-			fprintf(stderr, "%s: still has errors\n", c->name);
-			ret |= 4;
-		}
+		CLASS(printbuf, buf)();
+		ret = bch2_fs_fsck_errcode(c, &buf);
+		if (ret)
+			fputs(buf.buf, stderr);
 
-		bch2_fs_exit(c);
+		int ret2 = bch2_fs_exit(c);
+		if (ret2) {
+			fprintf(stderr, "error shutting down filesystem: %s\n", bch2_err_str(ret2));
+			ret |= 8;
+		}
 	}
 
-	printbuf_exit(&opts_str);
 	return ret;
 }
 
