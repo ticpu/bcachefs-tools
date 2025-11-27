@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -125,18 +126,30 @@ int blkdev_issue_zeroout(struct block_device *bdev,
 
 unsigned bdev_logical_block_size(struct block_device *bdev)
 {
-	struct stat statbuf;
-	unsigned blksize;
-	int ret;
-
-	ret = fstat(bdev->bd_fd, &statbuf);
-	BUG_ON(ret);
+	struct stat statbuf = xfstat(bdev->bd_fd);
 
 	if (!S_ISBLK(statbuf.st_mode))
 		return statbuf.st_blksize;
 
+	unsigned blksize;
 	xioctl(bdev->bd_fd, BLKPBSZGET, &blksize);
 	return blksize;
+}
+
+bool bdev_nonrot(struct block_device *bdev)
+{
+	struct stat statbuf = xfstat(bdev->bd_fd);
+	if (!S_ISBLK(statbuf.st_mode))
+		return false;
+
+	char *path = mprintf("/sys/dev/block/%u:%u/queue/rotational",
+			     major(statbuf.st_rdev),
+			     minor(statbuf.st_rdev));
+	u64 v = !access(path, R_OK)
+		? read_file_u64(AT_FDCWD, path)
+		: 0;
+	free(path);
+	return !v;
 }
 
 sector_t get_capacity(struct gendisk *disk)

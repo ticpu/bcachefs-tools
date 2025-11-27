@@ -62,6 +62,7 @@ int blkdev_issue_zeroout(struct block_device *, sector_t, sector_t, gfp_t, unsig
 #define blk_queue_nonrot(q)		((void) (q), 0)
 
 unsigned bdev_logical_block_size(struct block_device *bdev);
+bool bdev_nonrot(struct block_device *);
 sector_t get_capacity(struct gendisk *disk);
 
 struct blk_holder_ops {
