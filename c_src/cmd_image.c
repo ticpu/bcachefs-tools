@@ -486,10 +486,15 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 	struct copy_fs_state s = { .verbosity = verbosity };
 	ret =   copy_fs(c, &s, src_fd, src_path) ?:
 		finish_image(c, keep_alloc, verbosity);
+	bch_err_msg(c, ret, "syncing data");
 	if (ret)
 		goto err;
 
-	bch2_fs_exit(c);
+	ret = bch2_fs_exit(c);
+	if (ret) {
+		fprintf(stderr, "error shutting down new filesystem: %s\n", bch2_err_str(ret));
+		goto err;
+	}
 	darray_exit(&device_paths);
 	xclose(src_fd);
 	return;
@@ -728,18 +733,14 @@ static int image_update(const char *src_path, const char *dst_image,
 
 	ret =   copy_fs(c, &s, src_fd, src_path) ?:
 		finish_image(c, keep_alloc, verbosity);
-	if (ret)
-		goto err;
+	bch_err_msg(c, ret, "syncing data");
 
-	bch2_fs_exit(c);
-	unlink(dev_opts.path);
-	xclose(src_fd);
-	return 0;
 err_stop:
-	bch2_fs_exit(c);
+	ret = bch2_fs_exit(c) ?: ret;
 err:
 	unlink(dev_opts.path);
-	exit(EXIT_FAILURE);
+	xclose(src_fd);
+	return ret ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 static void image_update_usage(void)
