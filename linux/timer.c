@@ -129,7 +129,7 @@ struct pending_timer {
 static inline bool pending_timer_cmp(struct pending_timer a,
 				     struct pending_timer b)
 {
-	return a.expires < b.expires;
+	return time_after(a.expires, b.expires);
 }
 
 static DECLARE_HEAP(struct pending_timer) pending_timers;
