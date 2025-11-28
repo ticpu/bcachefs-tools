@@ -250,23 +250,15 @@ static bool timer_thread_stop = false;
 
 static int timer_thread(void *arg)
 {
-	struct pending_timer *p;
-	struct timespec ts;
-	unsigned long now;
-	int ret;
-
 	pthread_mutex_lock(&timer_lock);
 
 	while (!timer_thread_stop) {
-		now = jiffies;
-		p = heap_peek(&pending_timers);
+		unsigned long now = jiffies;
+		struct pending_timer *p = heap_peek(&pending_timers);
 
 		if (!p) {
 			pthread_cond_wait(&timer_cond, &timer_lock);
-			continue;
-		}
-
-		if (time_after_eq(now, p->expires)) {
+		} else if (time_after_eq(now, p->expires)) {
 			struct timer_list *timer = p->timer;
 
 			heap_del(&pending_timers, 0, pending_timer_cmp);
@@ -282,16 +274,13 @@ static int timer_thread(void *arg)
 
 			timer_seq++;
 			pthread_cond_broadcast(&timer_running_cond);
-			continue;
+		} else {
+			struct timespec ts;
+			BUG_ON(clock_gettime(CLOCK_REALTIME, &ts));
+			ts = timespec_add_ns(ts, jiffies_to_nsecs(p->expires - now));
+
+			pthread_cond_timedwait(&timer_cond, &timer_lock, &ts);
 		}
-
-
-		ret = clock_gettime(CLOCK_REALTIME, &ts);
-		BUG_ON(ret);
-
-		ts = timespec_add_ns(ts, jiffies_to_nsecs(p->expires - now));
-
-		pthread_cond_timedwait(&timer_cond, &timer_lock, &ts);
 	}
 
 	pthread_mutex_unlock(&timer_lock);
