@@ -1,14 +1,13 @@
 use std::{
     ffi::{CStr, CString, c_char, c_int, OsString, OsStr},
     collections::HashMap,
-    env,
     fs,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
 };
 
 use anyhow::Result;
-use bch_bindgen::{bcachefs, opt_set};
+use bch_bindgen::{bcachefs, opt_get, opt_set};
 use bcachefs::{
     bch_sb_handle,
     sb_name,
@@ -144,7 +143,7 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
             .collect::<Result<Vec<_>>>()
     }
 
-    let udev = !env::var("BCACHEFS_BLOCK_SCAN").is_ok();
+    let udev = opt_get!(opts, mount_trusts_udev) != 0;
 
     if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = device.split_once('=') {
         let uuid = Uuid::parse_str(uuid)?;
