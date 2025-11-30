@@ -246,7 +246,7 @@ write_attribute(perf_test);
 
 static size_t bch2_btree_cache_size(struct bch_fs *c)
 {
-	struct btree_cache *bc = &c->btree_cache;
+	struct bch_fs_btree_cache *bc = &c->btree_cache;
 	size_t ret = 0;
 	struct btree *b;
 
@@ -301,9 +301,7 @@ static int bch2_compression_stats_to_text(struct printbuf *out, struct bch_fs *c
 
 static void bch2_gc_gens_pos_to_text(struct printbuf *out, struct bch_fs *c)
 {
-	bch2_btree_id_to_text(out, c->gc_gens_btree);
-	prt_printf(out, ": ");
-	bch2_bpos_to_text(out, c->gc_gens_pos);
+	bch2_bbpos_to_text(out, c->gc_gens.pos);
 	prt_printf(out, "\n");
 }
 
@@ -311,7 +309,7 @@ static void bch2_fs_usage_base_to_text(struct printbuf *out, struct bch_fs *c)
 {
 	struct bch_fs_usage_base b = {};
 
-	acc_u64s_percpu(&b.hidden, &c->usage->hidden, sizeof(b) / sizeof(u64));
+	acc_u64s_percpu(&b.hidden, &c->capacity.usage->hidden, sizeof(b) / sizeof(u64));
 
 	prt_printf(out, "hidden:\t\t%llu\n",	b.hidden);
 	prt_printf(out, "btree:\t\t%llu\n",	b.btree);
@@ -427,13 +425,13 @@ STORE(bch2_fs)
 	/* Debugging: */
 
 	if (attr == &sysfs_trigger_btree_updates)
-		queue_work(c->btree_interior_update_worker, &c->btree_interior_update_work);
+		queue_work(c->btree_interior_updates.worker, &c->btree_interior_updates.work);
 
 	if (!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_sysfs))
 		return -EROFS;
 
 	if (attr == &sysfs_trigger_btree_cache_shrink) {
-		struct btree_cache *bc = &c->btree_cache;
+		struct bch_fs_btree_cache *bc = &c->btree_cache;
 		struct shrink_control sc;
 
 		sc.gfp_mask = GFP_KERNEL;
@@ -475,7 +473,7 @@ STORE(bch2_fs)
 		bch2_journal_do_writes(&c->journal);
 
 	if (attr == &sysfs_trigger_freelist_wakeup)
-		closure_wake_up(&c->freelist_wait);
+		closure_wake_up(&c->allocator.freelist_wait);
 
 	if (attr == &sysfs_trigger_recalc_capacity) {
 		guard(rwsem_read)(&c->state_lock);

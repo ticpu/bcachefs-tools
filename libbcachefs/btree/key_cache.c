@@ -81,7 +81,7 @@ static bool bkey_cached_lock_for_evict(struct bkey_cached *ck)
 	return true;
 }
 
-static bool bkey_cached_evict(struct btree_key_cache *c,
+static bool bkey_cached_evict(struct bch_fs_btree_key_cache *c,
 			      struct bkey_cached *ck)
 {
 	bool ret = !rhashtable_remove_fast(&c->table, &ck->hash,
@@ -96,7 +96,7 @@ static bool bkey_cached_evict(struct btree_key_cache *c,
 
 static void __bkey_cached_free(struct rcu_pending *pending, struct rcu_head *rcu)
 {
-	struct bch_fs *c = container_of(pending->srcu, struct bch_fs, btree_trans_barrier);
+	struct bch_fs *c = container_of(pending->srcu, struct bch_fs, btree_trans.barrier);
 	struct bkey_cached *ck = container_of(rcu, struct bkey_cached, rcu);
 
 	this_cpu_dec(*c->btree_key_cache.nr_pending);
@@ -104,7 +104,7 @@ static void __bkey_cached_free(struct rcu_pending *pending, struct rcu_head *rcu
 	kmem_cache_free(bch2_key_cache, ck);
 }
 
-static inline void bkey_cached_free_noassert(struct btree_key_cache *bc,
+static inline void bkey_cached_free_noassert(struct bch_fs_btree_key_cache *bc,
 				      struct bkey_cached *ck)
 {
 	kfree(ck->k);
@@ -120,7 +120,7 @@ static inline void bkey_cached_free_noassert(struct btree_key_cache *bc,
 }
 
 static void bkey_cached_free(struct btree_trans *trans,
-			     struct btree_key_cache *bc,
+			     struct bch_fs_btree_key_cache *bc,
 			     struct bkey_cached *ck)
 {
 	/*
@@ -152,7 +152,7 @@ static struct bkey_cached *
 bkey_cached_alloc(struct btree_trans *trans, struct btree_path *path, unsigned key_u64s)
 {
 	struct bch_fs *c = trans->c;
-	struct btree_key_cache *bc = &c->btree_key_cache;
+	struct bch_fs_btree_key_cache *bc = &c->btree_key_cache;
 	bool pcpu_readers = btree_uses_pcpu_readers(path->btree_id);
 	int ret;
 
@@ -182,7 +182,7 @@ bkey_cached_alloc(struct btree_trans *trans, struct btree_path *path, unsigned k
 }
 
 static struct bkey_cached *
-bkey_cached_reuse(struct btree_key_cache *c)
+bkey_cached_reuse(struct bch_fs_btree_key_cache *c)
 {
 
 	guard(rcu)();
@@ -209,7 +209,7 @@ static int btree_key_cache_create(struct btree_trans *trans,
 				  struct bkey_s_c k)
 {
 	struct bch_fs *c = trans->c;
-	struct btree_key_cache *bc = &c->btree_key_cache;
+	struct bch_fs_btree_key_cache *bc = &c->btree_key_cache;
 	int ret = 0;
 
 	/*
@@ -516,7 +516,7 @@ int bch2_btree_key_cache_journal_flush(struct journal *j,
 	struct bkey_cached *ck =
 		container_of(pin, struct bkey_cached, journal);
 	struct bkey_cached_key key;
-	int srcu_idx = srcu_read_lock(&c->btree_trans_barrier);
+	int srcu_idx = srcu_read_lock(&c->btree_trans.barrier);
 	int ret = 0;
 
 	CLASS(btree_trans, trans)(c);
@@ -545,7 +545,7 @@ int bch2_btree_key_cache_journal_flush(struct journal *j,
 			     !bch2_journal_error(j), c,
 			     "flushing key cache: %s", bch2_err_str(ret));
 unlock:
-	srcu_read_unlock(&c->btree_trans_barrier, srcu_idx);
+	srcu_read_unlock(&c->btree_trans.barrier, srcu_idx);
 	return ret;
 }
 
@@ -600,7 +600,7 @@ void bch2_btree_key_cache_drop(struct btree_trans *trans,
 			       struct btree_path *path)
 {
 	struct bch_fs *c = trans->c;
-	struct btree_key_cache *bc = &c->btree_key_cache;
+	struct bch_fs_btree_key_cache *bc = &c->btree_key_cache;
 	struct bkey_cached *ck = (void *) path->l[0].b;
 
 	/*
@@ -642,14 +642,14 @@ static unsigned long bch2_btree_key_cache_scan(struct shrinker *shrink,
 					   struct shrink_control *sc)
 {
 	struct bch_fs *c = shrink->private_data;
-	struct btree_key_cache *bc = &c->btree_key_cache;
+	struct bch_fs_btree_key_cache *bc = &c->btree_key_cache;
 	struct bucket_table *tbl;
 	struct bkey_cached *ck;
 	size_t scanned = 0, freed = 0, nr = sc->nr_to_scan;
 	unsigned iter, start;
 	int srcu_idx;
 
-	srcu_idx = srcu_read_lock(&c->btree_trans_barrier);
+	srcu_idx = srcu_read_lock(&c->btree_trans.barrier);
 	rcu_read_lock();
 
 	tbl = rht_dereference_rcu(bc->table.tbl, &bc->table);
@@ -663,7 +663,7 @@ static unsigned long bch2_btree_key_cache_scan(struct shrinker *shrink,
 	 */
 	if (unlikely(tbl->nest)) {
 		rcu_read_unlock();
-		srcu_read_unlock(&c->btree_trans_barrier, srcu_idx);
+		srcu_read_unlock(&c->btree_trans.barrier, srcu_idx);
 		return SHRINK_STOP;
 	}
 
@@ -712,7 +712,7 @@ out:
 	bc->shrink_iter = iter;
 
 	rcu_read_unlock();
-	srcu_read_unlock(&c->btree_trans_barrier, srcu_idx);
+	srcu_read_unlock(&c->btree_trans.barrier, srcu_idx);
 
 	return freed;
 }
@@ -721,7 +721,7 @@ static unsigned long bch2_btree_key_cache_count(struct shrinker *shrink,
 					    struct shrink_control *sc)
 {
 	struct bch_fs *c = shrink->private_data;
-	struct btree_key_cache *bc = &c->btree_key_cache;
+	struct bch_fs_btree_key_cache *bc = &c->btree_key_cache;
 	long nr = atomic_long_read(&bc->nr_keys) -
 		atomic_long_read(&bc->nr_dirty);
 
@@ -736,7 +736,7 @@ static unsigned long bch2_btree_key_cache_count(struct shrinker *shrink,
 	return max(0L, nr);
 }
 
-void bch2_fs_btree_key_cache_exit(struct btree_key_cache *bc)
+void bch2_fs_btree_key_cache_exit(struct bch_fs_btree_key_cache *bc)
 {
 	struct bch_fs *c = container_of(bc, struct bch_fs, btree_key_cache);
 	struct bucket_table *tbl;
@@ -792,11 +792,11 @@ void bch2_fs_btree_key_cache_exit(struct btree_key_cache *bc)
 	free_percpu(bc->nr_pending);
 }
 
-void bch2_fs_btree_key_cache_init_early(struct btree_key_cache *c)
+void bch2_fs_btree_key_cache_init_early(struct bch_fs_btree_key_cache *c)
 {
 }
 
-int bch2_fs_btree_key_cache_init(struct btree_key_cache *bc)
+int bch2_fs_btree_key_cache_init(struct bch_fs_btree_key_cache *bc)
 {
 	struct bch_fs *c = container_of(bc, struct bch_fs, btree_key_cache);
 	struct shrinker *shrink;
@@ -805,8 +805,8 @@ int bch2_fs_btree_key_cache_init(struct btree_key_cache *bc)
 	if (!bc->nr_pending)
 		return bch_err_throw(c, ENOMEM_fs_btree_cache_init);
 
-	if (rcu_pending_init(&bc->pending[0], &c->btree_trans_barrier, __bkey_cached_free) ||
-	    rcu_pending_init(&bc->pending[1], &c->btree_trans_barrier, __bkey_cached_free))
+	if (rcu_pending_init(&bc->pending[0], &c->btree_trans.barrier, __bkey_cached_free) ||
+	    rcu_pending_init(&bc->pending[1], &c->btree_trans.barrier, __bkey_cached_free))
 		return bch_err_throw(c, ENOMEM_fs_btree_cache_init);
 
 	if (rhashtable_init(&bc->table, &bch2_btree_key_cache_params))
@@ -827,7 +827,7 @@ int bch2_fs_btree_key_cache_init(struct btree_key_cache *bc)
 	return 0;
 }
 
-void bch2_btree_key_cache_to_text(struct printbuf *out, struct btree_key_cache *bc)
+void bch2_btree_key_cache_to_text(struct printbuf *out, struct bch_fs_btree_key_cache *bc)
 {
 	printbuf_tabstop_push(out, 24);
 	printbuf_tabstop_push(out, 12);

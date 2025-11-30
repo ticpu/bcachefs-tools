@@ -241,11 +241,13 @@
 #include "alloc/types.h"
 
 #include "btree/check_types.h"
+#include "btree/interior_types.h"
 #include "btree/journal_overlay_types.h"
 #include "btree/types.h"
 #include "btree/node_scan_types.h"
 #include "btree/write_buffer_types.h"
 
+#include "data/copygc_types.h"
 #include "data/ec_types.h"
 #include "data/keylist_types.h"
 #include "data/nocow_locking_types.h"
@@ -256,13 +258,14 @@
 
 #include "fs/quota_types.h"
 
+#include "init/error_types.h"
 #include "init/passes_types.h"
 #include "init/dev_types.h"
 
 #include "journal/types.h"
 
 #include "sb/counters_types.h"
-#include "sb/errors_types.h"
+#include "sb/io_types.h"
 #include "sb/members_types.h"
 
 #include "snapshots/snapshot_types.h"
@@ -514,12 +517,6 @@ enum bch_time_stats {
 /* Number of nodes btree coalesce will try to coalesce at once */
 #define GC_MERGE_NODES		4U
 
-/* Maximum number of nodes we might need to allocate atomically: */
-#define BTREE_RESERVE_MAX	(BTREE_MAX_DEPTH + (BTREE_MAX_DEPTH - 1))
-
-/* Size of the freelist we allocate btree nodes from: */
-#define BTREE_NODE_RESERVE	(BTREE_RESERVE_MAX * 4)
-
 #define BTREE_NODE_OPEN_BUCKET_RESERVE	(BTREE_RESERVE_MAX * BCH_REPLICAS_MAX)
 
 struct btree;
@@ -712,23 +709,6 @@ struct btree_debug {
 };
 
 #define BCH_LINK_MAX	U32_MAX
-#define BCH_TRANSACTIONS_NR 128
-
-struct btree_transaction_stats {
-	struct bch2_time_stats	duration;
-	struct bch2_time_stats	lock_hold_times;
-	struct mutex		lock;
-	unsigned		nr_max_paths;
-	unsigned		max_mem;
-#ifdef CONFIG_BCACHEFS_TRANS_KMALLOC_TRACE
-	darray_trans_kmalloc_trace trans_kmalloc_trace;
-#endif
-	char			*max_paths_text;
-};
-
-struct bch_fs_pcpu {
-	u64			sectors_available;
-};
 
 struct journal_seq_blacklist_table {
 	size_t			nr;
@@ -737,10 +717,6 @@ struct journal_seq_blacklist_table {
 		u64		end;
 		bool		dirty;
 	}			entries[];
-};
-
-struct btree_trans_buf {
-	struct btree_trans	*trans;
 };
 
 #define BCH_WRITE_REFS()						\
@@ -793,19 +769,22 @@ struct bch_fs {
 	struct super_block	*vfs_sb;
 	dev_t			dev;
 	char			name[40];
+
 	struct stdio_redirect	*stdio;
 	struct task_struct	*stdio_filter;
+	unsigned		loglevel;
+	unsigned		prev_loglevel;
+	/*
+	 * Certain operations are only allowed in single threaded mode, during
+	 * recovery, and we want to assert that this is the case:
+	 */
+	struct task_struct	*recovery_task;
 
 	/* ro/rw, add/remove/resize devices: */
 	struct rw_semaphore	state_lock;
 
 	/* Counts outstanding writes, for clean transition to read-only */
 	struct enumerated_ref	writes;
-	/*
-	 * Certain operations are only allowed in single threaded mode, during
-	 * recovery, and we want to assert that this is the case:
-	 */
-	struct task_struct	*recovery_task;
 
 	/*
 	 * Analagous to c->writes, for asynchronous ops that don't necessarily
@@ -813,121 +792,83 @@ struct bch_fs {
 	 */
 	refcount_t		ro_ref;
 	wait_queue_head_t	ro_ref_wait;
-
 	struct work_struct	read_only_work;
 
 	struct bch_dev __rcu	*devs[BCH_SB_MEMBERS_MAX];
+	struct bch_devs_mask	devs_online;
 	struct bch_devs_mask	devs_removed;
 	struct bch_devs_mask	devs_rotational;
 
 	u8			extent_type_u64s[31];
 	u8			extent_types_known;
 
-	struct bch_accounting_mem accounting;
-
-	struct bch_replicas_cpu replicas;
-
-	struct journal_entry_res btree_root_journal_res;
-	struct journal_entry_res clock_journal_res;
-
-	struct bch_disk_groups_cpu __rcu *disk_groups;
-
 	struct bch_opts		opts;
 	atomic_t		opt_change_cookie;
 
-	unsigned		loglevel;
-	unsigned		prev_loglevel;
-
-	/* Updated by bch2_sb_update():*/
-	struct {
-		__uuid_t	uuid;
-		__uuid_t	user_uuid;
-
-		u16		version;
-		u16		version_incompat;
-		u16		version_incompat_allowed;
-		u16		version_min;
-		u16		version_upgrade_complete;
-
-		u8		nr_devices;
-		u8		clean;
-		bool		multi_device; /* true if we've ever had more than one device */
-
-		u8		encryption_type;
-
-		u64		time_base_lo;
-		u32		time_base_hi;
-		unsigned	time_units_per_sec;
-		unsigned	nsec_per_time_unit;
-		u64		features;
-		u64		compat;
-		u64		recovery_passes_required;
-		unsigned long	errors_silent[BITS_TO_LONGS(BCH_FSCK_ERR_MAX)];
-		u64		btrees_lost_data;
-	}			sb;
-
-	unsigned long		incompat_versions_requested[BITS_TO_LONGS(BCH_VERSION_MINOR(bcachefs_metadata_version_current))];
-
-	struct unicode_map	*cf_encoding;
-
+	struct bch_sb_cpu	sb;
 	struct bch_sb_handle	disk_sb;
-
-	unsigned short		block_bits;	/* ilog2(block_size) */
-
-	u16			btree_foreground_merge_threshold;
-
 	struct closure		sb_write;
 	struct mutex		sb_lock;
+	unsigned long		incompat_versions_requested[BITS_TO_LONGS(BCH_VERSION_MINOR(bcachefs_metadata_version_current))];
+	struct unicode_map	*cf_encoding;
+
+	unsigned short		block_bits;	/* ilog2(block_size) */
+	u16			btree_foreground_merge_threshold;
 
 	struct delayed_work	maybe_schedule_btree_bitmap_gc;
 
-	/* snapshot.c: */
-	struct snapshot_table __rcu *snapshots;
-	struct mutex		snapshot_table_lock;
-	struct rw_semaphore	snapshot_create_lock;
+	struct bch_fs_counters	counters;
+	struct bch2_time_stats	times[BCH_TIME_STAT_NR];
+	struct bch_fs_errors	errors;
 
-	struct snapshot_delete	snapshot_delete;
-	struct work_struct	snapshot_wait_for_pagecache_and_delete_work;
-	snapshot_id_list	snapshots_unlinked;
-	struct mutex		snapshots_unlinked_lock;
+#ifdef CONFIG_BCACHEFS_ASYNC_OBJECT_LISTS
+	struct async_obj_list	async_objs[BCH_ASYNC_OBJ_NR];
+#endif
+
+	struct journal				journal;
+	u64					journal_replay_seq_start;
+	u64					journal_replay_seq_end;
+	GENRADIX(struct journal_replay *)	journal_entries;
+	u64					journal_entries_base_seq;
+	struct journal_keys			journal_keys;
+	struct list_head			journal_iters;
+	struct journal_seq_blacklist_table	*journal_seq_blacklist_table;
+
+	struct bch_fs_recovery			recovery;
 
 	/* BTREE CACHE */
-	struct bio_set		btree_bio;
-	struct workqueue_struct	*btree_read_complete_wq;
-	struct workqueue_struct	*btree_write_submit_wq;
-
-	struct btree_root	btree_roots_known[BTREE_ID_NR];
-	DARRAY(struct btree_root) btree_roots_extra;
-	struct mutex		btree_root_lock;
-
-	struct btree_cache	btree_cache;
-
 	/*
-	 * Cache of allocated btree nodes - if we allocate a btree node and
-	 * don't use it, if we free it that space can't be reused until going
-	 * _all_ the way through the allocator (which exposes us to a livelock
-	 * when allocating btree reserves fail halfway through) - instead, we
-	 * can stick them here:
+	 * A btree node on disk could have too many bsets for an iterator to fit
+	 * on the stack - have to dynamically allocate them
 	 */
-	struct btree_alloc	btree_reserve_cache[BTREE_NODE_RESERVE * 2];
-	unsigned		btree_reserve_cache_nr;
-	struct mutex		btree_reserve_cache_lock;
+	mempool_t				fill_iter;
+	mempool_t				btree_bounce_pool;
+	struct bio_set				btree_bio;
+	struct workqueue_struct			*btree_read_complete_wq;
+	struct workqueue_struct			*btree_write_submit_wq;
+	struct journal_entry_res		btree_root_journal_res;
+	struct workqueue_struct			*btree_write_complete_wq;
 
-	mempool_t		btree_interior_update_pool;
-	struct list_head	btree_interior_update_list;
-	struct list_head	btree_interior_updates_unwritten;
-	struct mutex		btree_interior_update_lock;
-	struct mutex		btree_interior_update_commit_lock;
-	struct closure_waitlist	btree_interior_update_wait;
+	struct bch_fs_btree_cache		btree_cache;
+	struct bch_fs_btree_key_cache		btree_key_cache;
+	struct bch_fs_btree_write_buffer	btree_write_buffer;
+	struct bch_fs_btree_trans		btree_trans;
+	struct bch_fs_btree_reserve_cache	btree_reserve_cache;
+	struct bch_fs_btree_interior_updates	btree_interior_updates;
+	struct bch_fs_btree_node_rewrites	btree_node_rewrites;
+	struct find_btree_nodes			found_btree_nodes;
 
-	struct workqueue_struct	*btree_interior_update_worker;
-	struct work_struct	btree_interior_update_work;
+	struct bch_fs_gc			gc;
+	struct bch_fs_gc_gens			gc_gens;
 
-	struct workqueue_struct	*btree_node_rewrite_worker;
-	struct list_head	btree_node_rewrites;
-	struct list_head	btree_node_rewrites_pending;
-	spinlock_t		btree_node_rewrites_lock;
-	struct closure_waitlist	btree_node_rewrites_wait;
+	struct bch_accounting_mem		accounting;
+	struct bch_replicas_cpu			replicas;
+	struct bch_disk_groups_cpu __rcu	*disk_groups;
+	struct bch_fs_capacity			capacity;
+	struct bch_fs_allocator			allocator;
+	struct buckets_waiting_for_journal	buckets_waiting_for_journal;
+
+	struct bch_fs_snapshots			snapshots;
 
 	/* btree_io.c: */
 	spinlock_t		btree_write_error_lock;
@@ -935,120 +876,21 @@ struct bch_fs {
 		atomic64_t	nr;
 		atomic64_t	bytes;
 	}			btree_write_stats[BTREE_WRITE_TYPE_NR];
-
-	/* btree_iter.c: */
-	struct seqmutex		btree_trans_lock;
-	struct list_head	btree_trans_list;
-	mempool_t		btree_trans_pool;
-	mempool_t		btree_trans_mem_pool;
-	struct btree_trans_buf  __percpu	*btree_trans_bufs;
-
-	struct srcu_struct	btree_trans_barrier;
-	bool			btree_trans_barrier_initialized;
-
-	struct btree_key_cache	btree_key_cache;
-
-	struct btree_write_buffer btree_write_buffer;
-
-	struct workqueue_struct	*btree_update_wq;
-	struct workqueue_struct	*btree_write_complete_wq;
-	/* copygc needs its own workqueue for index updates.. */
-	struct workqueue_struct	*copygc_wq;
 	/*
 	 * Use a dedicated wq for write ref holder tasks. Required to avoid
 	 * dependency problems with other wq tasks that can block on ref
 	 * draining, such as read-only transition.
 	 */
-	struct workqueue_struct *write_ref_wq;
+	struct workqueue_struct		*write_ref_wq;
 
-	struct workqueue_struct *promote_wq;
-	struct semaphore __percpu *promote_limit;
+	struct workqueue_struct		*promote_wq;
+	struct semaphore __percpu	*promote_limit;
 
-	/* ALLOCATION */
-	struct bch_devs_mask	online_devs;
-	struct bch_devs_mask	rw_devs[BCH_DATA_NR];
-	unsigned long		rw_devs_change_count;
-
-	u64			capacity; /* sectors */
-	u64			reserved; /* sectors */
-
-	/*
-	 * When capacity _decreases_ (due to a disk being removed), we
-	 * increment capacity_gen - this invalidates outstanding reservations
-	 * and forces them to be revalidated
-	 */
-	u32			capacity_gen;
-	unsigned		bucket_size_max;
-
-	atomic64_t		sectors_available;
-	struct mutex		sectors_available_lock;
-
-	struct bch_fs_pcpu __percpu	*pcpu;
-
-	struct percpu_rw_semaphore	mark_lock;
-
-	seqcount_t			usage_lock;
-	struct bch_fs_usage_base __percpu *usage;
-	u64 __percpu		*online_reserved;
-
-	unsigned long		allocator_last_stuck;
-
-	struct io_clock		io_clock[2];
-
-	/* JOURNAL SEQ BLACKLIST */
-	struct journal_seq_blacklist_table *
-				journal_seq_blacklist_table;
-
-	/* ALLOCATOR */
-	spinlock_t		freelist_lock;
-	struct closure_waitlist	freelist_wait;
-
-	open_bucket_idx_t	open_buckets_freelist;
-	open_bucket_idx_t	open_buckets_nr_free;
-	struct closure_waitlist	open_buckets_wait;
-	struct open_bucket	open_buckets[OPEN_BUCKETS_COUNT];
-	open_bucket_idx_t	open_buckets_hash[OPEN_BUCKETS_COUNT];
-
-	open_bucket_idx_t	open_buckets_partial[OPEN_BUCKETS_COUNT];
-	open_bucket_idx_t	open_buckets_partial_nr;
-
-	struct write_point	btree_write_point;
-	struct write_point	reconcile_write_point;
-
-	struct write_point	write_points[WRITE_POINT_MAX];
-	struct hlist_head	write_points_hash[WRITE_POINT_HASH_NR];
-	struct mutex		write_points_hash_lock;
-	unsigned		write_points_nr;
-
-	struct buckets_waiting_for_journal buckets_waiting_for_journal;
-
-	/* GARBAGE COLLECTION */
-	struct work_struct	gc_gens_work;
-	unsigned long		gc_count;
-
-	enum btree_id		gc_gens_btree;
-	struct bpos		gc_gens_pos;
-
-	/*
-	 * Tracks GC's progress - everything in the range [ZERO_KEY..gc_cur_pos]
-	 * has been marked by GC.
-	 *
-	 * gc_cur_phase is a superset of btree_ids (BTREE_ID_extents etc.)
-	 *
-	 * Protected by gc_pos_lock. Only written to by GC thread, so GC thread
-	 * can read without a lock.
-	 */
-	seqcount_t		gc_pos_lock;
-	struct gc_pos		gc_pos;
-
-	/*
-	 * The allocation code needs gc_mark in struct bucket to be correct, but
-	 * it's not while a gc is in progress.
-	 */
-	struct rw_semaphore	gc_lock;
-	struct mutex		gc_gens_lock;
+	struct io_clock			io_clock[2];
+	struct journal_entry_res	clock_journal_res;
 
 	/* IO PATH */
+	struct workqueue_struct	*btree_update_wq;
 	struct bio_set		bio_read;
 	struct bio_set		bio_read_split;
 	struct bio_set		bio_write;
@@ -1058,10 +900,6 @@ struct bch_fs {
 	struct bucket_nocow_lock_table
 				nocow_locks;
 	struct rhashtable	promote_table;
-
-#ifdef CONFIG_BCACHEFS_ASYNC_OBJECT_LISTS
-	struct async_obj_list	async_objs[BCH_ASYNC_OBJ_NR];
-#endif
 
 	mempool_t		compression_bounce[2];
 	mempool_t		compress_workspace[BCH_COMPRESSION_OPT_NR];
@@ -1076,38 +914,9 @@ struct bch_fs {
 	struct list_head	moving_context_list;
 	struct mutex		moving_context_lock;
 
-	/* REBALANCE */
 	struct bch_fs_reconcile	reconcile;
-
-	/* COPYGC */
-	struct task_struct	*copygc_thread;
-	struct write_point	copygc_write_point;
-	s64			copygc_wait_at;
-	s64			copygc_wait;
-	bool			copygc_running;
-	wait_queue_head_t	copygc_running_wq;
-
-	/* STRIPES: */
-	GENRADIX(struct gc_stripe) gc_stripes;
-
-	struct hlist_head	ec_stripes_new[32];
-	struct hlist_head	ec_stripes_new_buckets[64];
-	spinlock_t		ec_stripes_new_lock;
-
-	/* ERASURE CODING */
-	struct list_head	ec_stripe_head_list;
-	struct mutex		ec_stripe_head_lock;
-
-	struct list_head	ec_stripe_new_list;
-	struct mutex		ec_stripe_new_lock;
-	wait_queue_head_t	ec_stripe_new_wait;
-
-	struct work_struct	ec_stripe_create_work;
-	u64			ec_stripe_hint;
-
-	struct work_struct	ec_stripe_delete_work;
-
-	struct bio_set		ec_bioset;
+	struct bch_fs_copygc	copygc;
+	struct bch_fs_ec	ec;
 
 	/* REFLINK */
 	reflink_gc_table	reflink_gc_table;
@@ -1129,11 +938,6 @@ struct bch_fs {
 	/* QUOTAS */
 	struct bch_memquota_type quotas[QTYP_NR];
 
-	/* RECOVERY */
-	u64			journal_replay_seq_start;
-	u64			journal_replay_seq_end;
-	struct bch_fs_recovery	recovery;
-
 	/* DEBUG JUNK */
 	struct dentry		*fs_debug_dir;
 	struct dentry		*btree_debug_dir;
@@ -1142,38 +946,6 @@ struct bch_fs {
 	struct btree		*verify_data;
 	struct btree_node	*verify_ondisk;
 	struct mutex		verify_lock;
-
-	/*
-	 * A btree node on disk could have too many bsets for an iterator to fit
-	 * on the stack - have to dynamically allocate them
-	 */
-	mempool_t		fill_iter;
-
-	mempool_t		btree_bounce_pool;
-
-	struct journal		journal;
-	GENRADIX(struct journal_replay *) journal_entries;
-	u64			journal_entries_base_seq;
-	struct journal_keys	journal_keys;
-	struct list_head	journal_iters;
-
-	struct find_btree_nodes	found_btree_nodes;
-
-	u64			last_bucket_seq_cleanup;
-
-	struct bch_fs_counters	counters;
-
-	struct bch2_time_stats	times[BCH_TIME_STAT_NR];
-
-	struct btree_transaction_stats btree_transaction_stats[BCH_TRANSACTIONS_NR];
-
-	/* ERRORS */
-	struct list_head	fsck_error_msgs;
-	struct mutex		fsck_error_msgs_lock;
-	bool			fsck_alloc_msgs_err;
-
-	bch_sb_errors_cpu	fsck_error_counts;
-	struct mutex		fsck_error_counts_lock;
 };
 
 static inline int __bch2_err_throw(struct bch_fs *c, int err)

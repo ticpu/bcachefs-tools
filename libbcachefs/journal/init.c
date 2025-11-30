@@ -49,7 +49,7 @@ static int bch2_set_nr_journal_buckets_iter(struct bch_dev *ca, unsigned nr,
 		if (ret == -BCH_ERR_bucket_alloc_blocked)
 			ret = bch_err_throw(c, freelist_empty);
 		if (ret == -BCH_ERR_freelist_empty) /* don't if we're actually out of buckets */
-			closure_wake_up(&c->freelist_wait);
+			closure_wake_up(&c->allocator.freelist_wait);
 
 		if (ret)
 			break;
@@ -475,7 +475,6 @@ int bch2_fs_journal_start(struct journal *j, struct journal_start_info info)
 	scoped_guard(spinlock, &j->lock) {
 		j->last_flush_write = jiffies;
 		j->reservations.idx = journal_cur_seq(j);
-		c->last_bucket_seq_cleanup = journal_cur_seq(j);
 	}
 
 	try(bch2_replicas_gc_reffed(c));

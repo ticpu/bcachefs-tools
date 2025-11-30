@@ -66,21 +66,22 @@ static unsigned bkey_get_dev_refs(struct bch_fs *c, struct bkey_s_c k)
 
 noinline_for_stack
 static void count_data_update_key_fail(struct data_update *u,
-				       struct btree_iter *iter,
 				       struct bkey_s_c new,
 				       struct bkey_s_c wrote,
 				       struct bkey_i *insert,
 				       const char *msg)
 {
 	struct bch_fs *c = u->op.c;
-	unsigned sectors = new.k->p.offset - iter->pos.offset;
 
 	if (u->stats) {
 		atomic64_inc(&u->stats->keys_raced);
-		atomic64_add(sectors, &u->stats->sectors_raced);
+		atomic64_add(insert->k.size, &u->stats->sectors_raced);
 	}
 
-	event_add_trace(c, data_update_key_fail, sectors, buf, ({
+	event_add_trace(c, data_update_key_fail, insert->k.size, buf, ({
+		prt_str(&buf, bch2_data_update_type_strs[u->opts.type]);
+		prt_newline(&buf);
+
 		prt_str(&buf, msg);
 		prt_newline(&buf);
 
@@ -157,20 +158,19 @@ static int data_update_index_update_key(struct btree_trans *trans,
 				    sizeof(struct bch_extent_ptr) * BCH_REPLICAS_MAX));
 	bkey_reassemble(insert, k);
 
+	bch2_cut_front(c, iter->pos,	&new->k_i);
+	bch2_cut_front(c, iter->pos,	insert);
+	bch2_cut_back(new->k.p,		insert);
+	bch2_cut_back(insert->k.p,	&new->k_i);
+
 	if (!bch2_extents_match(c, k, old)) {
-		count_data_update_key_fail(u, iter, k, bkey_i_to_s_c(&new->k_i), NULL, "no match:");
+		count_data_update_key_fail(u, k, bkey_i_to_s_c(&new->k_i), insert, "no match:");
 		bch2_btree_iter_advance(iter);
 		return 0;
 	}
 
 	struct bch_inode_opts opts;
 	try(bch2_bkey_get_io_opts(trans, NULL, k, &opts));
-
-	bch2_cut_front(c, iter->pos, &new->k_i);
-
-	bch2_cut_front(c, iter->pos,	insert);
-	bch2_cut_back(new->k.p,		insert);
-	bch2_cut_back(insert->k.p,	&new->k_i);
 
 	bch2_bkey_propagate_incompressible(c, insert, bkey_i_to_s_c(&new->k_i));
 
@@ -204,7 +204,7 @@ static int data_update_index_update_key(struct btree_trans *trans,
 	if (u->opts.ptrs_rewrite &&
 	    !rewrites_found &&
 	    bch2_bkey_durability(c, k) >= opts.data_replicas) {
-		count_data_update_key_fail(u, iter, k, bkey_i_to_s_c(&new->k_i), insert,
+		count_data_update_key_fail(u, k, bkey_i_to_s_c(&new->k_i), insert,
 					   "no rewrites found:");
 		bch2_btree_iter_advance(iter);
 		return 0;
@@ -220,7 +220,7 @@ static int data_update_index_update_key(struct btree_trans *trans,
 		 !ptr_c->cached));
 
 	if (!bkey_val_u64s(&new->k)) {
-		count_data_update_key_fail(u, iter, k,
+		count_data_update_key_fail(u, k,
 				    bkey_i_to_s_c(bch2_keylist_front(&u->op.insert_keys)),
 				    insert, "new replicas conflicted:");
 		bch2_btree_iter_advance(iter);
@@ -762,7 +762,7 @@ int bch2_can_do_write(struct bch_fs *c, struct data_update_opts *opts,
 	enum bch_watermark watermark = opts->commit_flags & BCH_WATERMARK_MASK;
 
 	if ((opts->write_flags & BCH_WRITE_alloc_nowait) &&
-	    unlikely(c->open_buckets_nr_free <= bch2_open_buckets_reserved(watermark)))
+	    unlikely(c->allocator.open_buckets_nr_free <= bch2_open_buckets_reserved(watermark)))
 		return bch_err_throw(c, data_update_fail_would_block);
 
 	guard(rcu)();
@@ -999,9 +999,11 @@ int bch2_data_update_init(struct btree_trans *trans,
 		 *   (i.e. trying to move a durability=2 replica to a target with a
 		 *   single durability=2 device)
 		 */
-		ret = bch2_can_do_write(c, &m->opts, k, &m->op.devs_have);
-		if (ret)
-			goto out;
+		if (data_opts.type != BCH_DATA_UPDATE_copygc) {
+			ret = bch2_can_do_write(c, &m->opts, k, &m->op.devs_have);
+			if (ret)
+				goto out;
+		}
 
 		if (reserve_sectors) {
 			ret = bch2_disk_reservation_add(c, &m->op.res, reserve_sectors,

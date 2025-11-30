@@ -369,7 +369,7 @@ static CLOSURE_CALLBACK(journal_write_done)
 
 	if (last_seq_ondisk_updated) {
 		bch2_reset_alloc_cursors(c);
-		closure_wake_up(&c->freelist_wait);
+		closure_wake_up(&c->allocator.freelist_wait);
 		bch2_do_discards(c);
 	}
 
@@ -410,6 +410,11 @@ static CLOSURE_CALLBACK(journal_write_submit)
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
 	unsigned sectors = vstruct_sectors(w->data, c->block_bits);
 
+	event_inc_trace(c, journal_write, buf, ({
+		prt_printf(&buf, "seq %llu\n", le64_to_cpu(w->data->seq));
+		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&w->key));
+	}));
+
 	extent_for_each_ptr(bkey_i_to_s_extent(&w->key), ptr) {
 		struct bch_dev *ca = bch2_dev_have_ref(c, ptr->dev);
 
@@ -441,9 +446,6 @@ static CLOSURE_CALLBACK(journal_write_submit)
 			bio->bi_opf    |= REQ_PREFLUSH;
 
 		bch2_bio_map(bio, w->data, sectors << 9);
-
-		event_inc_trace(c, journal_write, buf,
-			prt_printf(&buf, "seq %llu", le64_to_cpu(w->data->seq)));
 
 		closure_bio_submit(bio, cl);
 
@@ -699,7 +701,7 @@ CLOSURE_CALLBACK(bch2_journal_write)
 	closure_type(w, struct journal_buf, io);
 	struct journal *j = container_of(w, struct journal, buf[w->idx]);
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
-	unsigned nr_rw_members = dev_mask_nr(&c->rw_devs[BCH_DATA_free]);
+	unsigned nr_rw_members = dev_mask_nr(&c->allocator.rw_devs[BCH_DATA_free]);
 	int ret;
 
 	BUG_ON(!w->write_started);

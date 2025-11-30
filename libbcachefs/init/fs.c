@@ -556,6 +556,9 @@ int bch2_fs_read_write_early(struct bch_fs *c)
 
 static void __bch2_fs_free(struct bch_fs *c)
 {
+	bch2_journal_keys_put_initial(c);
+	BUG_ON(atomic_read(&c->journal_keys.ref));
+
 	for (unsigned i = 0; i < BCH_TIME_STAT_NR; i++)
 		bch2_time_stats_exit(&c->times[i]);
 
@@ -570,7 +573,6 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_free_fsck_errs(c);
 	bch2_fs_vfs_exit(c);
 	bch2_fs_snapshots_exit(c);
-	bch2_fs_sb_errors_exit(c);
 	bch2_fs_replicas_exit(c);
 	bch2_fs_reconcile_exit(c);
 	bch2_fs_quota_exit(c);
@@ -581,12 +583,15 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_fs_fsio_exit(c);
 	bch2_fs_io_write_exit(c);
 	bch2_fs_io_read_exit(c);
+	bch2_fs_errors_exit(c);
 	bch2_fs_encryption_exit(c);
 	bch2_fs_ec_exit(c);
 	bch2_fs_counters_exit(c);
+	bch2_fs_copygc_exit(c);
 	bch2_fs_compress_exit(c);
 	bch2_io_clock_exit(&c->io_clock[WRITE]);
 	bch2_io_clock_exit(&c->io_clock[READ]);
+	bch2_fs_capacity_exit(c);
 	bch2_fs_buckets_waiting_for_journal_exit(c);
 	bch2_fs_btree_write_buffer_exit(c);
 	bch2_fs_btree_key_cache_exit(&c->btree_key_cache);
@@ -595,19 +600,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_fs_btree_cache_exit(c);
 	bch2_fs_accounting_exit(c);
 	bch2_fs_async_obj_exit(c);
-	bch2_journal_keys_put_initial(c);
 
-	BUG_ON(atomic_read(&c->journal_keys.ref));
-	percpu_free_rwsem(&c->mark_lock);
-	if (c->online_reserved) {
-		u64 v = percpu_u64_get(c->online_reserved);
-		WARN(v, "online_reserved not 0 at shutdown: %lli", v);
-		free_percpu(c->online_reserved);
-	}
-
-	darray_exit(&c->btree_roots_extra);
-	free_percpu(c->pcpu);
-	free_percpu(c->usage);
 	mempool_exit(&c->btree_bounce_pool);
 	bioset_exit(&c->btree_bio);
 	mempool_exit(&c->fill_iter);
@@ -623,8 +616,6 @@ static void __bch2_fs_free(struct bch_fs *c)
 		destroy_workqueue(c->btree_write_submit_wq);
 	if (c->btree_read_complete_wq)
 		destroy_workqueue(c->btree_read_complete_wq);
-	if (c->copygc_wq)
-		destroy_workqueue(c->copygc_wq);
 	if (c->btree_write_complete_wq)
 		destroy_workqueue(c->btree_write_complete_wq);
 	if (c->btree_update_wq)
@@ -682,7 +673,7 @@ int bch2_fs_stop(struct bch_fs *c)
 
 		cancel_work_sync(&c->read_only_work);
 
-		flush_work(&c->btree_interior_update_work);
+		flush_work(&c->btree_interior_updates.work);
 	}
 
 	if (test_bit(BCH_FS_emergency_ro, &c->flags))
@@ -769,8 +760,6 @@ int bch2_fs_init_rw(struct bch_fs *c)
 				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_UNBOUND, 512)) ||
 	    !(c->btree_write_complete_wq = alloc_workqueue("bcachefs_btree_write_complete",
 				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM, 1)) ||
-	    !(c->copygc_wq = alloc_workqueue("bcachefs_copygc",
-				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_CPU_INTENSIVE, 1)) ||
 	    !(c->btree_write_submit_wq = alloc_workqueue("bcachefs_btree_write_sumit",
 				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM, 1)) ||
 	    !(c->write_ref_wq = alloc_workqueue("bcachefs_write_ref",
@@ -1060,7 +1049,6 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 
 	init_rwsem(&c->state_lock);
 	mutex_init(&c->sb_lock);
-	mutex_init(&c->btree_root_lock);
 	INIT_WORK(&c->read_only_work, bch2_fs_read_only_work);
 
 	refcount_set(&c->ro_ref, 1);
@@ -1079,13 +1067,13 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	bch2_fs_btree_write_buffer_init_early(c);
 	bch2_fs_copygc_init(c);
 	bch2_fs_ec_init_early(c);
+	bch2_fs_errors_init_early(c);
 	bch2_fs_journal_init_early(&c->journal);
 	bch2_fs_journal_keys_init(c);
 	bch2_fs_move_init(c);
 	bch2_fs_nocow_locking_init_early(c);
 	bch2_fs_quota_init(c);
 	bch2_fs_recovery_passes_init(c);
-	bch2_fs_sb_errors_init_early(c);
 	bch2_fs_snapshots_init_early(c);
 	bch2_fs_subvolumes_init_early(c);
 	bch2_find_btree_nodes_init(&c->found_btree_nodes);
@@ -1093,17 +1081,10 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	INIT_LIST_HEAD(&c->list);
 
 	mutex_init(&c->bio_bounce_pages_lock);
-	mutex_init(&c->snapshot_table_lock);
-	init_rwsem(&c->snapshot_create_lock);
 
 	spin_lock_init(&c->btree_write_error_lock);
 
 	INIT_LIST_HEAD(&c->journal_iters);
-
-	INIT_LIST_HEAD(&c->fsck_error_msgs);
-	mutex_init(&c->fsck_error_msgs_lock);
-
-	seqcount_init(&c->usage_lock);
 
 	INIT_LIST_HEAD(&c->vfs_inodes_list);
 	mutex_init(&c->vfs_inodes_lock);
@@ -1112,9 +1093,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	c->journal.noflush_write_time	= &c->times[BCH_TIME_journal_noflush_write];
 	c->journal.flush_seq_time	= &c->times[BCH_TIME_journal_flush_seq];
 
-	mutex_init(&c->sectors_available_lock);
-
-	try(percpu_init_rwsem(&c->mark_lock));
+	try(bch2_fs_capacity_init(c));
 
 	scoped_guard(mutex, &c->sb_lock)
 		try(bch2_sb_to_fs(c, sb));
@@ -1171,9 +1150,6 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 			max(offsetof(struct btree_read_bio, bio),
 			    offsetof(struct btree_write_bio, wbio.bio)),
 			BIOSET_NEED_BVECS) ||
-	    !(c->pcpu = alloc_percpu(struct bch_fs_pcpu)) ||
-	    !(c->usage = alloc_percpu(struct bch_fs_usage_base)) ||
-	    !(c->online_reserved = alloc_percpu(u64)) ||
 	    mempool_init_kvmalloc_pool(&c->btree_bounce_pool, 1,
 				       c->opts.btree_node_size))
 		return bch_err_throw(c, ENOMEM_fs_other_alloc);
@@ -1189,12 +1165,12 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	try(bch2_fs_compress_init(c));
 	try(bch2_fs_counters_init(c));
 	try(bch2_fs_ec_init(c));
+	try(bch2_fs_errors_init(c));
 	try(bch2_fs_encryption_init(c));
 	try(bch2_fs_fsio_init(c));
 	try(bch2_fs_fs_io_direct_init(c));
 	try(bch2_fs_io_read_init(c));
 	try(bch2_fs_reconcile_init(c));
-	try(bch2_fs_sb_errors_init(c));
 	try(bch2_fs_vfs_init(c));
 
 
@@ -1304,9 +1280,9 @@ static int bch2_fs_may_start(struct bch_fs *c, struct printbuf *err)
 	}
 	}
 
-	if (!bch2_can_read_fs_with_devs(c, c->online_devs, flags, err) ||
+	if (!bch2_can_read_fs_with_devs(c, c->devs_online, flags, err) ||
 	    (!c->opts.read_only &&
-	     !bch2_can_write_fs_with_devs(c, c->rw_devs[0], flags, err))) {
+	     !bch2_can_write_fs_with_devs(c, c->allocator.rw_devs[0], flags, err))) {
 		prt_printf(err, "Missing devices\n");
 		for_each_member_device(c, ca)
 			if (!bch2_dev_is_online(ca) && bch2_dev_has_data(c, ca)) {

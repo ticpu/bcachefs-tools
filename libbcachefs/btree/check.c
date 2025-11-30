@@ -76,14 +76,14 @@ static struct bkey_s unsafe_bkey_s_c_to_s(struct bkey_s_c k)
 static inline void __gc_pos_set(struct bch_fs *c, struct gc_pos new_pos)
 {
 	guard(preempt)();
-	write_seqcount_begin(&c->gc_pos_lock);
-	c->gc_pos = new_pos;
-	write_seqcount_end(&c->gc_pos_lock);
+	write_seqcount_begin(&c->gc.pos_lock);
+	c->gc.pos = new_pos;
+	write_seqcount_end(&c->gc.pos_lock);
 }
 
 static inline void gc_pos_set(struct bch_fs *c, struct gc_pos new_pos)
 {
-	BUG_ON(gc_pos_cmp(new_pos, c->gc_pos) < 0);
+	BUG_ON(gc_pos_cmp(new_pos, c->gc.pos) < 0);
 	__gc_pos_set(c, new_pos);
 }
 
@@ -798,7 +798,7 @@ static void bch2_gc_free(struct bch_fs *c)
 	bch2_accounting_gc_free(c);
 
 	genradix_free(&c->reflink_gc_table);
-	genradix_free(&c->gc_stripes);
+	genradix_free(&c->ec.gc_stripes);
 
 	for_each_member_device(c, ca)
 		genradix_free(&ca->buckets_gc);
@@ -953,7 +953,7 @@ static int bch2_gc_write_stripes_key(struct btree_trans *trans,
 	struct bch_fs *c = trans->c;
 	CLASS(printbuf, buf)();
 	const struct bch_stripe *s = bkey_s_c_to_stripe(k).v;
-	struct gc_stripe *m = genradix_ptr(&c->gc_stripes, k.k->p.offset);
+	struct gc_stripe *m = genradix_ptr(&c->ec.gc_stripes, k.k->p.offset);
 
 	bool bad = false;
 	for (unsigned i = 0; i < s->nr_blocks; i++) {
@@ -1024,7 +1024,7 @@ int bch2_check_allocations(struct bch_fs *c)
 	int ret;
 
 	guard(rwsem_read)(&c->state_lock);
-	guard(rwsem_write)(&c->gc_lock);
+	guard(rwsem_write)(&c->gc.lock);
 
 	bch2_btree_interior_updates_flush(c);
 
@@ -1046,14 +1046,12 @@ int bch2_check_allocations(struct bch_fs *c)
 	if (ret)
 		goto out;
 
-	c->gc_count++;
-
 	ret   = bch2_gc_alloc_done(c) ?:
 		bch2_gc_accounting_done(c) ?:
 		bch2_gc_stripes_done(c) ?:
 		bch2_gc_reflink_done(c);
 out:
-	scoped_guard(percpu_write, &c->mark_lock) {
+	scoped_guard(percpu_write, &c->capacity.mark_lock) {
 		/* Indicates that gc is no longer in progress: */
 		__gc_pos_set(c, gc_phase(GC_PHASE_not_running));
 		bch2_gc_free(c);
@@ -1063,7 +1061,7 @@ out:
 	 * At startup, allocations can happen directly instead of via the
 	 * allocator thread - issue wakeup in case they blocked on gc_lock:
 	 */
-	closure_wake_up(&c->freelist_wait);
+	closure_wake_up(&c->allocator.freelist_wait);
 
 	if (!ret && !test_bit(BCH_FS_errors_not_fixed, &c->flags))
 		bch2_sb_members_clean_deleted(c);
@@ -1104,7 +1102,7 @@ int bch2_gc_gens(struct bch_fs *c)
 	u64 b, start_time = local_clock();
 	int ret;
 
-	if (!mutex_trylock(&c->gc_gens_lock))
+	if (!mutex_trylock(&c->gc_gens.lock))
 		return 0;
 
 	event_inc_trace(c, gc_gens_start, buf);
@@ -1115,7 +1113,7 @@ int bch2_gc_gens(struct bch_fs *c)
 	 * state lock at the start of going RO.
 	 */
 	if (!down_read_trylock(&c->state_lock)) {
-		mutex_unlock(&c->gc_gens_lock);
+		mutex_unlock(&c->gc_gens.lock);
 		return 0;
 	}
 
@@ -1137,8 +1135,7 @@ int bch2_gc_gens(struct bch_fs *c)
 
 	for (unsigned i = 0; i < BTREE_ID_NR; i++)
 		if (btree_type_has_data_ptrs(i)) {
-			c->gc_gens_btree = i;
-			c->gc_gens_pos = POS_MIN;
+			c->gc_gens.pos = BBPOS(i, POS_MIN);
 
 			ret = bch2_trans_run(c,
 				for_each_btree_key_commit(trans, iter, i,
@@ -1172,10 +1169,7 @@ int bch2_gc_gens(struct bch_fs *c)
 	if (ret)
 		goto err;
 
-	c->gc_gens_btree	= 0;
-	c->gc_gens_pos		= POS_MIN;
-
-	c->gc_count++;
+	c->gc_gens.pos = BBPOS_MIN;
 
 	bch2_time_stats_update(&c->times[BCH_TIME_btree_gc], start_time);
 	event_inc_trace(c, gc_gens_end, buf);
@@ -1192,7 +1186,7 @@ err:
 	}
 
 	up_read(&c->state_lock);
-	mutex_unlock(&c->gc_gens_lock);
+	mutex_unlock(&c->gc_gens.lock);
 	if (!bch2_err_matches(ret, EROFS))
 		bch_err_fn(c, ret);
 	return ret;
@@ -1200,7 +1194,7 @@ err:
 
 static void bch2_gc_gens_work(struct work_struct *work)
 {
-	struct bch_fs *c = container_of(work, struct bch_fs, gc_gens_work);
+	struct bch_fs *c = container_of(work, struct bch_fs, gc_gens.work);
 	bch2_gc_gens(c);
 	enumerated_ref_put(&c->writes, BCH_WRITE_REF_gc_gens);
 }
@@ -1208,7 +1202,7 @@ static void bch2_gc_gens_work(struct work_struct *work)
 void bch2_gc_gens_async(struct bch_fs *c)
 {
 	if (enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_gc_gens) &&
-	    !queue_work(c->write_ref_wq, &c->gc_gens_work))
+	    !queue_work(c->write_ref_wq, &c->gc_gens.work))
 		enumerated_ref_put(&c->writes, BCH_WRITE_REF_gc_gens);
 }
 
@@ -1277,9 +1271,9 @@ int bch2_merge_btree_nodes(struct bch_fs *c)
 
 void bch2_fs_btree_gc_init_early(struct bch_fs *c)
 {
-	seqcount_init(&c->gc_pos_lock);
-	INIT_WORK(&c->gc_gens_work, bch2_gc_gens_work);
+	seqcount_init(&c->gc.pos_lock);
+	INIT_WORK(&c->gc_gens.work, bch2_gc_gens_work);
 
-	init_rwsem(&c->gc_lock);
-	mutex_init(&c->gc_gens_lock);
+	init_rwsem(&c->gc.lock);
+	mutex_init(&c->gc_gens.lock);
 }

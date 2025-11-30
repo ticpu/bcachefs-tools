@@ -1500,8 +1500,12 @@ static int do_reconcile_phys(struct moving_context *ctxt,
 	if (!k.k)
 		return 0;
 
-	event_add_trace(c, reconcile_phys, k.k->size, buf,
-			bch2_bkey_val_to_text(&buf, c, k));
+	event_add_trace(c, reconcile_phys, k.k->size, buf, ({
+		prt_newline(&buf);
+		bch2_bkey_val_to_text(&buf, c, bp_k);
+		prt_newline(&buf);
+		bch2_bkey_val_to_text(&buf, c, k);
+	}));
 
 	return __do_reconcile_extent(ctxt, snapshot_io_opts, &iter, k);
 }
@@ -1875,6 +1879,24 @@ static int do_reconcile(struct moving_context *ctxt)
 			continue;
 		}
 
+		if ((r->work_pos.btree == BTREE_ID_reconcile_hipri_phys ||
+		     r->work_pos.btree == BTREE_ID_reconcile_work_phys) &&
+		    k.k->p.inode != r->work_pos.pos.inode) {
+			/*
+			 * We don't yet do multiple devices in parallel - that
+			 * will require extra synchronization to avoid kicking
+			 * off the same reconciles simultaneously via multiple
+			 * backpointers.
+			 *
+			 * For now, flush when switching devices to avoid
+			 * conflicts:
+			 */
+			bch2_moving_ctxt_flush_all(ctxt);
+			bch2_btree_write_buffer_flush_sync(trans);
+			work.nr = 0;
+			continue;
+		}
+
 		r->running = true;
 		r->work_pos.pos = k.k->p;
 
@@ -1912,7 +1934,9 @@ static int do_reconcile(struct moving_context *ctxt)
 		if (ret)
 			break;
 
-		r->work_pos.pos = bpos_successor(r->work_pos.pos);
+		r->work_pos.pos = btree_type_has_snapshots(r->work_pos.btree)
+			? bpos_successor(r->work_pos.pos)
+			: bpos_nosnap_successor(r->work_pos.pos);
 	}
 
 	if (!ret && !bkey_deleted(&pending_cookie.k))
@@ -1954,7 +1978,7 @@ static int bch2_reconcile_thread(void *arg)
 
 	struct moving_context ctxt __cleanup(bch2_moving_ctxt_exit);
 	bch2_moving_ctxt_init(&ctxt, c, NULL, &r->work_stats,
-			      writepoint_ptr(&c->reconcile_write_point),
+			      writepoint_ptr(&c->allocator.reconcile_write_point),
 			      true);
 
 	while (!kthread_should_stop() && !do_reconcile(&ctxt))

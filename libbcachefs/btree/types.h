@@ -59,11 +59,6 @@ struct btree_write {
 	struct journal_entry_pin	journal;
 };
 
-struct btree_alloc {
-	struct open_buckets	ob;
-	__BKEY_PADDED(k, BKEY_BTREE_PTR_VAL_U64s_MAX);
-};
-
 struct btree_bkey_cached_common {
 	struct six_lock		lock;
 	u8			level;
@@ -166,7 +161,21 @@ struct btree_cache_list {
 	size_t			nr;
 };
 
-struct btree_cache {
+struct btree_root {
+	struct btree		*b;
+
+	/* On disk root - see async splits: */
+	__BKEY_PADDED(key, BKEY_BTREE_PTR_VAL_U64s_MAX);
+	u8			level;
+	u8			alive;
+	s16			error;
+};
+
+struct bch_fs_btree_cache {
+	struct btree_root	roots_known[BTREE_ID_NR];
+	DARRAY(struct btree_root) roots_extra;
+	struct mutex		root_lock;
+
 	struct rhashtable	table;
 	bool			table_init_done;
 	/*
@@ -580,6 +589,37 @@ struct btree_trans {
 	struct btree_insert_entry _updates[BTREE_ITER_INITIAL];
 };
 
+struct btree_trans_buf {
+	struct btree_trans	*trans;
+};
+
+struct btree_transaction_stats {
+	struct bch2_time_stats	duration;
+	struct bch2_time_stats	lock_hold_times;
+	struct mutex		lock;
+	unsigned		nr_max_paths;
+	unsigned		max_mem;
+#ifdef CONFIG_BCACHEFS_TRANS_KMALLOC_TRACE
+	darray_trans_kmalloc_trace trans_kmalloc_trace;
+#endif
+	char			*max_paths_text;
+};
+
+#define BCH_TRANSACTIONS_NR 128
+
+struct bch_fs_btree_trans {
+	struct seqmutex			lock;
+	struct list_head		list;
+	mempool_t			pool;
+	mempool_t			malloc_pool;
+	struct btree_trans_buf		__percpu *bufs;
+
+	struct srcu_struct		barrier;
+	bool				barrier_initialized;
+
+	struct btree_transaction_stats	stats[BCH_TRANSACTIONS_NR];
+};
+
 static inline struct btree_path *btree_iter_path(struct btree_trans *trans, struct btree_iter *iter)
 {
 	return trans->paths + iter->path;
@@ -923,16 +963,6 @@ static inline u8 btree_trigger_order(enum btree_id btree)
 		return btree;
 	}
 }
-
-struct btree_root {
-	struct btree		*b;
-
-	/* On disk root - see async splits: */
-	__BKEY_PADDED(key, BKEY_BTREE_PTR_VAL_U64s_MAX);
-	u8			level;
-	u8			alive;
-	s16			error;
-};
 
 enum btree_gc_coalesce_fail_reason {
 	BTREE_GC_COALESCE_FAIL_RESERVE_GET,
