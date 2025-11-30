@@ -1,6 +1,7 @@
 use std::{
-    ffi::CString,
+    ffi::{CString, OsString},
     io::{stdout, IsTerminal},
+    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     ptr, str,
 };
@@ -17,14 +18,14 @@ use crate::{
 };
 
 fn mount_inner(
-    src: String,
+    src: OsString,
     target: &std::path::Path,
     fstype: &str,
     mut mountflags: libc::c_ulong,
     data: Option<String>,
 ) -> anyhow::Result<()> {
     // bind the CStrings to keep them alive
-    let c_src = CString::new(src.clone())?;
+    let c_src = CString::new(src.clone().into_vec())?;
     let c_target = path_to_cstr(target);
     let data = data.map(CString::new).transpose()?;
     let fstype = CString::new(fstype)?;
@@ -63,9 +64,9 @@ fn mount_inner(
         let e = crate::ErrnoError(err);
 
         if err.0 == libc::EBUSY {
-            eprintln!("mount: {}: {} already mounted or mount point busy", target.to_string_lossy(), src);
+            eprintln!("mount: {}: {:?} already mounted or mount point busy", target.to_string_lossy(), src);
         } else {
-            eprintln!("mount: {}: {}", src, e);
+            eprintln!("mount: {:?}: {}", src, e);
         }
 
         Err(e.into())
@@ -160,7 +161,7 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
 
     if let Some(mountpoint) = cli.mountpoint.as_deref() {
         info!(
-            "mounting with params: device: {}, target: {}, options: {}",
+            "mounting with params: device: {:?}, target: {}, options: {}",
             devices,
             mountpoint.to_string_lossy(),
             &cli.options
@@ -169,7 +170,7 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
         mount_inner(devices, mountpoint, "bcachefs", mountflags, optstr)
     } else {
         info!(
-            "would mount with params: device: {}, options: {}",
+            "would mount with params: device: {:?}, options: {}",
             devices, &cli.options
         );
 

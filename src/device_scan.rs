@@ -1,8 +1,9 @@
 use std::{
-    ffi::{CStr, CString, c_char, c_int},
+    ffi::{CStr, CString, c_char, c_int, OsString, OsStr},
     collections::HashMap,
     env,
     fs,
+    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     str,
 };
@@ -179,14 +180,14 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
     }
 }
 
-pub fn joined_device_str(sbs: &Vec<(PathBuf, bch_sb_handle)>) -> String {
+pub fn joined_device_str(sbs: &Vec<(PathBuf, bch_sb_handle)>) -> OsString {
     sbs.iter()
-        .map(|sb| sb.0.clone().into_os_string().into_string().unwrap())
+        .map(|sb| sb.0.clone().into_os_string())
         .collect::<Vec<_>>()
-        .join(":")
+        .join(OsStr::new(":"))
 }
 
-pub fn scan_devices(device: &String, opts: &bch_opts) -> Result<String> {
+pub fn scan_devices(device: &String, opts: &bch_opts) -> Result<OsString> {
     let mut sbs = scan_sbs(device, opts)?;
 
     for sb in &mut sbs {
@@ -236,8 +237,10 @@ pub extern "C" fn bch2_scan_devices(device: *const c_char) -> *mut c_char {
     // how to initialize to default/empty?
     let opts = bch_bindgen::opts::parse_mount_opts(None, None, true).unwrap_or_default();
 
-    CString::new(scan_devices(&device, &opts).unwrap_or_else(|e| {
+    let devs = scan_devices(&device, &opts).unwrap_or_else(|e| {
         eprintln!("bcachefs ({}): error reading superblock: {}", device, e);
         std::process::exit(-1);
-    })).unwrap().into_raw()
+    });
+
+    CString::new(devs.into_vec()).unwrap().into_raw()
 }
