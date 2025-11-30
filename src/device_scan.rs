@@ -38,33 +38,25 @@ fn device_property_map(dev: &udev::Device) -> HashMap<String, String> {
     rc
 }
 
-fn udev_bcachefs_info() -> anyhow::Result<HashMap<String, Vec<String>>> {
-    let mut info = HashMap::new();
-
-    if env::var("BCACHEFS_BLOCK_SCAN").is_ok() {
-        debug!("Checking all block devices for bcachefs super block!");
-        return Ok(info);
-    }
-
-    let mut udev = udev::Enumerator::new()?;
-
+fn get_devices_by_uuid_udev(uuid: Uuid) -> anyhow::Result<Vec<String>> {
     debug!("Walking udev db!");
 
+    let mut udev = udev::Enumerator::new()?;
     udev.match_subsystem("block")?;
     udev.match_property("ID_FS_TYPE", "bcachefs")?;
 
-    for m in udev
+    let uuid = uuid.to_string();
+
+    Ok(udev
         .scan_devices()?
         .filter(udev::Device::is_initialized)
         .map(|dev| device_property_map(&dev))
-        .filter(|m| m.contains_key("ID_FS_UUID") && m.contains_key("DEVNAME")) {
-        let fs_uuid = m["ID_FS_UUID"].clone();
-        let dev_node = m["DEVNAME"].clone();
-        info.insert(dev_node.clone(), vec![fs_uuid.clone()]);
-        info.entry(fs_uuid).or_insert(vec![]).push(dev_node.clone());
-    }
-
-    Ok(info)
+        .filter(|m|
+            m.contains_key("ID_FS_UUID") &&
+            m["ID_FS_UUID"] == uuid &&
+            m.contains_key("DEVNAME"))
+        .map(|m| m["DEVNAME"].clone())
+        .collect::<Vec<_>>())
 }
 
 fn get_all_block_devnodes() -> anyhow::Result<Vec<String>> {
@@ -84,29 +76,7 @@ fn get_all_block_devnodes() -> anyhow::Result<Vec<String>> {
     Ok(devices)
 }
 
-fn get_devices_by_uuid(
-    uuid: Uuid,
-    opts: &bch_opts
-) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
-    let udev_bcachefs = udev_bcachefs_info()?;
-
-    let devices = {
-        if !udev_bcachefs.is_empty() {
-            let uuid_string = uuid.hyphenated().to_string();
-            if let Some(devices) = udev_bcachefs.get(&uuid_string) {
-                devices.clone()
-            } else {
-                Vec::new()
-            }
-        } else {
-            get_all_block_devnodes()?
-        }
-    };
-
-    Ok(get_super_blocks(uuid, &devices, opts))
-}
-
-fn get_super_blocks(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Vec<(PathBuf, bch_sb_handle)> {
+fn read_sbs_matching_uuid(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Vec<(PathBuf, bch_sb_handle)> {
     devices
         .iter()
         .filter_map(|dev| {
@@ -118,9 +88,26 @@ fn get_super_blocks(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Vec<(Pat
         .collect::<Vec<_>>()
 }
 
+fn get_devices_by_uuid(
+    uuid: Uuid,
+    opts: &bch_opts,
+    use_udev: bool
+) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
+    let devs_from_udev = get_devices_by_uuid_udev(uuid)?;
+
+    let devices = if use_udev && !devs_from_udev.is_empty() {
+        devs_from_udev
+    } else {
+        get_all_block_devnodes()?
+    };
+
+    Ok(read_sbs_matching_uuid(uuid, &devices, opts))
+}
+
 fn devs_str_sbs_from_device(
     device: &Path,
-    opts: &bch_opts
+    opts: &bch_opts,
+    use_udev: bool
 ) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
     if let Ok(metadata) = fs::metadata(device) {
         if metadata.is_dir() {
@@ -133,16 +120,12 @@ fn devs_str_sbs_from_device(
     if dev_sb.sb().number_of_devices() == 1 {
         Ok(vec![(device.to_path_buf(), dev_sb)])
     } else {
-        get_devices_by_uuid(dev_sb.sb().uuid(), opts)
+        get_devices_by_uuid(dev_sb.sb().uuid(), opts, use_udev)
     }
 }
 
 pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb_handle)>> {
-    if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = device.split_once('=') {
-        let uuid = Uuid::parse_str(uuid)?;
-
-        get_devices_by_uuid(uuid, opts)
-    } else if device.contains(':') {
+    if device.contains(':') {
         let mut opts = *opts;
         opt_set!(opts, noexcl, 1);
         opt_set!(opts, no_version_check, 1);
@@ -153,14 +136,22 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
         // part of the FS. This appears to be the case when we get called during
         // fstab mount processing and the fstab specifies a UUID.
 
-        device.split(':')
+        return device.split(':')
             .map(PathBuf::from)
             .map(|path|
                  bch_bindgen::sb_io::read_super_opts(path.as_ref(), opts)
                  .map(|sb| (path, sb)))
             .collect::<Result<Vec<_>>>()
+    }
+
+    let udev = !env::var("BCACHEFS_BLOCK_SCAN").is_ok();
+
+    if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = device.split_once('=') {
+        let uuid = Uuid::parse_str(uuid)?;
+
+        get_devices_by_uuid(uuid, opts, udev)
     } else {
-        devs_str_sbs_from_device(Path::new(device), opts)
+        devs_str_sbs_from_device(Path::new(device), opts, udev)
     }
 }
 
