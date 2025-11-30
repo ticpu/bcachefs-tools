@@ -5,7 +5,6 @@ use std::{
     fs,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
-    str,
 };
 
 use anyhow::Result;
@@ -58,8 +57,7 @@ fn udev_bcachefs_info() -> anyhow::Result<HashMap<String, Vec<String>>> {
         .scan_devices()?
         .filter(udev::Device::is_initialized)
         .map(|dev| device_property_map(&dev))
-        .filter(|m| m.contains_key("ID_FS_UUID") && m.contains_key("DEVNAME"))
-    {
+        .filter(|m| m.contains_key("ID_FS_UUID") && m.contains_key("DEVNAME")) {
         let fs_uuid = m["ID_FS_UUID"].clone();
         let dev_node = m["DEVNAME"].clone();
         info.insert(dev_node.clone(), vec![fs_uuid.clone()]);
@@ -67,18 +65,6 @@ fn udev_bcachefs_info() -> anyhow::Result<HashMap<String, Vec<String>>> {
     }
 
     Ok(info)
-}
-
-fn get_super_blocks(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Vec<(PathBuf, bch_sb_handle)> {
-    devices
-        .iter()
-        .filter_map(|dev| {
-            read_super_silent(PathBuf::from(dev), *opts)
-                .ok()
-                .map(|sb| (PathBuf::from(dev), sb))
-        })
-        .filter(|(_, sb)| sb.sb().uuid() == uuid)
-        .collect::<Vec<_>>()
 }
 
 fn get_all_block_devnodes() -> anyhow::Result<Vec<String>> {
@@ -99,10 +85,11 @@ fn get_all_block_devnodes() -> anyhow::Result<Vec<String>> {
 }
 
 fn get_devices_by_uuid(
-    udev_bcachefs: &HashMap<String, Vec<String>>,
     uuid: Uuid,
     opts: &bch_opts
 ) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
+    let udev_bcachefs = udev_bcachefs_info()?;
+
     let devices = {
         if !udev_bcachefs.is_empty() {
             let uuid_string = uuid.hyphenated().to_string();
@@ -119,18 +106,19 @@ fn get_devices_by_uuid(
     Ok(get_super_blocks(uuid, &devices, opts))
 }
 
-fn devs_str_sbs_from_uuid(
-    udev_info: &HashMap<String, Vec<String>>,
-    uuid: &str,
-    opts: &bch_opts
-) -> Result<Vec<(PathBuf, bch_sb_handle)>> {
-    debug!("enumerating devices with UUID {}", uuid);
-
-    Uuid::parse_str(uuid).map(|uuid| get_devices_by_uuid(udev_info, uuid, opts))?
+fn get_super_blocks(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Vec<(PathBuf, bch_sb_handle)> {
+    devices
+        .iter()
+        .filter_map(|dev| {
+            read_super_silent(PathBuf::from(dev), *opts)
+                .ok()
+                .map(|sb| (PathBuf::from(dev), sb))
+        })
+        .filter(|(_, sb)| sb.sb().uuid() == uuid)
+        .collect::<Vec<_>>()
 }
 
 fn devs_str_sbs_from_device(
-    udev_info: &HashMap<String, Vec<String>>,
     device: &Path,
     opts: &bch_opts
 ) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
@@ -145,18 +133,15 @@ fn devs_str_sbs_from_device(
     if dev_sb.sb().number_of_devices() == 1 {
         Ok(vec![(device.to_path_buf(), dev_sb)])
     } else {
-        let uuid = dev_sb.sb().uuid();
-
-        get_devices_by_uuid(udev_info, uuid, opts)
+        get_devices_by_uuid(dev_sb.sb().uuid(), opts)
     }
 }
 
 pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb_handle)>> {
-    // Grab the udev information once
-    let udev_info = udev_bcachefs_info()?;
-
     if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = device.split_once('=') {
-        devs_str_sbs_from_uuid(&udev_info, uuid, opts)
+        let uuid = Uuid::parse_str(uuid)?;
+
+        get_devices_by_uuid(uuid, opts)
     } else if device.contains(':') {
         let mut opts = *opts;
         opt_set!(opts, noexcl, 1);
@@ -168,19 +153,14 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
         // part of the FS. This appears to be the case when we get called during
         // fstab mount processing and the fstab specifies a UUID.
 
-        let devices = device.split(':')
+        device.split(':')
             .map(PathBuf::from)
-            .collect::<Vec<_>>();
-        let sbs = devices
-            .iter()
-            .map(|path| bch_bindgen::sb_io::read_super_opts(path.as_ref(), opts))
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(devices.iter().zip(sbs.iter())
-            .map(|(x, y)| (PathBuf::from(x), y.clone()))
-            .collect::<Vec<_>>())
+            .map(|path|
+                 bch_bindgen::sb_io::read_super_opts(path.as_ref(), opts)
+                 .map(|sb| (path, sb)))
+            .collect::<Result<Vec<_>>>()
     } else {
-        devs_str_sbs_from_device(&udev_info, Path::new(device), opts)
+        devs_str_sbs_from_device(Path::new(device), opts)
     }
 }
 
@@ -211,16 +191,15 @@ pub extern "C" fn bch2_scan_device_sbs(device: *const c_char, ret: *mut sb_names
     // how to initialize to default/empty?
     let opts = bch_bindgen::opts::parse_mount_opts(None, None, true).unwrap_or_default();
 
-    let sbs = scan_sbs(&device, &opts)
+    let mut sbs = scan_sbs(&device, &opts)
         .unwrap_or_else(|e| {
             eprintln!("bcachefs ({}): error reading superblock: {}", device, e);
             std::process::exit(-1);
-        });
-
-    let mut sbs = sbs.iter()
+        })
+        .into_iter()
         .map(|(name, sb)| sb_name {
-            name: CString::new(name.clone().into_os_string().into_string().unwrap()).unwrap().into_raw(),
-            sb: *sb } )
+            name: CString::new(name.into_os_string().into_vec()).unwrap().into_raw(),
+            sb: sb } )
         .collect::<Vec<sb_name>>();
 
     unsafe {
