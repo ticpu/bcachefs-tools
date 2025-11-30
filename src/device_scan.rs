@@ -169,7 +169,7 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
             .collect::<Vec<_>>();
         let sbs = devices
             .iter()
-            .map(|path| read_super_silent(path, *opts))
+            .map(|path| bch_bindgen::sb_io::read_super_opts(path.as_ref(), *opts))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(devices.iter().zip(sbs.iter())
