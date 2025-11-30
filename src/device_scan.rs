@@ -158,6 +158,10 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
     if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = device.split_once('=') {
         devs_str_sbs_from_uuid(&udev_info, uuid, opts)
     } else if device.contains(':') {
+        let mut opts = *opts;
+        opt_set!(opts, noexcl, 1);
+        opt_set!(opts, no_version_check, 1);
+
         // If the device string contains ":" we will assume the user knows the
         // entire list. If they supply a single device it could be either the FS
         // only has 1 device or it's only 1 of a number of devices which are
@@ -169,7 +173,7 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
             .collect::<Vec<_>>();
         let sbs = devices
             .iter()
-            .map(|path| bch_bindgen::sb_io::read_super_opts(path.as_ref(), *opts))
+            .map(|path| bch_bindgen::sb_io::read_super_opts(path.as_ref(), opts))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(devices.iter().zip(sbs.iter())
