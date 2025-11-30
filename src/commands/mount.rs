@@ -141,7 +141,7 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
     let opts = bch_bindgen::opts::parse_mount_opts(None, optstr.as_deref(), true)
         .unwrap_or_default();
 
-    let mut sbs = device_scan::scan_sbs(&cli.dev, &opts)?;
+    let sbs = device_scan::scan_sbs(&cli.dev, &opts)?;
 
     ensure!(!sbs.is_empty(), "No device(s) to mount specified");
 
@@ -152,11 +152,6 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
         handle_unlock(cli, first_sb)?;
     }
 
-    for sb in &mut sbs {
-        unsafe {
-            bch_bindgen::sb_io::bch2_free_super(&mut sb.1);
-        }
-    }
     drop(sbs);
 
     if let Some(mountpoint) = cli.mountpoint.as_deref() {

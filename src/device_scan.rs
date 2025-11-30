@@ -172,13 +172,7 @@ pub fn joined_device_str(sbs: &Vec<(PathBuf, bch_sb_handle)>) -> OsString {
 }
 
 pub fn scan_devices(device: &String, opts: &bch_opts) -> Result<OsString> {
-    let mut sbs = scan_sbs(device, opts)?;
-
-    for sb in &mut sbs {
-        unsafe {
-            bch_bindgen::sb_io::bch2_free_super(&mut sb.1);
-        }
-    }
+    let sbs = scan_sbs(device, opts)?;
 
     Ok(joined_device_str(&sbs))
 }

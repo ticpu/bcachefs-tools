@@ -91,6 +91,12 @@ impl bch_sb_handle {
     }
 }
 
+impl Drop for bch_sb_handle {
+    fn drop(&mut self) {
+        unsafe { bch2_free_super(&mut *self); }
+    }
+}
+
 // #[repr(u8)]
 pub enum rhash_lock_head {}
 pub enum srcu_struct {}

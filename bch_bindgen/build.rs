@@ -91,6 +91,7 @@ fn main() {
         .allowlist_type("sb_names")
         .no_copy("btree_trans")
         .no_copy("printbuf")
+        .no_copy("bch_sb_handle")
         .no_partialeq("bkey")
         .no_partialeq("bpos")
         .generate_inline_functions(true)
