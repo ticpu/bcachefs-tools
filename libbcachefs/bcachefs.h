@@ -241,12 +241,10 @@
 #include "alloc/types.h"
 
 #include "btree/check_types.h"
-#include "btree/interior_types.h"
 #include "btree/journal_overlay_types.h"
 #include "btree/types.h"
-#include "btree/node_scan_types.h"
-#include "btree/write_buffer_types.h"
 
+#include "data/compress_types.h"
 #include "data/copygc_types.h"
 #include "data/ec_types.h"
 #include "data/keylist_types.h"
@@ -270,6 +268,8 @@
 
 #include "snapshots/snapshot_types.h"
 #include "snapshots/subvolume_types.h"
+
+#include "vfs/types.h"
 
 #define bch2_fs_init_fault(name)					\
 	dynamic_fault("bcachefs:bch_fs_init:" name)
@@ -318,23 +318,24 @@ void __bch2_print(struct bch_fs *c, const char *fmt, ...);
 
 #define bch2_print(_c, ...) __bch2_print(maybe_dev_to_fs(_c), __VA_ARGS__)
 
-#define bch2_print_ratelimited(_c, ...)					\
-do {									\
-	static DEFINE_RATELIMIT_STATE(_rs,				\
+#define bch2_ratelimit()						\
+({									\
+	static DEFINE_RATELIMIT_STATE(rs,				\
 				      DEFAULT_RATELIMIT_INTERVAL,	\
 				      DEFAULT_RATELIMIT_BURST);		\
 									\
-	if (__ratelimit(&_rs))						\
+	!__ratelimit(&rs);						\
+})
+
+#define bch2_print_ratelimited(_c, ...)					\
+do {									\
+	if (!bch2_ratelimit())						\
 		bch2_print(_c, __VA_ARGS__);				\
 } while (0)
 
 #define bch2_print_str_ratelimited(_c, ...)				\
 do {									\
-	static DEFINE_RATELIMIT_STATE(_rs,				\
-				      DEFAULT_RATELIMIT_INTERVAL,	\
-				      DEFAULT_RATELIMIT_BURST);		\
-									\
-	if (__ratelimit(&_rs))						\
+	if (!bch2_ratelimit())						\
 		bch2_print_str(_c, __VA_ARGS__);			\
 } while (0)
 
@@ -813,7 +814,6 @@ struct bch_fs {
 	struct unicode_map	*cf_encoding;
 
 	unsigned short		block_bits;	/* ilog2(block_size) */
-	u16			btree_foreground_merge_threshold;
 
 	struct delayed_work	maybe_schedule_btree_bitmap_gc;
 
@@ -836,27 +836,7 @@ struct bch_fs {
 
 	struct bch_fs_recovery			recovery;
 
-	/* BTREE CACHE */
-	/*
-	 * A btree node on disk could have too many bsets for an iterator to fit
-	 * on the stack - have to dynamically allocate them
-	 */
-	mempool_t				fill_iter;
-	mempool_t				btree_bounce_pool;
-	struct bio_set				btree_bio;
-	struct workqueue_struct			*btree_read_complete_wq;
-	struct workqueue_struct			*btree_write_submit_wq;
-	struct journal_entry_res		btree_root_journal_res;
-	struct workqueue_struct			*btree_write_complete_wq;
-
-	struct bch_fs_btree_cache		btree_cache;
-	struct bch_fs_btree_key_cache		btree_key_cache;
-	struct bch_fs_btree_write_buffer	btree_write_buffer;
-	struct bch_fs_btree_trans		btree_trans;
-	struct bch_fs_btree_reserve_cache	btree_reserve_cache;
-	struct bch_fs_btree_interior_updates	btree_interior_updates;
-	struct bch_fs_btree_node_rewrites	btree_node_rewrites;
-	struct find_btree_nodes			found_btree_nodes;
+	struct bch_fs_btree			btree;
 
 	struct bch_fs_gc			gc;
 	struct bch_fs_gc_gens			gc_gens;
@@ -870,12 +850,7 @@ struct bch_fs {
 
 	struct bch_fs_snapshots			snapshots;
 
-	/* btree_io.c: */
-	spinlock_t		btree_write_error_lock;
-	struct btree_write_stats {
-		atomic64_t	nr;
-		atomic64_t	bytes;
-	}			btree_write_stats[BTREE_WRITE_TYPE_NR];
+	spinlock_t				write_error_lock;
 	/*
 	 * Use a dedicated wq for write ref holder tasks. Required to avoid
 	 * dependency problems with other wq tasks that can block on ref
@@ -901,10 +876,6 @@ struct bch_fs {
 				nocow_locks;
 	struct rhashtable	promote_table;
 
-	mempool_t		compression_bounce[2];
-	mempool_t		compress_workspace[BCH_COMPRESSION_OPT_NR];
-	size_t			zstd_workspace_size;
-
 	struct bch_key		chacha20_key;
 	bool			chacha20_key_set;
 
@@ -914,6 +885,7 @@ struct bch_fs {
 	struct list_head	moving_context_list;
 	struct mutex		moving_context_lock;
 
+	struct bch_fs_compress	compress;
 	struct bch_fs_reconcile	reconcile;
 	struct bch_fs_copygc	copygc;
 	struct bch_fs_ec	ec;
@@ -922,18 +894,7 @@ struct bch_fs {
 	reflink_gc_table	reflink_gc_table;
 	size_t			reflink_gc_nr;
 
-	/* fs.c */
-	struct list_head	vfs_inodes_list;
-	struct mutex		vfs_inodes_lock;
-	struct rhashtable	vfs_inodes_table;
-	struct rhltable		vfs_inodes_by_inum_table;
-	struct workqueue_struct	*vfs_writeback_wq;
-
-	/* VFS IO PATH - fs-io.c */
-	struct bio_set		writepage_bioset;
-	struct bio_set		dio_write_bioset;
-	struct bio_set		dio_read_bioset;
-	struct bio_set		nocow_flush_bioset;
+	struct bch_fs_vfs	vfs;
 
 	/* QUOTAS */
 	struct bch_memquota_type quotas[QTYP_NR];

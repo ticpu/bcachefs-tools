@@ -50,7 +50,7 @@ module_param_named(read_corrupt_device, bch2_read_corrupt_device, int, 0644);
 MODULE_PARM_DESC(read_corrupt_device, "");
 #endif
 
-static bool bch2_poison_extents_on_checksum_error;
+static bool bch2_poison_extents_on_checksum_error = true;
 module_param_named(poison_extents_on_checksum_error,
 		   bch2_poison_extents_on_checksum_error, bool, 0644);
 MODULE_PARM_DESC(poison_extents_on_checksum_error,
@@ -567,7 +567,6 @@ static noinline int maybe_poison_extent(struct btree_trans *trans, struct bch_re
 		return 0;
 
 	struct bch_fs *c = trans->c;
-
 	struct data_update *u = rbio_data_update(rbio);
 	if (u)
 		read_k = bkey_i_to_s_c(u->k.k);
@@ -597,6 +596,12 @@ static noinline int maybe_poison_extent(struct btree_trans *trans, struct bch_re
 	 */
 	if (u)
 		bch2_bkey_buf_copy(&u->k, new);
+
+	event_inc_trace(c, data_read_fail_and_poison, buf, ({
+		bch2_bkey_val_to_text(&buf, c, k);
+		prt_newline(&buf);
+		bch2_read_bio_to_text_atomic(&buf, rbio);
+	}));
 	return 0;
 }
 
@@ -1294,12 +1299,6 @@ static noinline int read_extent_pick_err(struct btree_trans *trans,
 		BUG_ON(!(flags & BCH_READ_in_retry));
 
 		try(maybe_poison_extent(trans, rbio, data_btree, k));
-
-		event_inc_trace(c, data_read_fail_and_poison, buf, ({
-			bch2_bkey_val_to_text(&buf, c, k);
-			prt_newline(&buf);
-			bch2_read_bio_to_text_atomic(&buf, rbio);
-		}));
 	}
 
 	if (!(flags & BCH_READ_in_retry)) {

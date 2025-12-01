@@ -15,14 +15,12 @@
 #include "alloc/foreground.h"
 #include "alloc/replicas.h"
 
-#include "btree/cache.h"
 #include "btree/check.h"
 #include "btree/journal_overlay.h"
+#include "btree/init.h"
 #include "btree/interior.h"
 #include "btree/key_cache.h"
-#include "btree/node_scan.h"
 #include "btree/read.h"
-#include "btree/sort.h"
 #include "btree/write.h"
 #include "btree/write_buffer.h"
 
@@ -377,10 +375,10 @@ void bch2_fs_read_only(struct bch_fs *c)
 	    c->recovery.pass_done >= BCH_RECOVERY_PASS_journal_replay) {
 		BUG_ON(c->journal.last_empty_seq != journal_cur_seq(&c->journal));
 		BUG_ON(!c->sb.clean);
-		BUG_ON(atomic_long_read(&c->btree_cache.nr_dirty));
-		BUG_ON(atomic_long_read(&c->btree_key_cache.nr_dirty));
-		BUG_ON(c->btree_write_buffer.inc.keys.nr);
-		BUG_ON(c->btree_write_buffer.flushing.keys.nr);
+		BUG_ON(atomic_long_read(&c->btree.cache.nr_dirty));
+		BUG_ON(atomic_long_read(&c->btree.key_cache.nr_dirty));
+		BUG_ON(c->btree.write_buffer.inc.keys.nr);
+		BUG_ON(c->btree.write_buffer.flushing.keys.nr);
 		bch2_verify_replicas_refs_clean(c);
 		bch2_verify_accounting_clean(c);
 	} else {
@@ -417,8 +415,7 @@ bool bch2_fs_emergency_read_only(struct bch_fs *c)
 	return ret;
 }
 
-static bool __bch2_fs_emergency_read_only2(struct bch_fs *c, struct printbuf *out,
-					   bool locked)
+static bool __bch2_fs_emergency_read_only2(struct bch_fs *c, struct printbuf *out, bool locked)
 {
 	bool ret = !test_and_set_bit(BCH_FS_emergency_ro, &c->flags);
 
@@ -429,11 +426,9 @@ static bool __bch2_fs_emergency_read_only2(struct bch_fs *c, struct printbuf *ou
 	bch2_fs_read_only_async(c);
 	wake_up(&bch2_read_only_wait);
 
-	if (ret) {
+	if (ret)
 		prt_printf(out, "emergency read only at seq %llu\n",
 			   journal_cur_seq(&c->journal));
-		bch2_prt_task_backtrace(out, current, 2, out->atomic ? GFP_ATOMIC : GFP_KERNEL);
-	}
 
 	return ret;
 }
@@ -568,7 +563,6 @@ static void __bch2_fs_free(struct bch_fs *c)
 
 	bch2_reconcile_stop(c);
 	bch2_copygc_stop(c);
-	bch2_find_btree_nodes_exit(&c->found_btree_nodes);
 	bch2_free_pending_node_rewrites(c);
 	bch2_free_fsck_errs(c);
 	bch2_fs_vfs_exit(c);
@@ -578,9 +572,6 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_fs_quota_exit(c);
 	bch2_fs_nocow_locking_exit(c);
 	bch2_fs_journal_exit(&c->journal);
-	bch2_fs_fs_io_direct_exit(c);
-	bch2_fs_fs_io_buffered_exit(c);
-	bch2_fs_fsio_exit(c);
 	bch2_fs_io_write_exit(c);
 	bch2_fs_io_read_exit(c);
 	bch2_fs_errors_exit(c);
@@ -593,17 +584,10 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_io_clock_exit(&c->io_clock[READ]);
 	bch2_fs_capacity_exit(c);
 	bch2_fs_buckets_waiting_for_journal_exit(c);
-	bch2_fs_btree_write_buffer_exit(c);
-	bch2_fs_btree_key_cache_exit(&c->btree_key_cache);
-	bch2_fs_btree_iter_exit(c);
-	bch2_fs_btree_interior_update_exit(c);
-	bch2_fs_btree_cache_exit(c);
+	bch2_fs_btree_exit(c);
 	bch2_fs_accounting_exit(c);
 	bch2_fs_async_obj_exit(c);
 
-	mempool_exit(&c->btree_bounce_pool);
-	bioset_exit(&c->btree_bio);
-	mempool_exit(&c->fill_iter);
 	enumerated_ref_exit(&c->writes);
 	kfree(rcu_dereference_protected(c->disk_groups, 1));
 	kfree(c->journal_seq_blacklist_table);
@@ -612,12 +596,6 @@ static void __bch2_fs_free(struct bch_fs *c)
 		destroy_workqueue(c->promote_wq);
 	if (c->write_ref_wq)
 		destroy_workqueue(c->write_ref_wq);
-	if (c->btree_write_submit_wq)
-		destroy_workqueue(c->btree_write_submit_wq);
-	if (c->btree_read_complete_wq)
-		destroy_workqueue(c->btree_read_complete_wq);
-	if (c->btree_write_complete_wq)
-		destroy_workqueue(c->btree_write_complete_wq);
 	if (c->btree_update_wq)
 		destroy_workqueue(c->btree_update_wq);
 
@@ -673,7 +651,7 @@ int bch2_fs_stop(struct bch_fs *c)
 
 		cancel_work_sync(&c->read_only_work);
 
-		flush_work(&c->btree_interior_updates.work);
+		flush_work(&c->btree.interior_updates.work);
 	}
 
 	if (test_bit(BCH_FS_emergency_ro, &c->flags))
@@ -758,26 +736,19 @@ int bch2_fs_init_rw(struct bch_fs *c)
 
 	if (!(c->btree_update_wq = alloc_workqueue("bcachefs",
 				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_UNBOUND, 512)) ||
-	    !(c->btree_write_complete_wq = alloc_workqueue("bcachefs_btree_write_complete",
-				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM, 1)) ||
-	    !(c->btree_write_submit_wq = alloc_workqueue("bcachefs_btree_write_sumit",
-				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM, 1)) ||
 	    !(c->write_ref_wq = alloc_workqueue("bcachefs_write_ref",
 				WQ_FREEZABLE, 0)) ||
 	    !(c->promote_wq = alloc_workqueue("bcachefs_promotes",
 				WQ_FREEZABLE, 2)))
 		return bch_err_throw(c, ENOMEM_fs_other_alloc);
 
-	int ret = bch2_fs_btree_interior_update_init(c) ?:
-		bch2_fs_btree_write_buffer_init(c) ?:
-		bch2_fs_fs_io_buffered_init(c) ?:
-		bch2_fs_io_write_init(c) ?:
-		bch2_fs_journal_init(&c->journal) ?:
-		bch2_journal_reclaim_start(&c->journal) ?:
-		bch2_copygc_start(c) ?:
-		bch2_reconcile_start(c);
-	if (ret)
-		return ret;
+	try(bch2_fs_btree_init_rw(c));
+	try(bch2_fs_io_write_init(c));
+	try(bch2_fs_journal_init(&c->journal));
+	try(bch2_fs_vfs_init_rw(c));
+	try(bch2_journal_reclaim_start(&c->journal));
+	try(bch2_copygc_start(c));
+	try(bch2_reconcile_start(c));
 
 	set_bit(BCH_FS_rw_init_done, &c->flags);
 	return 0;
@@ -1027,7 +998,6 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 			struct bch_opts *opts, bch_sb_handles *sbs,
 			struct printbuf *out)
 {
-	unsigned i, iter_size;
 	CLASS(printbuf, name)();
 
 	c->stdio = (void *)(unsigned long) opts->stdio;
@@ -1054,17 +1024,13 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	refcount_set(&c->ro_ref, 1);
 	init_waitqueue_head(&c->ro_ref_wait);
 
-	for (i = 0; i < BCH_TIME_STAT_NR; i++)
+	for (unsigned i = 0; i < BCH_TIME_STAT_NR; i++)
 		bch2_time_stats_init(&c->times[i]);
 
 	bch2_fs_allocator_background_init(c);
 	bch2_fs_allocator_foreground_init(c);
-	bch2_fs_btree_cache_init_early(&c->btree_cache);
 	bch2_fs_btree_gc_init_early(c);
-	bch2_fs_btree_interior_update_init_early(c);
-	bch2_fs_btree_iter_init_early(c);
-	bch2_fs_btree_key_cache_init_early(&c->btree_key_cache);
-	bch2_fs_btree_write_buffer_init_early(c);
+	bch2_fs_btree_init_early(c);
 	bch2_fs_copygc_init(c);
 	bch2_fs_ec_init_early(c);
 	bch2_fs_errors_init_early(c);
@@ -1076,18 +1042,14 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	bch2_fs_recovery_passes_init(c);
 	bch2_fs_snapshots_init_early(c);
 	bch2_fs_subvolumes_init_early(c);
-	bch2_find_btree_nodes_init(&c->found_btree_nodes);
 
 	INIT_LIST_HEAD(&c->list);
 
 	mutex_init(&c->bio_bounce_pages_lock);
 
-	spin_lock_init(&c->btree_write_error_lock);
+	spin_lock_init(&c->write_error_lock);
 
 	INIT_LIST_HEAD(&c->journal_iters);
-
-	INIT_LIST_HEAD(&c->vfs_inodes_list);
-	mutex_init(&c->vfs_inodes_lock);
 
 	c->journal.flush_write_time	= &c->times[BCH_TIME_journal_flush_write];
 	c->journal.noflush_write_time	= &c->times[BCH_TIME_journal_noflush_write];
@@ -1121,7 +1083,6 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 #endif
 
 	c->block_bits		= ilog2(block_sectors(c));
-	c->btree_foreground_merge_threshold = BTREE_FOREGROUND_MERGE_THRESHOLD(c);
 
 	if (bch2_fs_init_fault("fs_alloc")) {
 		prt_printf(out, "fs_alloc fault injected\n");
@@ -1137,42 +1098,24 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 
 	strscpy(c->name, name.buf, sizeof(c->name));
 
-	iter_size = sizeof(struct sort_iter) +
-		(btree_blocks(c) + 1) * 2 *
-		sizeof(struct sort_iter_set);
-
-	if (!(c->btree_read_complete_wq = alloc_workqueue("bcachefs_btree_read_complete",
-				WQ_HIGHPRI|WQ_FREEZABLE|WQ_MEM_RECLAIM, 512)) ||
-	    enumerated_ref_init(&c->writes, BCH_WRITE_REF_NR,
-				bch2_writes_disabled) ||
-	    mempool_init_kmalloc_pool(&c->fill_iter, 1, iter_size) ||
-	    bioset_init(&c->btree_bio, 1,
-			max(offsetof(struct btree_read_bio, bio),
-			    offsetof(struct btree_write_bio, wbio.bio)),
-			BIOSET_NEED_BVECS) ||
-	    mempool_init_kvmalloc_pool(&c->btree_bounce_pool, 1,
-				       c->opts.btree_node_size))
+	if (enumerated_ref_init(&c->writes, BCH_WRITE_REF_NR,
+				bch2_writes_disabled))
 		return bch_err_throw(c, ENOMEM_fs_other_alloc);
 
-	try(bch2_fs_async_obj_init(c));
 	try(bch2_blacklist_table_initialize(c));
-	try(bch2_fs_btree_cache_init(c));
-	try(bch2_fs_btree_iter_init(c));
-	try(bch2_fs_btree_key_cache_init(&c->btree_key_cache));
+	try(bch2_fs_async_obj_init(c));
+	try(bch2_fs_btree_init(c));
 	try(bch2_fs_buckets_waiting_for_journal_init(c));
-	try(bch2_io_clock_init(&c->io_clock[READ]));
-	try(bch2_io_clock_init(&c->io_clock[WRITE]));
 	try(bch2_fs_compress_init(c));
 	try(bch2_fs_counters_init(c));
 	try(bch2_fs_ec_init(c));
 	try(bch2_fs_errors_init(c));
 	try(bch2_fs_encryption_init(c));
-	try(bch2_fs_fsio_init(c));
-	try(bch2_fs_fs_io_direct_init(c));
 	try(bch2_fs_io_read_init(c));
 	try(bch2_fs_reconcile_init(c));
 	try(bch2_fs_vfs_init(c));
-
+	try(bch2_io_clock_init(&c->io_clock[READ]));
+	try(bch2_io_clock_init(&c->io_clock[WRITE]));
 
 #if IS_ENABLED(CONFIG_UNICODE)
 	if (!bch2_fs_casefold_enabled(c)) {
@@ -1200,7 +1143,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	}
 
 	bch2_journal_entry_res_resize(&c->journal,
-			&c->btree_root_journal_res,
+			&c->btree.root_journal_res,
 			BTREE_ID_NR * (JSET_KEYS_U64s + BKEY_BTREE_PTR_U64s_MAX));
 	bch2_journal_entry_res_resize(&c->journal,
 			&c->clock_journal_res,

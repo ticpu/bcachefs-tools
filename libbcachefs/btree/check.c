@@ -179,11 +179,11 @@ static int set_node_max(struct bch_fs *c, struct btree *b, struct bpos new_max)
 
 	bch2_btree_node_drop_keys_outside_node(b);
 
-	guard(mutex)(&c->btree_cache.lock);
-	__bch2_btree_node_hash_remove(&c->btree_cache, b);
+	guard(mutex)(&c->btree.cache.lock);
+	__bch2_btree_node_hash_remove(&c->btree.cache, b);
 
 	bkey_copy(&b->key, &new->k_i);
-	ret = __bch2_btree_node_hash_insert(&c->btree_cache, b);
+	ret = __bch2_btree_node_hash_insert(&c->btree.cache, b);
 	BUG_ON(ret);
 	return 0;
 }
@@ -616,8 +616,8 @@ recover:
 		six_unlock_read(&b->c.lock);
 
 		if (bch2_err_matches(ret, BCH_ERR_topology_repair_drop_this_node)) {
-			scoped_guard(mutex, &c->btree_cache.lock)
-				bch2_btree_node_hash_remove(&c->btree_cache, b);
+			scoped_guard(mutex, &c->btree.cache.lock)
+				bch2_btree_node_hash_remove(&c->btree.cache, b);
 
 			r->b = NULL;
 
@@ -732,7 +732,7 @@ static int bch2_gc_btree(struct btree_trans *trans,
 
 		try(for_each_btree_key_continue(trans, iter, 0, k, ({
 			gc_pos_set(trans->c, gc_pos_btree(btree, level, k.k->p));
-			bch2_progress_update_iter(trans, progress, &iter, "check_allocations") ?:
+			bch2_progress_update_iter(trans, progress, &iter) ?:
 			bch2_gc_mark_key(trans, btree, level, &prev, &iter, k, initial);
 		})));
 	}
@@ -752,7 +752,7 @@ static int bch2_gc_btrees(struct bch_fs *c)
 	int ret = 0;
 
 	struct progress_indicator progress;
-	bch2_progress_init_inner(&progress, c, ~0ULL, ~0ULL);
+	bch2_progress_init(&progress, "check_allocations", c, ~0ULL, ~0ULL);
 
 	enum btree_id ids[BTREE_ID_NR];
 	for (unsigned i = 0; i < BTREE_ID_NR; i++)
@@ -1219,7 +1219,7 @@ static int merge_btree_node_one(struct btree_trans *trans,
 	if (!b)
 		return 1;
 
-	try(bch2_progress_update_iter(trans, progress, iter, "merge_btree_nodes"));
+	try(bch2_progress_update_iter(trans, progress, iter));
 
 	if (!btree_node_needs_merge(trans, b, 0)) {
 		if (bpos_eq(b->key.k.p, SPOS_MAX))
@@ -1238,7 +1238,7 @@ static int merge_btree_node_one(struct btree_trans *trans,
 int bch2_merge_btree_nodes(struct bch_fs *c)
 {
 	struct progress_indicator progress;
-	bch2_progress_init_inner(&progress, c, ~0ULL, ~0ULL);
+	bch2_progress_init(&progress, __func__, c, ~0ULL, ~0ULL);
 
 	CLASS(btree_trans, trans)(c);
 

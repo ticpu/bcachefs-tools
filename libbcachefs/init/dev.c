@@ -35,15 +35,23 @@ const char * const bch2_dev_write_refs[] = {
 };
 #undef x
 
-void bch2_devs_list_to_text(struct printbuf *out, struct bch_devs_list *d)
+void bch2_devs_list_to_text(struct printbuf *out,
+			    struct bch_fs *c,
+			    struct bch_devs_list *d)
 {
-	prt_char(out, '[');
+	bch2_printbuf_make_room(out, 1024);
+	guard(rcu)();
+
 	darray_for_each(*d, i) {
 		if (i != d->data)
 			prt_char(out, ' ');
-		prt_printf(out, "%u", *i);
+
+		struct bch_dev *ca = bch2_dev_rcu_noerror(c, *i);
+		if (ca)
+			prt_str(out, ca->name);
+		else
+			prt_printf(out, "(invalid device %u)", *i);
 	}
-	prt_char(out, ']');
 }
 
 static int bch2_dev_may_add(struct bch_sb *sb, struct bch_fs *c)
@@ -676,6 +684,11 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 		goto err;
 	}
 
+	ret = bch2_replicas_gc_accounted(c);
+	if (ret) {
+		prt_printf(err, "bch2_replicas_gc2() error: %s\n", bch2_err_str(ret));
+		goto err;
+	}
 	/*
 	 * flushing the journal should be sufficient, but it's the write buffer
 	 * flush that kills superblock replicas entries after they've gone to 0

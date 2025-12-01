@@ -661,7 +661,7 @@ int bch2_btree_node_read_done(struct bch_fs *c, struct bch_dev *ca,
 	/* We might get called multiple times on read retry: */
 	b->written = 0;
 
-	iter = mempool_alloc(&c->fill_iter, GFP_NOFS);
+	iter = mempool_alloc(&c->btree.fill_iter, GFP_NOFS);
 	sort_iter_init(iter, b, (btree_blocks(c) + 1) * 2);
 
 	if (bch2_meta_read_fault("btree"))
@@ -932,7 +932,7 @@ int bch2_btree_node_read_done(struct bch_fs *c, struct bch_dev *ca,
 		set_btree_node_need_rewrite_ptr_written_zero(b);
 	}
 fsck_err:
-	mempool_free(iter, &c->fill_iter);
+	mempool_free(iter, &c->btree.fill_iter);
 	bch2_time_stats_update(&c->times[BCH_TIME_btree_node_read_done], start_time);
 	return ret;
 }
@@ -1062,7 +1062,7 @@ static void btree_node_read_endio(struct bio *bio)
 	bch2_account_io_completion(ca, BCH_MEMBER_ERROR_read,
 				   rb->start_time, !bio->bi_status);
 
-	queue_work(c->btree_read_complete_wq, &rb->work);
+	queue_work(c->btree.read_complete_wq, &rb->work);
 }
 
 void bch2_btree_read_bio_to_text(struct printbuf *out, struct btree_read_bio *rbio)
@@ -1086,7 +1086,7 @@ void bch2_btree_node_read(struct btree_trans *trans, struct btree *b,
 					 NULL, &pick, -1);
 
 	if (ret <= 0) {
-		bool ratelimit = true;
+		bool print = !bch2_ratelimit();
 		CLASS(printbuf, buf)();
 		bch2_log_msg_start(c, &buf);
 
@@ -1097,12 +1097,9 @@ void bch2_btree_node_read(struct btree_trans *trans, struct btree *b,
 
 		if (c->recovery.passes_complete & BIT_ULL(BCH_RECOVERY_PASS_check_topology) &&
 		    bch2_fs_emergency_read_only2(c, &buf))
-			ratelimit = false;
+			print = true;
 
-		static DEFINE_RATELIMIT_STATE(rs,
-					      DEFAULT_RATELIMIT_INTERVAL,
-					      DEFAULT_RATELIMIT_BURST);
-		if (!ratelimit || __ratelimit(&rs))
+		if (print)
 			bch2_print_str(c, KERN_ERR, buf.buf);
 
 		set_btree_node_read_error(b);
@@ -1118,7 +1115,7 @@ void bch2_btree_node_read(struct btree_trans *trans, struct btree *b,
 			       buf_pages(b->data, btree_buf_bytes(b)),
 			       REQ_OP_READ|REQ_SYNC|REQ_META,
 			       GFP_NOFS,
-			       &c->btree_bio);
+			       &c->btree.bio);
 	rb = container_of(bio, struct btree_read_bio, bio);
 	rb->c			= c;
 	rb->b			= b;
@@ -1150,7 +1147,7 @@ void bch2_btree_node_read(struct btree_trans *trans, struct btree *b,
 		if (sync)
 			btree_node_read_work(&rb->work);
 		else
-			queue_work(c->btree_read_complete_wq, &rb->work);
+			queue_work(c->btree.read_complete_wq, &rb->work);
 	}
 }
 
@@ -1174,7 +1171,7 @@ static int __bch2_btree_root_read(struct btree_trans *trans, enum btree_id id,
 	BUG_ON(IS_ERR(b));
 
 	bkey_copy(&b->key, k);
-	BUG_ON(bch2_btree_node_hash_insert(&c->btree_cache, b, level, id));
+	BUG_ON(bch2_btree_node_hash_insert(&c->btree.cache, b, level, id));
 
 	set_btree_node_read_in_flight(b);
 
@@ -1183,8 +1180,8 @@ static int __bch2_btree_root_read(struct btree_trans *trans, enum btree_id id,
 	bch2_btree_node_read(trans, b, true);
 
 	if (btree_node_read_error(b)) {
-		scoped_guard(mutex, &c->btree_cache.lock)
-			bch2_btree_node_hash_remove(&c->btree_cache, b);
+		scoped_guard(mutex, &c->btree.cache.lock)
+			bch2_btree_node_hash_remove(&c->btree.cache, b);
 
 		ret = bch_err_throw(c, btree_node_read_error);
 		goto err;
@@ -1308,7 +1305,7 @@ static void btree_node_scrub_endio(struct bio *bio)
 {
 	struct btree_node_scrub *scrub = container_of(bio, struct btree_node_scrub, bio);
 
-	queue_work(scrub->c->btree_read_complete_wq, &scrub->work);
+	queue_work(scrub->c->btree.read_complete_wq, &scrub->work);
 }
 
 int bch2_btree_node_scrub(struct btree_trans *trans,

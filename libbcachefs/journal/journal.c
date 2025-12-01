@@ -317,7 +317,7 @@ void bch2_journal_halt(struct journal *j)
 	bch2_journal_halt_locked(j);
 }
 
-static bool journal_entry_want_write(struct journal *j)
+static bool journal_entry_close_locked(struct journal *j)
 {
 	bool ret = !journal_entry_is_open(j) ||
 		journal_cur_seq(j) == journal_last_unwritten_seq(j);
@@ -340,7 +340,7 @@ static bool journal_entry_want_write(struct journal *j)
 bool bch2_journal_entry_close(struct journal *j)
 {
 	guard(spinlock)(&j->lock);
-	return journal_entry_want_write(j);
+	return journal_entry_close_locked(j);
 }
 
 /*
@@ -437,11 +437,11 @@ static int journal_entry_open(struct journal *j)
 	buf->must_flush		= c->sb.clean;
 	buf->separate_flush	= false;
 	buf->flush_time		= 0;
+	buf->failed.nr		= 0;
 	buf->need_flush_to_write_buffer = true;
 	buf->write_started	= false;
 	buf->write_allocated	= false;
 	buf->write_done		= false;
-	buf->had_error		= false;
 	buf->empty		= false;
 
 	memset(buf->data, 0, sizeof(*buf->data));
@@ -493,7 +493,7 @@ static bool journal_quiesced(struct journal *j)
 	bool ret = atomic64_read(&j->seq) == j->seq_ondisk;
 
 	if (!ret)
-		bch2_journal_entry_close(j);
+		journal_entry_close_locked(j);
 	return ret;
 }
 
@@ -837,7 +837,7 @@ recheck_need_open:
 		BUG();
 want_write:
 	if (seq == journal_cur_seq(j))
-		journal_entry_want_write(j);
+		journal_entry_close_locked(j);
 out:
 	spin_unlock(&j->lock);
 	return ret;

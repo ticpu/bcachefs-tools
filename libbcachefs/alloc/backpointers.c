@@ -411,7 +411,7 @@ static int bch2_check_backpointer_has_valid_bucket(struct btree_trans *trans, st
 int bch2_check_btree_backpointers(struct bch_fs *c)
 {
 	struct progress_indicator progress;
-	bch2_progress_init(&progress, c, BIT_ULL(BTREE_ID_backpointers));
+	bch2_progress_init(&progress, __func__, c, BIT_ULL(BTREE_ID_backpointers), 0);
 
 	struct wb_maybe_flush last_flushed __cleanup(wb_maybe_flush_exit);
 	wb_maybe_flush_init(&last_flushed);
@@ -420,7 +420,7 @@ int bch2_check_btree_backpointers(struct bch_fs *c)
 	return for_each_btree_key_commit(trans, iter,
 			BTREE_ID_backpointers, POS_MIN, 0, k,
 			NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
-		progress_update_iter(trans, &progress, &iter) ?:
+		bch2_progress_update_iter(trans, &progress, &iter) ?:
 		bch2_check_backpointer_has_valid_bucket(trans, k, &last_flushed);
 	}));
 }
@@ -729,10 +729,10 @@ static int bch2_get_btree_in_memory_pos(struct btree_trans *trans,
 
 	btree_interior_mask |= btree_leaf_mask;
 
-	c->btree_cache.pinned_nodes_mask[0]		= btree_leaf_mask;
-	c->btree_cache.pinned_nodes_mask[1]		= btree_interior_mask;
-	c->btree_cache.pinned_nodes_start		= start;
-	c->btree_cache.pinned_nodes_end			= *end = BBPOS_MAX;
+	c->btree.cache.pinned_nodes_mask[0]		= btree_leaf_mask;
+	c->btree.cache.pinned_nodes_mask[1]		= btree_interior_mask;
+	c->btree.cache.pinned_nodes_start		= start;
+	c->btree.cache.pinned_nodes_end			= *end = BBPOS_MAX;
 
 	for (enum btree_id btree = start.btree;
 	     btree < BTREE_ID_NR && !ret;
@@ -748,7 +748,7 @@ static int bch2_get_btree_in_memory_pos(struct btree_trans *trans,
 				      0, depth, BTREE_ITER_prefetch, b, ({
 			mem_may_pin -= btree_buf_bytes(b);
 			if (mem_may_pin <= 0) {
-				c->btree_cache.pinned_nodes_end = *end =
+				c->btree.cache.pinned_nodes_end = *end =
 					BBPOS(btree, b->key.k.p);
 				break;
 			}
@@ -766,7 +766,7 @@ static int bch2_check_extents_to_backpointers_pass(struct btree_trans *trans,
 	struct bch_fs *c = trans->c;
 
 	struct progress_indicator progress;
-	bch2_progress_init_inner(&progress, trans->c,
+	bch2_progress_init(&progress, "extents_to_backpointers", trans->c,
 		btree_has_data_ptrs_mask,
 		~0ULL);
 
@@ -783,7 +783,7 @@ static int bch2_check_extents_to_backpointers_pass(struct btree_trans *trans,
 			CLASS(btree_node_iter, iter)(trans, btree_id, POS_MIN, 0, level, BTREE_ITER_prefetch);
 
 			try(for_each_btree_key_continue(trans, iter, 0, k, ({
-				bch2_progress_update_iter(trans, &progress, &iter, "extents_to_backpointers") ?:
+				bch2_progress_update_iter(trans, &progress, &iter) ?:
 				wb_maybe_flush_inc(&s->last_flushed) ?:
 				check_extent_to_backpointers(trans, s, btree_id, level, k) ?:
 				bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc);
@@ -1263,11 +1263,12 @@ static int bch2_check_backpointers_to_extents_pass(struct btree_trans *trans,
 	wb_maybe_flush_init(&last_flushed);
 
 	struct progress_indicator progress;
-	bch2_progress_init(&progress, trans->c, BIT_ULL(BTREE_ID_backpointers));
+	bch2_progress_init(&progress, "backpointers_to_extents", trans->c,
+			   BIT_ULL(BTREE_ID_backpointers), 0);
 
 	return for_each_btree_key(trans, iter, BTREE_ID_backpointers,
 				     POS_MIN, BTREE_ITER_prefetch, k, ({
-			bch2_progress_update_iter(trans, &progress, &iter, "backpointers_to_extents") ?:
+			bch2_progress_update_iter(trans, &progress, &iter);
 			check_one_backpointer(trans, start, end, k, &last_flushed);
 	}));
 }

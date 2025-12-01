@@ -401,13 +401,6 @@ int bch2_read_folio(struct file *file, struct folio *folio)
 
 /* writepages: */
 
-struct bch_writepage_io {
-	struct bch_inode_info		*inode;
-
-	/* must be last: */
-	struct bch_write_op		op;
-};
-
 struct bch_writepage_state {
 	struct bch_writepage_io	*io;
 	struct bch_inode_opts	opts;
@@ -446,7 +439,7 @@ static void bch2_writepage_io_done(struct bch_write_op *op)
 		bio_for_each_folio_all(fi, bio) {
 			mapping_set_error(fi.folio->mapping, -EIO);
 
-			struct bch_folio *s = __bch2_folio(fi.folio);
+			struct bch_folio *s = bch2_folio(fi.folio);
 			guard(spinlock)(&s->lock);
 
 			for (i = 0; i < folio_sectors(fi.folio); i++)
@@ -456,7 +449,7 @@ static void bch2_writepage_io_done(struct bch_write_op *op)
 
 	if (io->op.flags & BCH_WRITE_wrote_data_inline) {
 		bio_for_each_folio_all(fi, bio) {
-			struct bch_folio *s = __bch2_folio(fi.folio);
+			struct bch_folio *s = bch2_folio(fi.folio);
 			guard(spinlock)(&s->lock);
 
 			for (i = 0; i < folio_sectors(fi.folio); i++)
@@ -484,7 +477,7 @@ static void bch2_writepage_io_done(struct bch_write_op *op)
 	bch2_i_sectors_acct(c, io->inode, NULL, io->op.i_sectors_delta);
 
 	bio_for_each_folio_all(fi, bio) {
-		struct bch_folio *s = __bch2_folio(fi.folio);
+		struct bch_folio *s = bch2_folio(fi.folio);
 
 		if (atomic_dec_and_test(&s->write_count))
 			folio_end_writeback(fi.folio);
@@ -517,7 +510,7 @@ static void bch2_writepage_io_alloc(struct bch_fs *c,
 	w->io = container_of(bio_alloc_bioset(NULL, BIO_MAX_VECS,
 					      REQ_OP_WRITE,
 					      GFP_KERNEL,
-					      &c->writepage_bioset),
+					      &c->vfs.writepage_bioset),
 			     struct bch_writepage_io, op.wbio.bio);
 
 	w->io->inode		= inode;
@@ -1163,21 +1156,6 @@ unlock:
 		ret = generic_write_sync(iocb, ret);
 out:
 	return bch2_err_class(ret);
-}
-
-void bch2_fs_fs_io_buffered_exit(struct bch_fs *c)
-{
-	bioset_exit(&c->writepage_bioset);
-}
-
-int bch2_fs_fs_io_buffered_init(struct bch_fs *c)
-{
-	if (bioset_init(&c->writepage_bioset,
-			4, offsetof(struct bch_writepage_io, op.wbio.bio),
-			BIOSET_NEED_BVECS))
-		return -BCH_ERR_ENOMEM_writepage_bioset_init;
-
-	return 0;
 }
 
 #endif /* NO_BCACHEFS_FS */
