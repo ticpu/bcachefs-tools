@@ -173,7 +173,7 @@ static void btree_node_write_work(struct work_struct *work)
 				bch2_devs_list_to_text(&msg.m, c, &d);
 				prt_newline(&msg.m);
 			} else {
-				prt_printf(&msg.m, "%s\n", bch2_err_str(ret));
+				prt_printf(&msg.m, "error %s\n", bch2_err_str(ret));
 				bch2_fs_emergency_read_only2(c, &msg.m);
 			}
 		}
@@ -241,7 +241,7 @@ static int validate_bset_for_write(struct bch_fs *c, struct btree *b,
 		return ret;
 	}
 
-	ret = bch2_validate_bset_keys(c, b, i, WRITE, NULL, NULL) ?:
+	ret = bch2_validate_bset_keys(c, NULL, b, i, WRITE, NULL, NULL) ?:
 		bch2_validate_bset(c, NULL, b, i, b->written, WRITE, NULL, NULL);
 	if (ret) {
 		bch2_inconsistent_error(c);
