@@ -62,6 +62,7 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "reconcile" => c::reconcile_cmds(argc, argv),
             "remove-passphrase" => c::cmd_remove_passphrase(argc, argv),
             "reset-counters" => c::cmd_reset_counters(argc, argv),
+            "scrub" => c::cmd_scrub(argc, argv),
             "set-fs-option" => c::cmd_set_option(argc, argv),
             "set-passphrase" => c::cmd_set_passphrase(argc, argv),
             "set-file-option" => c::cmd_setattr(argc, argv),
