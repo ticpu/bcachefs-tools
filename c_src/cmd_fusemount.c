@@ -383,10 +383,7 @@ static void userbio_init(struct bio *bio, struct bio_vec *bv,
 			 void *buf, size_t size)
 {
 	bio_init(bio, NULL, bv, 1, 0);
-	bio->bi_iter.bi_size	= size;
-	bv->bv_page		= buf;
-	bv->bv_len		= size;
-	bv->bv_offset		= 0;
+	bio_add_virt_nofail(bio, buf, size);
 }
 
 static int get_inode_io_opts(struct bch_fs *c, subvol_inum inum, struct bch_inode_opts *opts)
