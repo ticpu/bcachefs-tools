@@ -16,7 +16,7 @@ struct bkey_i_snapshot_tree *__bch2_snapshot_tree_create(struct btree_trans *);
 
 int bch2_snapshot_tree_lookup(struct btree_trans *, u32, struct bch_snapshot_tree *);
 
-void bch2_snapshot_to_text(struct printbuf *, struct bch_snapshot *);
+void bch2_snapshot_to_text(struct printbuf *, const struct bch_snapshot *);
 void bch2_snapshot_key_to_text(struct printbuf *, struct bch_fs *, struct bkey_s_c);
 int bch2_snapshot_validate(struct bch_fs *, struct bkey_s_c,
 			   struct bkey_validate_context);
@@ -110,7 +110,6 @@ static inline u32 bch2_snapshot_nth_parent(struct bch_fs *c, u32 id, u32 n)
 	return id;
 }
 
-u32 bch2_snapshot_oldest_subvol(struct bch_fs *, u32, snapshot_id_list *);
 u32 bch2_snapshot_skiplist_get(struct bch_fs *, u32);
 
 static inline u32 bch2_snapshot_root(struct bch_fs *c, u32 id)
@@ -232,7 +231,18 @@ static inline int snapshot_list_merge(struct bch_fs *c, snapshot_id_list *dst, s
 	return 0;
 }
 
-u32 bch2_snapshot_tree_next(struct snapshot_table *, u32);
+u32 __bch2_snapshot_tree_next(struct snapshot_table *, u32, unsigned *);
+u32 bch2_snapshot_tree_next(struct bch_fs *, u32, unsigned *);
+
+#define __for_each_snapshot_child(_t, _start, _depth, _id)		\
+	for (u32 _id = _start;						\
+	     _id && _id <= _start;					\
+	     _id = __bch2_snapshot_tree_next(_t, _id, _depth))
+
+#define for_each_snapshot_child(_c, _start, _depth, _id)		\
+	for (u32 _id = _start;						\
+	     _id && _id <= _start;					\
+	     _id = bch2_snapshot_tree_next(_c, _id, _depth))
 
 int bch2_snapshot_lookup(struct btree_trans *trans, u32 id,
 			 struct bch_snapshot *s);
