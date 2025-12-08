@@ -165,10 +165,10 @@ int cmd_show_super(int argc, char *argv[])
 		die("too many arguments");
 
 	struct bch_opts opts = bch2_opts_empty();
-
-	opt_set(opts, noexcl,	true);
-	opt_set(opts, nochanges, true);
-	opt_set(opts, no_version_check, true);
+	opt_set(opts, noexcl,		true);
+	opt_set(opts, nochanges,	true);
+	opt_set(opts, no_version_check,	true);
+	opt_set(opts, nostart,		true);
 
 	struct bch_sb_handle sb;
 	int ret = bch2_read_super(dev, &opts, &sb);

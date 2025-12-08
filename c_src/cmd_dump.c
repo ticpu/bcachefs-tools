@@ -74,12 +74,13 @@ struct dump_opts {
 	char		*out;
 	bool		force;
 	bool		sanitize;
+	bool		sanitize_filenames;
 	bool		entire_journal;
 	bool		noexcl;
 };
 
 static void sanitize_key(struct bkey_packed *k, struct bkey_format *f, void *end,
-			 bool *modified)
+			 struct dump_opts opts, bool *modified)
 {
 	struct bch_val *v = bkeyp_val(f, k);
 	unsigned len = min_t(unsigned, end - (void *) v, bkeyp_val_bytes(f, k));
@@ -99,10 +100,19 @@ static void sanitize_key(struct bkey_packed *k, struct bkey_format *f, void *end
 		*modified = true;
 		break;
 	}
+
+	case KEY_TYPE_dirent:
+		if (opts.sanitize_filenames) {
+			struct bch_dirent *d = container_of(v, struct bch_dirent, v);
+
+			memset(d->d_name, 'X', len - offsetof(struct bch_dirent, d_name));
+			*modified = true;
+		}
 	}
 }
 
-static void sanitize_journal(struct bch_fs *c, void *buf, size_t len)
+static void sanitize_journal(struct bch_fs *c, void *buf, size_t len,
+			     struct dump_opts opts)
 {
 	struct bkey_format f = BKEY_FORMAT_CURRENT;
 	void *end = buf + len;
@@ -142,7 +152,7 @@ static void sanitize_journal(struct bch_fs *c, void *buf, size_t len)
 					break;
 				if (!k->k.u64s)
 					break;
-				sanitize_key(bkey_to_packed(k), &f, end, &modified);
+				sanitize_key(bkey_to_packed(k), &f, end, opts, &modified);
 			}
 		}
 
@@ -157,7 +167,8 @@ static void sanitize_journal(struct bch_fs *c, void *buf, size_t len)
 	}
 }
 
-static void sanitize_btree(struct bch_fs *c, void *buf, size_t len)
+static void sanitize_btree(struct bch_fs *c, void *buf, size_t len,
+			   struct dump_opts opts)
 {
 	void *end = buf + len;
 	bool first = true;
@@ -212,7 +223,7 @@ static void sanitize_btree(struct bch_fs *c, void *buf, size_t len)
 			if (!k->u64s)
 				break;
 
-			sanitize_key(k, bkey_packed(k) ? &f : &f_current, end, &modified);
+			sanitize_key(k, bkey_packed(k) ? &f : &f_current, end, opts, &modified);
 		}
 
 		if (modified) {
@@ -237,7 +248,9 @@ static void sanitize_btree(struct bch_fs *c, void *buf, size_t len)
 
 static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 {
-	if (opts.sanitize)
+	if (opts.sanitize_filenames)
+		printf("Sanitizing filenames inline data extents\n");
+	else if (opts.sanitize)
 		printf("Sanitizing inline data extents\n");
 
 	dump_devs devs = {};
@@ -312,7 +325,7 @@ static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 				BUG_ON(len > bucket_bytes);
 
 				xpread(img.infd, buf, len, r->start);
-				sanitize_journal(c, buf, len);
+				sanitize_journal(c, buf, len, opts);
 				qcow2_write_buf(&img, buf, len, r->start);
 			}
 
@@ -321,7 +334,7 @@ static int dump_fs(struct bch_fs *c, struct dump_opts opts)
 				BUG_ON(len > bucket_bytes);
 
 				xpread(img.infd, buf, len, r->start);
-				sanitize_btree(c, buf, len);
+				sanitize_btree(c, buf, len, opts);
 				qcow2_write_buf(&img, buf, len, r->start);
 			}
 			free(buf);
@@ -350,13 +363,13 @@ static void dump_usage(void)
 	     "Usage: bcachefs dump [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -o output                    Output qcow2 image(s)\n"
-	     "  -f, --force                  Force; overwrite when needed\n"
-	     "  -s, --sanitize               Zero out inline data extents\n"
-	     "      --nojournal              Don't dump entire journal, just dirty entries\n"
-	     "      --noexcl                 Open devices with O_NOEXCL (not recommended)\n"
+	     "  -o output                     Output qcow2 image(s)\n"
+	     "  -f, --force                   Force; overwrite when needed\n"
+	     "  -s, --sanitize=data,filenames Zero out inline data extents, or filenames and inline data\n"
+	     "      --nojournal               Don't dump entire journal, just dirty entries\n"
+	     "      --noexcl                  Open devices with O_NOEXCL (not recommended)\n"
 	     "  -v, --verbose\n"
-	     "  -h, --help                   Display this help and exit\n"
+	     "  -h, --help                    Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
@@ -365,7 +378,7 @@ int cmd_dump(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "force",		no_argument,		NULL, 'f' },
-		{ "sanitize",		no_argument,		NULL, 's' },
+		{ "sanitize",		optional_argument,	NULL, 's' },
 		{ "nojournal",		no_argument,		NULL, 'j' },
 		{ "noexcl",		no_argument,		NULL, 'e' },
 		{ "verbose",		no_argument,		NULL, 'v' },
@@ -395,6 +408,15 @@ int cmd_dump(int argc, char *argv[])
 			break;
 		case 's':
 			opts.sanitize = true;
+
+			if (optarg) {
+				if (!strcmp(optarg, "data"))
+					;
+				else if (!strcmp(optarg, "filenames"))
+					opts.sanitize_filenames = true;
+				else
+					die("Bad sanitize option %s", optarg);
+			}
 			break;
 		case 'j':
 			opts.entire_journal = false;
