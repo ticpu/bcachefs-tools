@@ -32,7 +32,7 @@ static inline bool go_rw_in_recovery(struct bch_fs *c)
 static inline bool recovery_pass_will_run(struct bch_fs *c, enum bch_recovery_pass pass)
 {
 	return unlikely(test_bit(BCH_FS_in_recovery, &c->flags) &&
-			c->recovery.passes_to_run & BIT_ULL(pass));
+			c->recovery.current_passes & BIT_ULL(pass));
 }
 
 static inline int bch2_recovery_cancelled(struct bch_fs *c)
@@ -60,6 +60,7 @@ int bch2_require_recovery_pass(struct bch_fs *, struct printbuf *,
 			       enum bch_recovery_pass);
 
 u64 bch2_recovery_passes_match(unsigned);
+void bch2_run_async_recovery_passes(struct bch_fs *);
 int bch2_run_recovery_passes(struct bch_fs *, u64, bool);
 int bch2_run_recovery_passes_startup(struct bch_fs *, enum bch_recovery_pass);
 
