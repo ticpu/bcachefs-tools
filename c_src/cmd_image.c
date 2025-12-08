@@ -452,7 +452,7 @@ static void image_create(struct bch_opt_strs	fs_opt_strs,
 		struct printbuf buf = PRINTBUF;
 		buf.human_readable_units = true;
 
-		bch2_sb_to_text(&buf, sb, false, 1 << BCH_SB_FIELD_members_v2);
+		bch2_sb_to_text(&buf, NULL, sb, false, 1 << BCH_SB_FIELD_members_v2);
 		printf("%s", buf.buf);
 		printbuf_exit(&buf);
 	}

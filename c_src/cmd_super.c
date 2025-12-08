@@ -82,7 +82,8 @@ static void print_one_member(struct printbuf *out, sb_names sb_names,
 	printbuf_indent_sub(out, 2);
 }
 
-void bch2_sb_to_text_with_names(struct printbuf *out, struct bch_sb *sb,
+void bch2_sb_to_text_with_names(struct printbuf *out,
+				struct bch_fs *c, struct bch_sb *sb,
 				bool print_layout, unsigned fields, int field_only)
 {
 	CLASS(printbuf, uuid_buf)();
@@ -96,11 +97,11 @@ void bch2_sb_to_text_with_names(struct printbuf *out, struct bch_sb *sb,
 		struct bch_sb_field *f = bch2_sb_field_get_id(sb, field_only);
 
 		if (f)
-			__bch2_sb_field_to_text(out, sb, f);
+			__bch2_sb_field_to_text(out, c, sb, f);
 	} else {
 		printbuf_tabstop_push(out, 44);
 
-		bch2_sb_to_text(out, sb, print_layout,
+		bch2_sb_to_text(out, c, sb, print_layout,
 				fields & ~(BIT(BCH_SB_FIELD_members_v1)|
 					   BIT(BCH_SB_FIELD_members_v2)));
 
@@ -195,7 +196,7 @@ int cmd_show_super(int argc, char *argv[])
 			fields |= BIT(BCH_SB_FIELD_errors);
 		}
 
-		bch2_sb_to_text_with_names(&buf, sb, print_layout, fields, field_only);
+		bch2_sb_to_text_with_names(&buf, c, sb, print_layout, fields, field_only);
 		printf("%s", buf.buf);
 	}
 
@@ -482,7 +483,7 @@ int cmd_recover_super(int argc, char *argv[])
 		: recover_super_from_member(args);
 
 	struct printbuf buf = PRINTBUF;
-	bch2_sb_to_text(&buf, sb, true, BIT_ULL(BCH_SB_FIELD_members_v2));
+	bch2_sb_to_text(&buf, NULL, sb, true, BIT_ULL(BCH_SB_FIELD_members_v2));
 
 	printf("Found superblock:\n%s\n", buf.buf);
 
