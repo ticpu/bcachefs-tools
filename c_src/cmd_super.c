@@ -26,6 +26,8 @@
 
 #include "bcachefs.h"
 
+#include "init/fs.h"
+
 #include "sb/io.h"
 #include "sb/members.h"
 
@@ -164,33 +166,40 @@ int cmd_show_super(int argc, char *argv[])
 	if (argc)
 		die("too many arguments");
 
+	CLASS(darray_const_str, devs)();
+	darray_push(&devs, dev);
+
 	struct bch_opts opts = bch2_opts_empty();
 	opt_set(opts, noexcl,		true);
 	opt_set(opts, nochanges,	true);
 	opt_set(opts, no_version_check,	true);
 	opt_set(opts, nostart,		true);
 
-	struct bch_sb_handle sb;
-	int ret = bch2_read_super(dev, &opts, &sb);
+	struct bch_fs *c = bch2_fs_open(&devs, &opts);
+	int ret = PTR_ERR_OR_ZERO(c);
 	if (ret)
 		die("Error opening %s: %s", dev, bch2_err_str(ret));
 
-	if (print_default_fields) {
-		fields |= bch2_sb_field_get(sb.sb, members_v2)
-			? BIT(BCH_SB_FIELD_members_v2)
-			: BIT(BCH_SB_FIELD_members_v1);
-		fields |= BIT(BCH_SB_FIELD_errors);
+	/* only one member will be online */
+	for_each_online_member(c, ca, 0) {
+		struct bch_sb *sb = ca->disk_sb.sb;
+
+		CLASS(printbuf, buf)();
+
+		buf.human_readable_units = true;
+
+		if (print_default_fields) {
+			fields |= bch2_sb_field_get(sb, members_v2)
+				? BIT(BCH_SB_FIELD_members_v2)
+				: BIT(BCH_SB_FIELD_members_v1);
+			fields |= BIT(BCH_SB_FIELD_errors);
+		}
+
+		bch2_sb_to_text_with_names(&buf, sb, print_layout, fields, field_only);
+		printf("%s", buf.buf);
 	}
 
-	struct printbuf buf = PRINTBUF;
-
-	buf.human_readable_units = true;
-
-	bch2_sb_to_text_with_names(&buf, sb.sb, print_layout, fields, field_only);
-	printf("%s", buf.buf);
-
-	bch2_free_super(&sb);
-	printbuf_exit(&buf);
+	bch2_fs_exit(c);
 	return 0;
 }
 
