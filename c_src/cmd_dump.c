@@ -11,6 +11,7 @@
 #include "bcachefs.h"
 #include "btree/cache.h"
 #include "btree/iter.h"
+#include "btree/read.h"
 
 #include "data/extents.h"
 
@@ -113,6 +114,22 @@ static void sanitize_journal(struct bch_fs *c, void *buf, size_t len)
 		if (le64_to_cpu(j->magic) != jset_magic(c))
 			break;
 
+		if (bch2_csum_type_is_encryption(JSET_CSUM_TYPE(j))) {
+			if (!c->chacha20_key_set) {
+				fprintf(stderr,
+					"found encrypted journal entry on non-encrypted filesystem\n");
+				return;
+			}
+
+			int ret = bch2_encrypt(c, JSET_CSUM_TYPE(j), journal_nonce(j),
+					       j->encrypted_start,
+					       vstruct_end(j) - (void *) j->encrypted_start);
+			if (ret)
+				die("error deecrypting journal entry: %s", bch2_err_str(ret));
+
+			modified = true;
+		}
+
 		vstruct_for_each(j, i) {
 			if ((void *) i >= end)
 				break;
@@ -146,6 +163,7 @@ static void sanitize_btree(struct bch_fs *c, void *buf, size_t len)
 	bool first = true;
 	struct bkey_format f_current = BKEY_FORMAT_CURRENT;
 	struct bkey_format f;
+	unsigned offset = 0;
 	u64 seq;
 
 	while (len) {
@@ -174,6 +192,20 @@ static void sanitize_btree(struct bch_fs *c, void *buf, size_t len)
 			sectors = vstruct_sectors(bne, c->block_bits);
 		}
 
+		if (bch2_csum_type_is_encryption(BSET_CSUM_TYPE(i)) &&
+		    !c->chacha20_key_set) {
+			fprintf(stderr,
+				"found encrypted btree node on non-encrypted filesystem\n");
+			return;
+		}
+
+		int ret = bset_encrypt(c, i, offset);
+		if (ret)
+			die("error deecrypting btree node: %s", bch2_err_str(ret));
+
+		if (bch2_csum_type_is_encryption(BSET_CSUM_TYPE(i)))
+			modified = true;
+
 		vstruct_for_each(i, k) {
 			if ((void *) k >= end)
 				break;
@@ -199,6 +231,7 @@ static void sanitize_btree(struct bch_fs *c, void *buf, size_t len)
 		unsigned b = min(len, sectors << 9);
 		len -= b;
 		buf += b;
+		offset += b;
 	}
 }
 
