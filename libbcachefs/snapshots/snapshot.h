@@ -24,6 +24,10 @@ int bch2_mark_snapshot(struct btree_trans *, enum btree_id, unsigned,
 		       struct bkey_s_c, struct bkey_s,
 		       enum btree_iter_update_trigger_flags);
 
+int bch2_snapshot_tree_keys_to_text(struct printbuf *, struct btree_trans *, u32);
+
+int bch2_check_snapshot_needs_deletion(struct btree_trans *, struct bkey_s_c);
+
 #define bch2_bkey_ops_snapshot ((struct bkey_ops) {		\
 	.key_validate	= bch2_snapshot_validate,		\
 	.val_to_text	= bch2_snapshot_key_to_text,		\
@@ -164,6 +168,28 @@ static inline u32 bch2_snapshot_depth(struct bch_fs *c, u32 parent)
 {
 	guard(rcu)();
 	return parent ? snapshot_t(c, parent)->depth + 1 : 0;
+}
+
+/*
+ * We can have partially deleted snapshot nodes in the NO_KEYS state: they're
+ * part of the tree of snapshots - we can't remove them from the tree of
+ * snapshots at runtime - but all keys with that snapshot ID have been removed
+ * and we can't create new ones. There will be a single descendent that we can
+ * use instead:
+ */
+static inline u32 bch2_snapshot_live_descendent(struct bch_fs *c, u32 id)
+{
+	guard(rcu)();
+	struct snapshot_table *t = rcu_dereference(c->snapshots.table);
+
+	while (true) {
+		struct snapshot_t *s = __snapshot_t(t, id);
+		if (s->state == SNAPSHOT_ID_live)
+			return id;
+
+		BUG_ON(!s->children[0] || s->children[1]);
+		id = s->children[0];
+	}
 }
 
 bool __bch2_snapshot_is_ancestor(struct bch_fs *, u32, u32);
