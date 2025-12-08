@@ -131,6 +131,12 @@ static void sanitize_journal(struct bch_fs *c, void *buf, size_t len,
 				return;
 			}
 
+			if (vstruct_bytes(j) > len) {
+				fprintf(stderr,
+					"encrypted journal entry overruns bucket; skipping\n");
+				return;
+			}
+
 			int ret = bch2_encrypt(c, JSET_CSUM_TYPE(j), journal_nonce(j),
 					       j->encrypted_start,
 					       vstruct_end(j) - (void *) j->encrypted_start);
@@ -203,19 +209,25 @@ static void sanitize_btree(struct bch_fs *c, void *buf, size_t len,
 			sectors = vstruct_sectors(bne, c->block_bits);
 		}
 
-		if (bch2_csum_type_is_encryption(BSET_CSUM_TYPE(i)) &&
-		    !c->chacha20_key_set) {
-			fprintf(stderr,
-				"found encrypted btree node on non-encrypted filesystem\n");
-			return;
-		}
+		if (bch2_csum_type_is_encryption(BSET_CSUM_TYPE(i))) {
+			if (!c->chacha20_key_set) {
+				fprintf(stderr,
+					"found encrypted btree node on non-encrypted filesystem\n");
+				return;
+			}
 
-		int ret = bset_encrypt(c, i, offset);
-		if (ret)
-			die("error deecrypting btree node: %s", bch2_err_str(ret));
+			if (vstruct_end(i) > end) {
+				fprintf(stderr,
+					"encrypted btree node entry overruns bucket; skipping\n");
+				return;
+			}
 
-		if (bch2_csum_type_is_encryption(BSET_CSUM_TYPE(i)))
+			int ret = bset_encrypt(c, i, offset);
+			if (ret)
+				die("error deecrypting btree node: %s", bch2_err_str(ret));
+
 			modified = true;
+		}
 
 		vstruct_for_each(i, k) {
 			if ((void *) k >= end)
