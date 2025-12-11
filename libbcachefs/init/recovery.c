@@ -169,6 +169,7 @@ void bch2_reconstruct_alloc(struct bch_fs *c)
 	__set_bit_le64(BCH_FSCK_ERR_alloc_key_cached_sectors_wrong, ext->errors_silent);
 	__set_bit_le64(BCH_FSCK_ERR_alloc_key_stripe_wrong, ext->errors_silent);
 	__set_bit_le64(BCH_FSCK_ERR_alloc_key_stripe_redundancy_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_to_missing_lru_entry, ext->errors_silent);
 	__set_bit_le64(BCH_FSCK_ERR_need_discard_key_wrong, ext->errors_silent);
 	__set_bit_le64(BCH_FSCK_ERR_freespace_key_wrong, ext->errors_silent);
 	__set_bit_le64(BCH_FSCK_ERR_bucket_gens_key_wrong, ext->errors_silent);
@@ -862,12 +863,6 @@ use_clean:
 		if (!test_bit(BCH_FS_error, &c->flags) &&
 		    !(c->disk_sb.sb->compat[0] & cpu_to_le64(1ULL << BCH_COMPAT_alloc_info))) {
 			c->disk_sb.sb->compat[0] |= cpu_to_le64(1ULL << BCH_COMPAT_alloc_info);
-			write_sb = true;
-		}
-
-		if (!test_bit(BCH_FS_error, &c->flags) &&
-		    !bch2_is_zero(ext->errors_silent, sizeof(ext->errors_silent))) {
-			memset(ext->errors_silent, 0, sizeof(ext->errors_silent));
 			write_sb = true;
 		}
 
