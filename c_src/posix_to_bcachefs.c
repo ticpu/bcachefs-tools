@@ -925,12 +925,12 @@ int copy_fs(struct bch_fs *c, struct copy_fs_state *s,
 	printbuf_tabstop_push(&buf, 24);
 	printbuf_tabstop_push(&buf, 16);
 	prt_printf(&buf, "Total files:\t%llu\r\n", s->total_files);
-	prt_str_indented(&buf, "Total input:\t");
+	prt_str(&buf, "Total input:\t");
 	prt_human_readable_u64(&buf, s->total_input);
 	prt_printf(&buf, "\r\n");
 
 	if (s->total_wrote) {
-		prt_str_indented(&buf, "Wrote:\t");
+		prt_str(&buf, "Wrote:\t");
 		prt_human_readable_u64(&buf, s->total_wrote);
 		prt_printf(&buf, "\r\n");
 	}
