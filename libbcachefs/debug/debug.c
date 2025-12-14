@@ -39,7 +39,9 @@
 #include <linux/random.h>
 #include <linux/seq_file.h>
 
+#ifdef CONFIG_DEBUG_FS
 static struct dentry *bch_debug;
+#endif
 
 static bool bch2_btree_verify_replica(struct bch_fs *c, struct btree *b,
 				      struct extent_ptr_decoded pick)
@@ -1021,8 +1023,6 @@ void bch2_fs_debug_init(struct bch_fs *c)
 	}
 }
 
-#endif
-
 void bch2_debug_exit(void)
 {
 	if (!IS_ERR_OR_NULL(bch_debug))
@@ -1034,3 +1034,5 @@ int __init bch2_debug_init(void)
 	bch_debug = debugfs_create_dir("bcachefs", NULL);
 	return 0;
 }
+
+#endif
