@@ -1,6 +1,6 @@
-use crate::bkey::BkeySC;
+use crate::bkey::*;
 use crate::c;
-use crate::errcode::{bch_errcode, errptr_to_result_c};
+use crate::errcode::{bch_errcode, errptr_to_result_c, bch2_err_matches};
 use crate::fs::Fs;
 use crate::printbuf_to_formatter;
 use crate::SPOS_MAX;
@@ -8,6 +8,8 @@ use bitflags::bitflags;
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
+
+use c::bpos;
 
 pub struct BtreeTrans<'f> {
     raw: *mut c::btree_trans,
@@ -20,6 +22,18 @@ impl<'f> BtreeTrans<'f> {
             BtreeTrans {
                 raw: &mut *c::__bch2_trans_get(fs.raw, 0),
                 fs:  PhantomData,
+            }
+        }
+    }
+
+    pub fn begin(&mut self) -> u32 {
+        unsafe { c::bch2_trans_begin(&mut *self.raw) }
+    }
+
+    pub fn verify_not_restarted(&mut self, restart_count: u32) {
+        unsafe {
+            if (*self.raw).restart_count != restart_count {
+                c::bch2_trans_restart_error(&mut *self.raw, restart_count);
             }
         }
     }
@@ -51,16 +65,53 @@ bitflags! {
     }
 }
 
+pub fn lockrestart_do<T, F>(trans: &mut BtreeTrans, f: F) -> Result<T, bch_errcode>
+where
+    F: Fn() -> Result<T, bch_errcode>
+{
+    loop {
+        let restart_count = trans.begin();
+        let r = f();
+
+        if let Err(e) = r {
+            if bch2_err_matches(e, bch_errcode::BCH_ERR_transaction_restart) {
+                continue;
+            }
+
+            return r;
+        } else {
+            trans.verify_not_restarted(restart_count);
+            return r;
+        }
+    }
+}
+
 pub struct BtreeIter<'t> {
     raw:   c::btree_iter,
     trans: PhantomData<&'t BtreeTrans<'t>>,
+}
+
+fn bkey_s_c_to_result<'i>(k: c::bkey_s_c) -> Result<Option<BkeySC<'i>>, bch_errcode> {
+    errptr_to_result_c(k.k).map(|_| {
+        if !k.k.is_null() {
+            unsafe {
+                Some(BkeySC {
+                    k:    &*k.k,
+                    v:    &*k.v,
+                    iter: PhantomData,
+                })
+            }
+        } else {
+            None
+        }
+    })
 }
 
 impl<'t> BtreeIter<'t> {
     pub fn new(
         trans: &'t BtreeTrans<'t>,
         btree: c::btree_id,
-        pos: c::bpos,
+        pos: bpos,
         flags: BtreeIterFlags,
     ) -> BtreeIter<'t> {
         unsafe {
@@ -85,7 +136,7 @@ impl<'t> BtreeIter<'t> {
     pub fn new_level(
         trans: &'t BtreeTrans<'t>,
         btree: c::btree_id,
-        pos: c::bpos,
+        pos: bpos,
         level: u32,
         flags: BtreeIterFlags,
     ) -> BtreeIter<'t> {
@@ -109,20 +160,22 @@ impl<'t> BtreeIter<'t> {
         }
     }
 
-    pub fn peek_max<'i>(&'i mut self, end: c::bpos) -> Result<Option<BkeySC<'i>>, bch_errcode> {
+    pub fn peek_max<'i>(&'i mut self, end: bpos) -> Result<Option<BkeySC<'i>>, bch_errcode> {
         unsafe {
-            let k = c::bch2_btree_iter_peek_max(&mut self.raw, end);
-            errptr_to_result_c(k.k).map(|_| {
-                if !k.k.is_null() {
-                    Some(BkeySC {
-                        k:    &*k.k,
-                        v:    &*k.v,
-                        iter: PhantomData,
-                    })
-                } else {
-                    None
-                }
-            })
+            bkey_s_c_to_result(c::bch2_btree_iter_peek_max(&mut self.raw, end))
+        }
+    }
+
+    pub fn peek_max_flags<'i>(&'i mut self, end: bpos, flags: BtreeIterFlags) ->
+            Result<Option<BkeySC<'i>>, bch_errcode> {
+        unsafe {
+            if flags.contains(BtreeIterFlags::SLOTS) {
+                bkey_s_c_to_result(c::bch2_btree_iter_peek_max(&mut self.raw, end))
+            } else if bkey_le(self.raw.pos, end) {
+                bkey_s_c_to_result(c::bch2_btree_iter_peek_slot(&mut self.raw))
+            } else {
+                Ok(None)
+            }
         }
     }
 
@@ -132,19 +185,7 @@ impl<'t> BtreeIter<'t> {
 
     pub fn peek_and_restart(&mut self) -> Result<Option<BkeySC<'_>>, bch_errcode> {
         unsafe {
-            let k = c::bch2_btree_iter_peek_and_restart_outlined(&mut self.raw);
-
-            errptr_to_result_c(k.k).map(|_| {
-                if !k.k.is_null() {
-                    Some(BkeySC {
-                        k:    &*k.k,
-                        v:    &*k.v,
-                        iter: PhantomData,
-                    })
-                } else {
-                    None
-                }
-            })
+            bkey_s_c_to_result(c::bch2_btree_iter_peek_and_restart_outlined(&mut self.raw))
         }
     }
 
@@ -170,7 +211,7 @@ impl<'t> BtreeNodeIter<'t> {
     pub fn new(
         trans: &'t BtreeTrans<'t>,
         btree: c::btree_id,
-        pos: c::bpos,
+        pos: bpos,
         locks_want: u32,
         depth: u32,
         flags: BtreeIterFlags,

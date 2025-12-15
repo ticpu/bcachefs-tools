@@ -1,4 +1,5 @@
 use crate::bcachefs;
+use crate::c;
 use std::ffi::{c_int, CStr};
 use std::fmt;
 
@@ -48,3 +49,11 @@ pub fn errptr_to_result_c<T>(p: *const T) -> Result<*const T, bch_errcode> {
 }
 
 impl std::error::Error for bch_errcode {}
+
+pub fn bch2_err_matches(err: bch_errcode, class: bch_errcode) -> bool {
+    if err as i32 != 0 {
+        unsafe { c::__bch2_err_matches(err as i32, class as i32) }
+    } else {
+        false
+    }
+}
