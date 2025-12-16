@@ -585,6 +585,31 @@ int bch2_fs_accounting_read(struct bch_fs *c, darray_char *out_buf, unsigned acc
 	return 0;
 }
 
+int bch2_fs_accounting_read_key(struct btree_trans *trans,
+				struct disk_accounting_pos *acc_k, u64 *v, unsigned nr)
+{
+	memset(v, 0, sizeof(*v) * nr);
+
+	struct bpos p = disk_accounting_pos_to_bpos(acc_k);
+
+	if (bch2_accounting_is_mem(acc_k)) {
+		bch2_accounting_mem_read(trans->c, p, v, nr);
+		return 0;
+	}
+
+	CLASS(btree_iter, iter)(trans, BTREE_ID_accounting, p, 0);
+	struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_slot(&iter));
+
+	if (k.k->type == KEY_TYPE_accounting) {
+		struct bkey_s_c_accounting a = bkey_s_c_to_accounting(k);
+
+		for (unsigned i = 0; i < min(nr, bch2_accounting_counters(a.k)); i++)
+			v[i] = a.v->d[i];
+	}
+
+	return 0;
+}
+
 static void bch2_accounting_free_counters(struct bch_accounting_mem *acc, bool gc)
 {
 	darray_for_each(acc->k, e) {
@@ -728,7 +753,6 @@ static int disk_accounting_invalid_dev(struct btree_trans *trans,
 	}
 }
 
-
 static int bch2_disk_accounting_validate_late(struct btree_trans *trans,
 					      struct disk_accounting_pos *acc,
 					      u64 *v, unsigned nr)
@@ -846,23 +870,6 @@ static void accounting_key_check_sanity(struct printbuf *out, struct bch_fs *c,
 			prt_newline(out);
 			out->suppress = false;
 		}
-
-	switch (k->type) {
-	case BCH_DISK_ACCOUNTING_dev_data_type:
-		scoped_guard(rcu) {
-			struct bch_dev *ca = bch2_dev_rcu_noerror(c, k->dev_data_type.dev);
-			if (ca && v[0] * ca->mi.bucket_size < v[1]) {
-				prt_printf(out, "Sector count > buckets (%llu > %llu)\n",
-					   v[1], v[0] * ca->mi.bucket_size);
-				bch2_accounting_key_to_text(out, c, k);
-				prt_newline(out);
-				out->suppress = false;
-				return;
-			}
-
-		}
-		break;
-	}
 }
 
 static int accounting_read_mem_fixups(struct btree_trans *trans)
