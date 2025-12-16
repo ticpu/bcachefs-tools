@@ -83,9 +83,8 @@ static void dev_usage_to_text(struct printbuf *out,
 
 		prt_printf(out, "\r%llu\r", u->d[type].buckets);
 
-		u64 fragmented = u->d[type].buckets * u->bucket_size - sectors;
-		if (fragmented)
-			prt_units_u64(out, fragmented << 9);
+		if (u->d[type].fragmented)
+			prt_units_u64(out, u->d[type].fragmented << 9);
 		prt_printf(out, "\r\n");
 	}
 
