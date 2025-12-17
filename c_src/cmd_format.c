@@ -231,6 +231,7 @@ int cmd_format(int argc, char *argv[])
 		case 'q':
 			quiet = true;
 			break;
+		case O_verbose:
 		case 'v':
 			verbose = true;
 			break;
