@@ -118,6 +118,7 @@ jobs:
             iproute2 \
             libc6-dev \
             mmdebstrap \
+            patch \
             sbuild \
             tar \
             uidmap \
@@ -246,10 +247,21 @@ jobs:
           git checkout -B WIP
           export EDITOR=/bin/true
           if [ "${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'release' || 'snapshot' }}" = "release" ]; then
-          gbp dch --new-version="$NEW_VERSION" --since=$PREV_TAG --release --commit
+          gbp dch --new-version="$NEW_VERSION" --since=$PREV_TAG --release
           else
-          gbp dch --new-version="$NEW_VERSION" --since=$CURR_TAG --snapshot --snapshot-number=`date -u +%Y%m%d%H%M%S` --commit
+          gbp dch --new-version="$NEW_VERSION" --since=$CURR_TAG --snapshot --snapshot-number=`date -u +%Y%m%d%H%M%S`
           fi
+          DEB_VER="$(dpkg-parsechangelog --show-field Version | cut -d: -f2-)"
+          patch "Makefile" <<EOF
+          --- a/Makefile
+          +++ b/Makefile
+          @@ -1 +1 @@
+          -VERSION=\$(shell cargo metadata --format-version 1 | jq -r '.packages[] | select(.name | test("bcachefs-tools")) | .version')
+          +VERSION=$DEB_VER
+          EOF
+          rm -f "Makefile.orig"
+          git add -A
+          git commit --message="nobody sees this anyways"
       - name: Build the source-only .deb package
         timeout-minutes: 10
         shell: sudo podman exec --interactive --tty container eatmydata sh "{0}"
