@@ -240,8 +240,8 @@ jobs:
           git config --global user.name "${DEBEMAIL}"
           cd "${{ github.workspace }}/bcachefs-tools"
           git config --global --add safe.directory .
-          CURR_TAG="$(git describe --abbrev=0 --tags $(git rev-list HEAD --tags --skip=0 --max-count=1))"
-          PREV_TAG="$(git describe --abbrev=0 --tags $(git rev-list HEAD --tags --skip=1 --max-count=1))"
+          CURR_TAG="$(git describe --abbrev=0 --tags --match "v*" $(git rev-list HEAD --tags --skip=0 --max-count=1))"
+          PREV_TAG="$(git describe --abbrev=0 --tags --match "v*" $(git rev-list HEAD --tags --skip=1 --max-count=1))"
           NEW_VERSION="${{ env.DEBPKG_EPOCH }}:$(echo $CURR_TAG | sed 's/^v//')"
           git checkout -B WIP
           export EDITOR=/bin/true
