@@ -166,7 +166,7 @@ endif
 # Rebuild the 'version' command any time the version string changes
 cmd_version.o : .version
 
-.PHONY: dkms/dkms.conf initramfs/hook
+.PHONY: dkms/dkms.conf
 dkms/dkms.conf: dkms/dkms.conf.in .version
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/dkms.conf.in > dkms/dkms.conf
@@ -176,6 +176,7 @@ dkms/module-version.c: dkms/module-version.c.in .version
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/module-version.c.in > dkms/module-version.c
 
+.PHONY: initramfs/hook
 initramfs/hook: initramfs/hook.in
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@ROOT_SBINDIR@|$(ROOT_SBINDIR)|g" initramfs/hook.in > initramfs/hook
