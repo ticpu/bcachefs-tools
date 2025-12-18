@@ -20,6 +20,18 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+/sbin/modinfo bcachefs
+if [ $? -ne 0 ]; then
+  echo "Error: failed to get bcachefs module info."
+  exit 1
+fi
+
+bcachefs version
+if [ $? -ne 0 ]; then
+  echo "Error: failed to get bcachefs tools info."
+  exit 1
+fi
+
 FAILED_TESTS=0
 for t in ./debian/tests/$(basename "$0").*
 do

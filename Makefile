@@ -168,6 +168,11 @@ dkms/dkms.conf: dkms/dkms.conf.in
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/dkms.conf.in > dkms/dkms.conf
 
+.PHONY: dkms/module-version.c
+dkms/module-version.c: dkms/module-version.c.in
+	@echo "    [SED]    $@"
+	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/module-version.c.in > dkms/module-version.c
+
 initramfs/hook: initramfs/hook.in
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@ROOT_SBINDIR@|$(ROOT_SBINDIR)|g" initramfs/hook.in > initramfs/hook
@@ -191,11 +196,12 @@ ifdef BCACHEFS_FUSE
 endif
 
 .PHONY: install_dkms
-install_dkms: dkms/dkms.conf
+install_dkms: dkms/dkms.conf dkms/module-version.c
 	$(INSTALL) -m0644 -D dkms/Makefile		-t $(DESTDIR)$(DKMSDIR)
 	$(INSTALL) -m0644 -D dkms/dkms.conf		-t $(DESTDIR)$(DKMSDIR)
 	$(INSTALL) -m0644 -D libbcachefs/Makefile	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
 	(cd libbcachefs; find -name '*.[ch]' -exec install -m0644 -D {} $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/{} \; )
+	$(INSTALL) -m0644 -D dkms/module-version.c	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
 	sed -i "s|^#define TRACE_INCLUDE_PATH \\.\\./\\.\\./fs/bcachefs$$|#define TRACE_INCLUDE_PATH .|" \
 	  $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/debug/trace.h
 
