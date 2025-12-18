@@ -152,19 +152,22 @@ libbcachefs.a: $(OBJS)
 	@echo "    [AR]     $@"
 	$(Q)$(AR) -rc $@ $+
 
-# If the version string differs from the last build, update the last version
+.PHONY: generate_version
+generate_version:
 ifneq ($(VERSION),$(shell cat .version 2>/dev/null))
-.PHONY: .version
+# If the version string differs from the last build, update the last version
+	@echo "  [VERS]    .version"
+	$(Q)echo '$(VERSION)' > .version
 endif
-.version:
-	@echo "  [VERS]    $@"
-	$(Q)echo '$(VERSION)' > $@
+
+.version: generate_version
+	$(Q)echo -n
 
 # Rebuild the 'version' command any time the version string changes
 cmd_version.o : .version
 
-.PHONY: dkms/dkms.conf initramfs/hook .version
-dkms/dkms.conf: dkms/dkms.conf.in
+.PHONY: dkms/dkms.conf
+dkms/dkms.conf: dkms/dkms.conf.in .version
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/dkms.conf.in > dkms/dkms.conf
 
@@ -173,6 +176,7 @@ dkms/module-version.c: dkms/module-version.c.in .version
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/module-version.c.in > dkms/module-version.c
 
+.PHONY: initramfs/hook
 initramfs/hook: initramfs/hook.in
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@ROOT_SBINDIR@|$(ROOT_SBINDIR)|g" initramfs/hook.in > initramfs/hook
