@@ -79,6 +79,11 @@ static inline void *krealloc(void *old, size_t size, gfp_t flags)
 	return new;
 }
 
+static inline void *kvrealloc(void *old, size_t size, gfp_t flags)
+{
+	return krealloc(old, size, flags);
+}
+
 static inline void *krealloc_array(void *p, size_t new_n, size_t new_size, gfp_t flags)
 {
 	size_t bytes;

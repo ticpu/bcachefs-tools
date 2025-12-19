@@ -183,7 +183,9 @@ static bool bkey_matches_filter(transaction_key_filter f,
 			k_end.pos.snapshot = 0;
 		}
 
-		if (!k->k.size) {
+		if (true || !k->k.size) {
+			k_start	= k_end;
+
 			if (bbpos_cmp(k_start, i->start) >= 0 &&
 			    bbpos_cmp(k_end, i->end) <= 0)
 				return true;
