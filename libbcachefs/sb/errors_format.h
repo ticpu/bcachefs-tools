@@ -218,7 +218,7 @@ enum bch_fsck_flags {
 	x(snapshot_bad_skiplist,				185,	FSCK_AUTOFIX)	\
 	x(subvol_pos_bad,					186,	0)		\
 	x(subvol_not_master_and_not_snapshot,			187,	FSCK_AUTOFIX)	\
-	x(subvol_to_missing_root,				188,	0)		\
+	x(subvol_to_missing_root,				188,	FSCK_AUTOFIX)	\
 	x(subvol_root_wrong_bi_subvol,				189,	FSCK_AUTOFIX)	\
 	x(bkey_in_missing_snapshot,				190,	0)		\
 	x(bkey_in_deleted_snapshot,				315,	FSCK_AUTOFIX)	\
@@ -228,7 +228,7 @@ enum bch_fsck_flags {
 	x(inode_unpack_error,					193,	0)		\
 	x(inode_str_hash_invalid,				194,	0)		\
 	x(inode_v3_fields_start_bad,				195,	0)		\
-	x(inode_snapshot_mismatch,				196,	0)		\
+	x(inode_snapshot_mismatch,				196,	FSCK_AUTOFIX)	\
 	x(snapshot_key_missing_inode_snapshot,			314,	FSCK_AUTOFIX)	\
 	x(inode_unlinked_but_clean,				197,	0)		\
 	x(inode_unlinked_but_nlink_nonzero,			198,	0)		\
@@ -277,7 +277,7 @@ enum bch_fsck_flags {
 	x(dirent_in_missing_dir_inode,				227,	0)		\
 	x(dirent_in_non_dir_inode,				228,	0)		\
 	x(dirent_to_missing_inode,				229,	FSCK_AUTOFIX)	\
-	x(dirent_to_overwritten_inode,				302,	0)		\
+	x(dirent_to_overwritten_inode,				302,	FSCK_AUTOFIX)	\
 	x(dirent_to_missing_subvol,				230,	0)		\
 	x(dirent_to_itself,					231,	0)		\
 	x(dirent_casefold_mismatch,				318,	FSCK_AUTOFIX)	\
