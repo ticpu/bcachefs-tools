@@ -296,7 +296,7 @@ struct bio *bio_alloc(struct block_device *bdev, unsigned nr_iovecs,
 		      sizeof(struct bio_vec) * nr_iovecs, gfp_mask);
 	if (unlikely(!bio))
 		return NULL;
-	bio_init(bio, NULL, nr_iovecs ? bio_inline_vecs(bio) : NULL, nr_iovecs, opf);
+	bio_init(bio, bdev, nr_iovecs ? bio_inline_vecs(bio) : NULL, nr_iovecs, opf);
 	bio->bi_pool = NULL;
 	return bio;
 }
