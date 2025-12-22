@@ -322,8 +322,14 @@ int bch2_move_extent(struct moving_context *ctxt,
 		if (data_opts.type != BCH_DATA_UPDATE_copygc)
 			try(bch2_can_do_write(c, &opts, &data_opts, k, &devs_have));
 
+		enum bch_trans_commit_flags commit_flags = data_opts.commit_flags;
+		if ((commit_flags & BCH_WATERMARK_MASK) == BCH_WATERMARK_copygc)
+			commit_flags = btree_update_set_watermark_hipri(commit_flags);
+
 		ret = bch2_btree_node_rewrite_pos(trans, iter->btree_id, level, k.k->p,
-						  data_opts.target, 0, data_opts.write_flags);
+						  data_opts.target,
+						  data_opts.commit_flags,
+						  data_opts.write_flags);
 	} else
 		ret = bch2_btree_node_scrub(trans, iter->btree_id, level, k, data_opts.read_dev);
 
@@ -495,7 +501,6 @@ static int __bch2_move_data_phys(struct moving_context *ctxt,
 {
 	struct btree_trans *trans = ctxt->trans;
 	struct bch_fs *c = trans->c;
-	bool is_kthread = current->flags & PF_KTHREAD;
 	struct bkey_s_c k;
 	u64 check_mismatch_done = bucket_start;
 	int ret = 0;
@@ -527,9 +532,6 @@ static int __bch2_move_data_phys(struct moving_context *ctxt,
 		return ret;
 
 	while (!(ret = bch2_move_ratelimit(ctxt))) {
-		if (is_kthread && kthread_should_stop())
-			break;
-
 		bch2_trans_begin(trans);
 
 		k = bch2_btree_iter_peek(&bp_iter);

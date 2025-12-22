@@ -418,7 +418,7 @@ int bch2_inode_find_oldest_snapshot(struct btree_trans *trans, u64 inum, u32 sna
 		ret = 0;
 	}
 
-	return ret ?: ret2;
+	return ret2 ?: ret;
 }
 
 int bch2_inode_write_flags(struct btree_trans *trans,
