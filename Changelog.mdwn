@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.33.3 - Mon Dec 22 2025
+
+- More snapshot deletion fixes, old interior snapshot nodes should finally be
+  getting cleaned up correctly
+
+- We now run `check_snapshots` on every mount; there have been some bugs which
+  result in snapshot tree corruption in the depth/skiplist fields, breaking
+  `snapshot_is_ancestor()`. We can't efficiently detect this kind of corruption
+  at runtime, but `check_snapshots` is no more expensive than `read_snapshots`;
+  if we still have bugs in snapshot deletion, this will render them harmless.
+
+- Some obscure repair paths are now more robust - str_hash mismatch repair,
+  inode reconstruction.
+
+- Btree node rewrites no longer run at `BCH_WATERMARK_btree` by default; this
+  should solve some deadlocks that started happening when reconcile started
+  moving around a lot more btree nodes.
+
+- When we get a ZSTD decompression error, the specific error code from zstd will
+  now be reported in the error message.
+
 ## v1.33.2 - Wed Dec 17 2025
 
 (Almost) bugfixes only:
