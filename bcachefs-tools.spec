@@ -30,6 +30,12 @@
 %endif
 %endif
 
+%if %{undefined _version}
+%global _OBS 1
+%else
+%global _OBS 0
+%endif
+
 Name:           bcachefs-tools
 # define with i.e. --define '_version 1.0'
 Version:        0%{?_version}
@@ -51,7 +57,7 @@ Summary:        Userspace tools for bcachefs
 # BSD-3-Clause
 License:        GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-only AND BSD-3-Clause AND (Apache-2.0 AND (Apache-2.0 OR MIT) AND (Apache-2.0 with LLVM-exception OR Apache-2.0 OR MIT) AND MIT AND MPL-2.0 AND (Unlicense OR MIT))
 URL:            https://bcachefs.org/
-%if 0%{?_version} == 0
+%if %_OBS
 Source:         bcachefs-tools_%{version}.tar.xz
 Source1:        bcachefs-tools_%{version}.tar.xz.sig
 Source2:        apt.bcachefs.org.keyring
@@ -67,7 +73,7 @@ BuildRequires:  gcc
 BuildRequires:  jq
 BuildRequires:  make
 BuildRequires:  tar
-%if 0%{?_version} == 0
+%if %_OBS
 BuildRequires:  xz
 %else
 BuildRequires:  zstd
@@ -218,7 +224,7 @@ fi
 
 
 %build
-%if 0%{?_version} == 0
+%if %_OBS
 export CARGO_HOME=$PWD/.cargo
 export CARGO_ARGS="--frozen"
 rm -rf $PWD/.cargo
@@ -240,7 +246,7 @@ done
 %endif
 
 %install
-%if 0%{?_version} == 0
+%if %_OBS
 export CARGO_HOME=$PWD/.cargo
 export CARGO_ARGS="--frozen"
 rm -rf $PWD/.cargo
