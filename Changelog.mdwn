@@ -1,5 +1,49 @@
 # Changelog
 
+## v1.33.4 - Thu Dec 25 2025
+
+- Fix a critical bug with interior snapshot node deletion:
+
+  Interior snapshot nodes can't be fully deleted at runtime while the filesystem
+  is in use, since snapshot tree fixups can require adjustments to arbitrarily
+  many nodes and can't be done atomically, so we defer them until the next mount
+  (all the heavy lifting of deleting/moving keys that refer to those snapshot
+  nodes is done at runtime).
+
+  But, incorrectly, we were doing interior snapshot node deletion before going
+  RW: before going RW, transaction commits use a different path that queues up
+  updates to the list of updates for journal replay - and this path doesn't run
+  in-memory triggers, but snapshots use an in-memory trigger for keeping the
+  in-memory snapshots table in sync with the snapshots btree - this broke
+  `snapshot_is_ancestor()`
+
+  Affected users would see filesystem corruption that disappeared on the next
+  remount.
+
+  This is fixed by now doing interior snapshots deletion just after going RW,
+  but before starting processes that require snapshots lookups.
+
+- New mode for verifying the result of data compression, before writing
+  compressed data out to disk.
+
+  There's been sporadic reports of corruption when zstd is in use; to track this
+  down, there's a new `verify_compress` module parameter. When enabled, we
+  decompress data immediately after compressing and verify the result with
+  memcmp(). On mismatch, we mark the extent as incompressible and print an error
+  with the file, offset and length; this will let us find the exact data that
+  caused the error and do further testing.
+
+- Reconcile no longer runs when the filesystem is mounted read only.
+
+  When a filesystem is mounted read only, we will still go read-write internally
+  if we need to fsck or do journal replay. There are two main background tasks
+  we start when going read-write for background data processing: copygc and
+  reconcile. Copygc is required to run when we're read-write for the allocator
+  to be guaranteed to make forward progress, but reconcile is not.
+
+- We no longer include durability=0 devices when calculating filesystem
+  capacity.
+
 ## v1.33.3 - Mon Dec 22 2025
 
 - More snapshot deletion fixes, old interior snapshot nodes should finally be
