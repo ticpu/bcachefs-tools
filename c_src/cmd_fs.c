@@ -113,11 +113,14 @@ static int dev_by_label_cmp(const void *_l, const void *_r)
 		cmp_int(l->idx, r->idx);
 }
 
+#define for_each_accounting(_in, _a)								\
+	for (struct bkey_i_accounting *a = _in->accounting;					\
+	     _a < (struct bkey_i_accounting *) ((u64 *) _in->accounting + _in->accounting_u64s);\
+	     _a = (struct bkey_i_accounting *) bkey_next(&_a->k_i))
+
 static u64 dev_leaving_dev(struct bch_ioctl_query_accounting *in, unsigned dev)
 {
-	for (struct bkey_i_accounting *a = in->accounting;
-	     a < (struct bkey_i_accounting *) ((u64 *) in->accounting + in->accounting_u64s);
-	     a = bkey_i_to_accounting(bkey_next(&a->k_i))) {
+	for_each_accounting(in, a) {
 		struct disk_accounting_pos acc_k;
 		bpos_to_disk_accounting_pos(&acc_k, a->k.p);
 
@@ -304,9 +307,7 @@ static int accounting_p_cmp(const void *_l, const void *_r)
 static void accounting_sort(darray_accounting_p *sorted,
 			    struct bch_ioctl_query_accounting *in)
 {
-	for (struct bkey_i_accounting *a = in->accounting;
-	     a < (struct bkey_i_accounting *) ((u64 *) in->accounting + in->accounting_u64s);
-	     a = bkey_i_to_accounting(bkey_next(&a->k_i)))
+	for_each_accounting(in, a)
 		if (darray_push(sorted, a))
 			die("memory allocation failure");
 
