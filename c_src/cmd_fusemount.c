@@ -1166,14 +1166,26 @@ static void usage(char *argv[])
 
 int cmd_fusemount(int argc, char *argv[])
 {
-	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	struct bch_opts bch_opts = bch2_opts_empty();
-	struct bf_context ctx = { 0 };
-	struct bch_fs *c = NULL;
 	struct fuse_session *se = NULL;
 	int ret = 0;
 
+	/* fuse argument parsing can't cope with unknown arguments - !? */
+	for (unsigned i = 0; i < argc; i++) {
+		if (!strcmp(argv[i], "-t")) {
+			unsigned nr = min(argc - i, 2);
+
+			memmove(&argv[i],
+				&argv[i + 2],
+				nr * sizeof(argv[0]));
+			argc -= nr;
+			argv[argc] = NULL;
+			break;
+		}
+	}
+
 	/* Parse arguments. */
+	struct bf_context ctx = { 0 };
+	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	if (fuse_opt_parse(&args, &ctx, bf_opts, bf_opt_proc) < 0)
 		die("fuse_opt_parse err: %m");
 
@@ -1219,11 +1231,13 @@ int cmd_fusemount(int argc, char *argv[])
 
 	fuse_opt_add_arg(&args, "-o");
 	fuse_opt_add_arg(&args, fsname.buf);
+	fuse_opt_add_arg(&args, "-osubtype=bcachefs");
 
 	/* Open bch */
 	printf("Opening bcachefs filesystem on %s\n", ctx.devices_str);
 
-	c = bch2_fs_open(&ctx.devices, &bch_opts);
+	struct bch_opts bch_opts = bch2_opts_empty();
+	struct bch_fs *c = bch2_fs_open(&ctx.devices, &bch_opts);
 	if (IS_ERR(c))
 		die("error opening %s: %s", ctx.devices_str,
 		    bch2_err_str(PTR_ERR(c)));
