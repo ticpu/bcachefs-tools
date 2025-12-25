@@ -255,7 +255,7 @@ static inline struct bch_ioctl_query_accounting *bchu_fs_accounting(struct bchfs
 			continue;
 		}
 
-		die("BCH_IOCTL_USAGE error: %m");
+		die("BCH_IOCTL_QUERY_ACCOUNTING error: %m");
 	}
 }
 
