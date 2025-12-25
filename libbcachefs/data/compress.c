@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 #include "bcachefs.h"
 
+#include "btree/iter.h"
+
 #include "data/checksum.h"
 #include "data/compress.h"
 #include "data/extents.h"
@@ -13,6 +15,12 @@
 #include <linux/lz4.h>
 #include <linux/zlib.h>
 #include <linux/zstd.h>
+
+#include <linux/module.h>
+
+static bool bch2_verify_compress = IS_ENABLED(CONFIG_BCACHEFS_DEBUG);
+module_param_named(verify_compress, bch2_verify_compress, bool, 0644);
+MODULE_PARM_DESC(verify_compress, "Decompress data immediately after compressing, and verify the result");
 
 static inline enum bch_compression_opts bch2_compression_type_to_opt(enum bch_compression_type type)
 {
@@ -182,13 +190,10 @@ static inline void zlib_set_workspace(z_stream *strm, void *workspace)
 #endif
 }
 
-static int __bio_uncompress(struct bch_fs *c, struct bio *src,
-			    void *dst_data, struct bch_extent_crc_unpacked crc)
+static int buf_uncompress(struct bch_fs *c,
+			  void *dst, void *src,
+			  struct bch_extent_crc_unpacked crc)
 {
-	size_t src_len = src->bi_iter.bi_size;
-	size_t dst_len = crc.uncompressed_size << 9;
-	void *workspace;
-
 	enum bch_compression_opts opt = bch2_compression_type_to_opt(crc.compression_type);
 	mempool_t *workspace_pool = &c->compress.workspace[opt];
 	if (unlikely(!mempool_initialized(workspace_pool))) {
@@ -200,26 +205,26 @@ static int __bio_uncompress(struct bch_fs *c, struct bio *src,
 			return bch_err_throw(c, compression_workspace_not_initialized);
 	}
 
-	struct bbuf src_data __cleanup(bbuf_exit) = bio_map_or_bounce(c, src, READ);
+	size_t src_len = crc.compressed_size << 9;
+	size_t dst_len = crc.uncompressed_size << 9;
 
 	switch (crc.compression_type) {
 	case BCH_COMPRESSION_TYPE_lz4_old:
 	case BCH_COMPRESSION_TYPE_lz4: {
-		int ret = LZ4_decompress_safe_partial(src_data.b, dst_data,
-						   src_len, dst_len, dst_len);
+		int ret = LZ4_decompress_safe_partial(src, dst, src_len, dst_len, dst_len);
 		if (ret != dst_len)
 			return bch_err_throw(c, decompress_lz4);
 		break;
 	}
 	case BCH_COMPRESSION_TYPE_gzip: {
 		z_stream strm = {
-			.next_in	= src_data.b,
+			.next_in	= src,
 			.avail_in	= src_len,
-			.next_out	= dst_data,
+			.next_out	= dst,
 			.avail_out	= dst_len,
 		};
 
-		workspace = mempool_alloc(workspace_pool, GFP_NOFS);
+		void *workspace = mempool_alloc(workspace_pool, GFP_NOFS);
 
 		zlib_set_workspace(&strm, workspace);
 		zlib_inflateInit2(&strm, -MAX_WBITS);
@@ -233,17 +238,17 @@ static int __bio_uncompress(struct bch_fs *c, struct bio *src,
 	}
 	case BCH_COMPRESSION_TYPE_zstd: {
 		ZSTD_DCtx *ctx;
-		size_t real_src_len = le32_to_cpup(src_data.b);
+		size_t real_src_len = le32_to_cpup(src);
 
 		if (real_src_len > src_len - 4)
 			return bch_err_throw(c, decompress_zstd_src_len_bad);
 
-		workspace = mempool_alloc(workspace_pool, GFP_NOFS);
+		void *workspace = mempool_alloc(workspace_pool, GFP_NOFS);
 		ctx = zstd_init_dctx(workspace, zstd_dctx_workspace_bound());
 
 		size_t ret = zstd_decompress_dctx(ctx,
-				dst_data,	dst_len,
-				src_data.b + 4, real_src_len);
+				dst,	dst_len,
+				src + 4, real_src_len);
 
 		mempool_free(workspace, workspace_pool);
 
@@ -262,6 +267,16 @@ static int __bio_uncompress(struct bch_fs *c, struct bio *src,
 	}
 
 	return 0;
+}
+
+static int __bio_uncompress(struct bch_fs *c, struct bio *src,
+			    void *dst_data, struct bch_extent_crc_unpacked crc)
+{
+	BUG_ON(src->bi_iter.bi_size != crc.compressed_size << 9);
+
+	struct bbuf src_data __cleanup(bbuf_exit) = bio_map_or_bounce(c, src, READ);
+
+	return buf_uncompress(c, dst_data, src_data.b, crc);
 }
 
 int bch2_bio_uncompress_inplace(struct bch_write_op *op,
@@ -428,7 +443,8 @@ static int attempt_compress(struct bch_fs *c,
 static unsigned __bio_compress(struct bch_fs *c,
 			       struct bio *dst, size_t *dst_len,
 			       struct bio *src, size_t *src_len,
-			       union bch_compression_opt compression)
+			       union bch_compression_opt compression,
+			       struct bpos write_pos)
 {
 	enum bch_compression_type compression_type =
 		__bch2_compression_opt_to_type[compression.type];
@@ -514,6 +530,31 @@ static unsigned __bio_compress(struct bch_fs *c,
 	memset(dst_data.b + *dst_len, 0, pad);
 	*dst_len += pad;
 
+	if (unlikely(bch2_verify_compress)) {
+		struct bch_extent_crc_unpacked crc = {
+			.compressed_size	= *dst_len >> 9,
+			.uncompressed_size	= *src_len >> 9,
+			.compression_type	= compression_type,
+		};
+
+		struct bbuf verify __cleanup(bbuf_exit) = __bounce_alloc(c, *src_len, WRITE);
+		ret = buf_uncompress(c, verify.b, dst_data.b, crc);
+		BUG_ON(ret);
+
+		if (memcmp(verify.b, src_data.b, *src_len)) {
+			CLASS(bch_log_msg, msg)(c);
+			prt_printf(&msg.m, "Decompressing compressed data did not produce the same result (%s)",
+				   __bch2_compression_types[compression_type]);
+
+			CLASS(btree_trans, trans)(c);
+			bch2_inum_offset_err_msg_trans(trans, &msg.m, 0, write_pos);
+			prt_printf(&msg.m, " len %zu\n", *src_len);
+
+			msg.m.suppress = bch2_count_fsck_err(c, compression_error, &msg.m);
+			return BCH_COMPRESSION_TYPE_incompressible;
+		}
+	}
+
 	if (dst_data.type != BB_none &&
 	    dst_data.type != BB_vmap)
 		memcpy_to_bio(dst, dst->bi_iter, dst_data.b);
@@ -528,7 +569,8 @@ static unsigned __bio_compress(struct bch_fs *c,
 unsigned bch2_bio_compress(struct bch_fs *c,
 			   struct bio *dst, size_t *dst_len,
 			   struct bio *src, size_t *src_len,
-			   unsigned compression_opt)
+			   unsigned compression_opt,
+			   struct bpos write_pos)
 {
 	unsigned orig_dst = dst->bi_iter.bi_size;
 	unsigned orig_src = src->bi_iter.bi_size;
@@ -542,7 +584,8 @@ unsigned bch2_bio_compress(struct bch_fs *c,
 
 	compression_type =
 		__bio_compress(c, dst, dst_len, src, src_len,
-			       (union bch_compression_opt){ .value = compression_opt });
+			       (union bch_compression_opt){ .value = compression_opt },
+			       write_pos);
 
 	dst->bi_iter.bi_size = orig_dst;
 	src->bi_iter.bi_size = orig_src;
