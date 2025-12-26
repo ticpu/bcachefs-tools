@@ -121,8 +121,7 @@ static int shrinker_thread(void *arg)
 struct task_struct *shrinker_task;
 unsigned long _totalram_pages;
 
-__attribute__((constructor(103)))
-static void shrinker_thread_init(void)
+void linux_shrinkers_init(void)
 {
 	struct sysinfo info;
 	si_meminfo(&info);

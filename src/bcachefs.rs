@@ -106,6 +106,7 @@ fn main() -> ExitCode {
     }
 
     unsafe { c::raid_init() };
+    unsafe { c::linux_shrinkers_init() };
 
     let cmd = match symlink_cmd {
         Some(s) => s,

@@ -51,6 +51,7 @@ fn main() {
         .bitfield_enum("btree_iter_update_trigger_flags")
         .allowlist_function("bcachefs_usage")
         .allowlist_function("raid_init")
+        .allowlist_function("linux_shrinkers_init")
         .allowlist_function("cmd_.*")
         .allowlist_function(".*_cmds")
         .allowlist_function(".*bch2_.*")
