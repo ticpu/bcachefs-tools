@@ -113,11 +113,6 @@ static int dev_by_label_cmp(const void *_l, const void *_r)
 		cmp_int(l->idx, r->idx);
 }
 
-#define for_each_accounting(_in, _a)								\
-	for (struct bkey_i_accounting *a = _in->accounting;					\
-	     _a < (struct bkey_i_accounting *) ((u64 *) _in->accounting + _in->accounting_u64s);\
-	     _a = (struct bkey_i_accounting *) bkey_next(&_a->k_i))
-
 static u64 dev_leaving_dev(struct bch_ioctl_query_accounting *in, unsigned dev)
 {
 	for_each_accounting(in, a) {
@@ -320,9 +315,7 @@ static void accounting_swab_if_old(struct bch_ioctl_query_accounting *in)
 
 	if (kernel_version &&
 	    kernel_version < bcachefs_metadata_version_disk_accounting_big_endian)
-		for (struct bkey_i_accounting *a = in->accounting;
-		     a < (struct bkey_i_accounting *) ((u64 *) in->accounting + in->accounting_u64s);
-		     a = bkey_i_to_accounting(bkey_next(&a->k_i)))
+		for_each_accounting(in, a)
 			bch2_bpos_swab(&a->k.p);
 }
 

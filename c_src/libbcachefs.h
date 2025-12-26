@@ -259,6 +259,30 @@ static inline struct bch_ioctl_query_accounting *bchu_fs_accounting(struct bchfs
 	}
 }
 
+static inline struct bkey_i_accounting *accounting_iter_cast(struct bch_ioctl_query_accounting *in,
+							     struct bkey_i *a)
+{
+	struct bkey_i *end = (void *) ((u64 *) in->accounting + in->accounting_u64s);
+
+	return a != end ? bkey_i_to_accounting(a) : NULL;
+}
+
+static inline struct bkey_i_accounting *accounting_iter_next(struct bch_ioctl_query_accounting *in,
+							     struct bkey_i_accounting *a)
+{
+	return accounting_iter_cast(in, bkey_next(&a->k_i));
+}
+
+static inline struct bkey_i_accounting *accounting_iter_start(struct bch_ioctl_query_accounting *in)
+{
+	return in->accounting_u64s ? in->accounting : NULL;
+}
+
+#define for_each_accounting(_in, _a)								\
+	for (struct bkey_i_accounting *_a = accounting_iter_start(_in);				\
+	     _a;										\
+	     _a = accounting_iter_next(_in, _a))
+
 static inline struct bch_ioctl_dev_usage_v2 *bchu_dev_usage(struct bchfs_handle fs,
 							    unsigned idx)
 {

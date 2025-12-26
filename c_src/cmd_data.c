@@ -420,9 +420,7 @@ static bool reconcile_status(struct printbuf *out,
 	 * This would be cleaner if we had an interface for doing
 	 * lookups on specific keys
 	 */
-	for (struct bkey_i_accounting *k = a->accounting;
-	     k < (struct bkey_i_accounting *) ((u64 *) a->accounting + a->accounting_u64s);
-	     k = bkey_i_to_accounting(bkey_next(&k->k_i))) {
+	for_each_accounting(a, k) {
 		struct disk_accounting_pos acc_k;
 		bpos_to_disk_accounting_pos(&acc_k, k->k.p);
 
