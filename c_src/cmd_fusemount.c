@@ -1263,12 +1263,9 @@ int cmd_fusemount(int argc, char *argv[])
 	/* This print statement is a trigger for tests. */
 	printf("Fuse mount initialized.\n");
 
-	if (fuse_opts.foreground == 0){
-		printf("Fuse forcing to foreground mode, due gcc constructors usage.\n");
-		fuse_opts.foreground = 1;
-	}
-
 	fuse_daemonize(fuse_opts.foreground);
+
+	linux_shrinkers_init();
 
 	ret = fuse_session_loop(se);
 

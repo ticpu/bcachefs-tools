@@ -106,12 +106,17 @@ fn main() -> ExitCode {
     }
 
     unsafe { c::raid_init() };
-    unsafe { c::linux_shrinkers_init() };
 
     let cmd = match symlink_cmd {
         Some(s) => s,
         None => args[1].as_str(),
     };
+
+    // fuse will call this after daemonizing, we can't create threads before - note that mount
+    // may invoke fusemount, via -t bcachefs.fuse
+    if cmd != "mount" && cmd != "fusemount" {
+        unsafe { c::linux_shrinkers_init() };
+    }
 
     match cmd {
         "completions" => {
