@@ -33,6 +33,8 @@
 
 #include <linux/dcache.h>
 
+#include "src/rust_to_c.h"
+
 /* used by write_aligned function for waiting on bch2_write closure */
 struct write_aligned_op_t {
         struct closure cl;
@@ -1147,6 +1149,9 @@ static void fusemount_usage(char *argv[])
 
 static void maybe_start_http(char *optstr)
 {
+	if (!optstr)
+		return;
+
 	char *copied_opts = strdup(optstr);
 	char *opt;
 
@@ -1267,9 +1272,10 @@ int cmd_fusemount(int argc, char *argv[])
 		goto err;
 	}
 
-	fuse_daemonize(fuse_opts.foreground);
+	//fuse_daemonize(fuse_opts.foreground);
 
 	linux_shrinkers_init();
+	maybe_start_http(opts_str);
 
 	ret = bch2_fs_start(c);
 	if (ret)

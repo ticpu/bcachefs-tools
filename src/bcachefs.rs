@@ -4,6 +4,7 @@ mod dump_stack;
 mod logging;
 mod wrappers;
 mod device_scan;
+mod http;
 
 use std::{
     ffi::{c_char, CString},
