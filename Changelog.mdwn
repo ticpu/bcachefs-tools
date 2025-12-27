@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.34.0 - Sat Dec 27
+
+bcachefs_metadata_version_extended_key_type_error
+
+- `KEY_TYPE_error` keys new include a field that indicates the reason and
+  codepath they were created
+
+- We now run `check_snapshots` before deleting interior snapshot nodes, after
+  observing a bug where bad skiplist entries were created due to prior
+  corruption of the snapshot depth field.
+
+- The compression code now always bounces the source buffer if it may have been
+  mapped to userspace; this should solve reports of corruption with zstd
+
+- `str_hash` (dirents and xattrs) repair now handles keys in different snapshots
+  correctly
+
 ## v1.33.4 - Thu Dec 25 2025
 
 - Fix a critical bug with interior snapshot node deletion:
