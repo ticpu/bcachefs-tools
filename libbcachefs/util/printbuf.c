@@ -31,7 +31,7 @@ static inline unsigned cur_tabstop(struct printbuf *buf)
 		: 0;
 }
 
-int bch2_printbuf_make_room(struct printbuf *out, unsigned extra)
+int bch2_printbuf_make_room_gfp(struct printbuf *out, unsigned extra, gfp_t gfp)
 {
 	/* Reserved space for terminating nul: */
 	extra += 1;
@@ -60,8 +60,8 @@ int bch2_printbuf_make_room(struct printbuf *out, unsigned extra)
 	 * that the user use printbuf_exit().
 	 */
 	char *buf = may_vmalloc
-		? kvrealloc(out->buf, new_size, GFP_KERNEL)
-		: krealloc(out->buf, new_size, !out->atomic ? GFP_KERNEL : GFP_NOWAIT);
+		? kvrealloc(out->buf, new_size, gfp)
+		: krealloc(out->buf, new_size, !out->atomic ? gfp : GFP_NOWAIT);
 
 	if (!buf) {
 		out->allocation_failure = true;
@@ -72,6 +72,11 @@ int bch2_printbuf_make_room(struct printbuf *out, unsigned extra)
 	out->buf	= buf;
 	out->size	= new_size;
 	return 0;
+}
+
+int bch2_printbuf_make_room(struct printbuf *out, unsigned extra)
+{
+	return bch2_printbuf_make_room_gfp(out, extra, GFP_KERNEL);
 }
 
 static void printbuf_advance_pos(struct printbuf *out, unsigned len)
@@ -253,7 +258,7 @@ int bch2_printbuf_tabstop_push(struct printbuf *buf, unsigned spaces)
 		? buf->_tabstops[buf->nr_tabstops - 1]
 		: 0;
 
-	if (WARN_ON(buf->nr_tabstops >= ARRAY_SIZE(buf->_tabstops)))
+	if (WARN_ON_ONCE(buf->nr_tabstops >= ARRAY_SIZE(buf->_tabstops)))
 		return -EINVAL;
 
 	buf->_tabstops[buf->nr_tabstops++] = prev_tabstop + spaces;
@@ -372,7 +377,7 @@ static void __prt_tab(struct printbuf *out)
  */
 void bch2_prt_tab(struct printbuf *out)
 {
-	if (WARN_ON(!cur_tabstop(out)))
+	if (WARN_ON_ONCE(!cur_tabstop(out)))
 		return;
 
 	__prt_tab(out);
@@ -399,7 +404,7 @@ static void __prt_tab_rjust(struct printbuf *buf)
  */
 void bch2_prt_tab_rjust(struct printbuf *buf)
 {
-	if (WARN_ON(!cur_tabstop(buf)))
+	if (WARN_ON_ONCE(!cur_tabstop(buf)))
 		return;
 
 	__prt_tab_rjust(buf);

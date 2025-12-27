@@ -559,7 +559,7 @@ static noinline int bch2_write_drop_io_error_ptrs(struct bch_write_op *op)
 		n = bkey_next(src);
 
 		if (bkey_extent_is_direct_data(&src->k)) {
-			bch2_bkey_drop_ptrs(bkey_i_to_s(src), p, entry,
+			bch2_bkey_drop_ptrs_noerror(bkey_i_to_s(src), p, entry,
 				bch2_dev_io_failures(&op->wbio.failed, p.ptr.dev));
 
 			if (!bch2_bkey_nr_dirty_ptrs(c, bkey_i_to_s_c(src)))
@@ -1060,7 +1060,7 @@ static int bch2_write_extent(struct bch_write_op *op, struct write_point *wp,
 			: op->compression_opt
 			? bch2_bio_compress(c, dst, &dst_len, src, &src_len,
 					    op->compression_opt,
-					    op->pos)
+					    op->pos, !(op->flags & BCH_WRITE_pages_stable))
 			: 0;
 		if (!crc_is_compressed(crc)) {
 			dst_len = min(dst->bi_iter.bi_size, src->bi_iter.bi_size);
@@ -1216,7 +1216,9 @@ static bool bch2_extent_is_writeable(struct bch_write_op *op,
 		if (crc_is_encoded(p.crc) || p.has_ec)
 			return false;
 
-		replicas += bch2_extent_ptr_durability(c, &p);
+		replicas += !p.ptr.cached
+			? bch2_dev_durability(c, p.ptr.dev)
+			: 0;
 	}
 
 	return replicas >= op->opts.data_replicas;

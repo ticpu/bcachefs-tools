@@ -809,14 +809,34 @@ unsigned bch2_bkey_replicas(struct bch_fs *c, struct bkey_s_c k)
 	return replicas;
 }
 
-unsigned bch2_extent_ptr_desired_durability(struct bch_fs *c, struct extent_ptr_decoded *p)
+unsigned bch2_dev_durability(struct bch_fs *c, unsigned dev)
 {
-	struct bch_dev *ca = bch2_dev_rcu_noerror(c, p->ptr.dev);
+	struct bch_dev *ca = bch2_dev_rcu_noerror(c, dev);
+
+	return ca && ca->mi.state != BCH_MEMBER_STATE_evacuating
+		? ca->mi.durability
+		: 0;
+}
+
+static inline unsigned __extent_ptr_durability(struct bch_dev *ca, struct extent_ptr_decoded *p)
+{
+	if (p->ptr.cached)
+		return 0;
+
+	return p->has_ec
+		? p->ec.redundancy + 1
+		: ca->mi.durability;
+}
+
+int bch2_extent_ptr_desired_durability(struct btree_trans *trans, struct extent_ptr_decoded *p)
+{
+	guard(rcu)();
+	struct bch_dev *ca = bch2_dev_rcu_noerror(trans->c, p->ptr.dev);
 
 	return ca ? __extent_ptr_durability(ca, p) : 0;
 }
 
-unsigned bch2_extent_ptr_durability(struct bch_fs *c, struct extent_ptr_decoded *p)
+static unsigned bch2_extent_ptr_durability_rcu(struct bch_fs *c, struct extent_ptr_decoded *p)
 {
 	struct bch_dev *ca = bch2_dev_rcu_noerror(c, p->ptr.dev);
 
@@ -826,8 +846,33 @@ unsigned bch2_extent_ptr_durability(struct bch_fs *c, struct extent_ptr_decoded 
 	return __extent_ptr_durability(ca, p);
 }
 
-unsigned bch2_bkey_durability(struct bch_fs *c, struct bkey_s_c k)
+int bch2_extent_ptr_durability(struct btree_trans *trans, struct extent_ptr_decoded *p)
 {
+	guard(rcu)();
+	return bch2_extent_ptr_durability_rcu(trans->c, p);
+}
+
+int bch2_bkey_durability(struct btree_trans *trans, struct bkey_s_c k)
+{
+	struct bch_fs *c = trans->c;
+	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+	const union bch_extent_entry *entry;
+	struct extent_ptr_decoded p;
+	unsigned durability = 0;
+
+	bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
+		int d = bch2_extent_ptr_durability(trans, &p);
+		if (d < 0)
+			return d;
+		durability += d;
+	}
+	return durability;
+}
+
+unsigned bch2_btree_ptr_durability(struct bch_fs *c, struct bkey_s_c k)
+{
+	BUG_ON(!bkey_is_btree_ptr(k.k));
+
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
 	const union bch_extent_entry *entry;
 	struct extent_ptr_decoded p;
@@ -835,8 +880,23 @@ unsigned bch2_bkey_durability(struct bch_fs *c, struct bkey_s_c k)
 
 	guard(rcu)();
 	bkey_for_each_ptr_decode(k.k, ptrs, p, entry)
-		durability += bch2_extent_ptr_durability(c, &p);
+		durability += bch2_extent_ptr_durability_rcu(c, &p);
 	return durability;
+}
+
+bool bch2_bkey_can_read(const struct bch_fs *c, struct bkey_s_c k)
+{
+	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+	const union bch_extent_entry *entry;
+	struct extent_ptr_decoded p;
+
+	bkey_for_each_ptr_decode(k.k, ptrs, p, entry)
+		if (!p.ptr.cached &&
+		    (p.ptr.dev != BCH_SB_MEMBER_INVALID ||
+		     p.has_ec))
+			return true;
+
+	return false;
 }
 
 static unsigned bch2_bkey_durability_safe(struct bch_fs *c, struct bkey_s_c k)
@@ -849,7 +909,7 @@ static unsigned bch2_bkey_durability_safe(struct bch_fs *c, struct bkey_s_c k)
 	guard(rcu)();
 	bkey_for_each_ptr_decode(k.k, ptrs, p, entry)
 		if (p.ptr.dev < c->sb.nr_devices && c->devs[p.ptr.dev])
-			durability += bch2_extent_ptr_durability(c, &p);
+			durability += bch2_extent_ptr_durability_rcu(c, &p);
 	return durability;
 }
 
@@ -978,11 +1038,6 @@ void bch2_bkey_drop_ptr(const struct bch_fs *c, struct bkey_s k, struct bch_exte
 	}
 
 	bch2_bkey_drop_ptr_noerror(c, k, ptr);
-
-	if (!bch2_bkey_nr_dirty_ptrs(c, k.s_c)) {
-		k.k->type = KEY_TYPE_error;
-		set_bkey_val_u64s(k.k, 0);
-	}
 }
 
 void bch2_bkey_drop_ptrs_mask(const struct bch_fs *c, struct bkey_i *k, unsigned ptrs)
@@ -1312,31 +1367,56 @@ void bch2_bkey_drop_extra_cached_ptrs(struct bch_fs *c,
 	} while (dropped);
 }
 
-void bch2_bkey_drop_extra_durability(struct bch_fs *c,
-				     struct bch_inode_opts *opts,
-				     struct bkey_s k)
+int bch2_bkey_drop_extra_durability(struct btree_trans *trans,
+				    struct bch_inode_opts *opts,
+				    struct bkey_s k)
 {
-	guard(rcu)();
-	unsigned durability = bch2_bkey_durability(c, k.s_c);
-	bool dropped;
+	struct bch_fs *c = trans->c;
+	u8 ptrs_kill = 0;
+	u8 ptr_durability[BCH_BKEY_PTRS_MAX];
+	unsigned durability = 0, nr_ptrs = 0;
 
-	do {
-		union bch_extent_entry *entry;
-		struct extent_ptr_decoded p;
-		dropped = false;
+	memset(ptr_durability, 0, sizeof(ptr_durability));
 
-		bkey_for_each_ptr_decode(k.k, bch2_bkey_ptrs(k), p, entry) {
-			unsigned ptr_durability = bch2_extent_ptr_durability(c, &p);
+	union bch_extent_entry *entry;
+	struct extent_ptr_decoded p;
 
-			if (!p.ptr.cached &&
-			    durability - ptr_durability >= opts->data_replicas) {
-				bch2_extent_ptr_set_cached(c, opts, k, &entry->ptr);
-				durability -= ptr_durability;
-				dropped = true;
+	bkey_for_each_ptr_decode(k.k, bch2_bkey_ptrs(k), p, entry) {
+		BUG_ON(nr_ptrs >= ARRAY_SIZE(ptr_durability));
+
+		int d = bch2_extent_ptr_durability(trans, &p);
+		if (d < 0)
+			return d;
+
+		BUG_ON(d > U8_MAX);
+
+		if (!d && !p.ptr.cached)
+			ptrs_kill |= BIT(nr_ptrs);
+
+		ptr_durability[nr_ptrs++] = d;
+		durability += d;
+	}
+
+	for (unsigned i = 0; i < nr_ptrs; i++)
+		if (ptr_durability[i] &&
+		    durability - ptr_durability[i] >= opts->data_replicas) {
+			durability -= ptr_durability[i];
+			ptr_durability[i] = 0;
+			ptrs_kill |= BIT(i);
+		}
+
+	while (ptrs_kill) {
+		unsigned drop = __fls(ptrs_kill);
+		ptrs_kill &= ~BIT(drop);
+
+		bkey_for_each_ptr(bch2_bkey_ptrs(k), ptr)
+			if (!drop--) {
+				bch2_extent_ptr_set_cached(c, opts, k, ptr);
 				break;
 			}
-		}
-	} while (dropped);
+	}
+
+	return 0;
 }
 
 void bch2_extent_ptr_to_text(struct printbuf *out, struct bch_fs *c, const struct bch_extent_ptr *ptr)
@@ -1519,7 +1599,7 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 	unsigned nonce = UINT_MAX;
 	unsigned nr_ptrs = 0;
 	bool have_written = false, have_unwritten = false, have_ec = false, crc_since_last_ptr = false;
-	bool have_inval_dev_ptrs = false, have_non_inval_dev_ptrs = false;
+	bool have_non_inval_dev_ptrs = false;
 	int ret = 0;
 
 	if (bkey_is_btree_ptr(k.k))
@@ -1555,9 +1635,7 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 			have_ec = false;
 			crc_since_last_ptr = false;
 
-			if (entry->ptr.dev == BCH_SB_MEMBER_INVALID)
-				have_inval_dev_ptrs = true;
-			else
+			if (entry->ptr.dev != BCH_SB_MEMBER_INVALID)
 				have_non_inval_dev_ptrs = true;
 
 			nr_ptrs++;
@@ -1646,7 +1724,7 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 	 * other fields in bch_btree_ptr_v2
 	 */
 	bkey_fsck_err_on(!bkey_is_btree_ptr(k.k) &&
-			 have_inval_dev_ptrs && !have_non_inval_dev_ptrs,
+			 !have_non_inval_dev_ptrs && !have_ec,
 			 c, extent_ptrs_all_invalid,
 			 "extent ptrs all to BCH_SB_MEMBER_INVALID");
 fsck_err:

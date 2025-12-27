@@ -430,9 +430,14 @@ struct extents_to_bp_state {
 static int drop_dev_and_update(struct btree_trans *trans, enum btree_id btree,
 			       struct bkey_s_c extent, unsigned dev)
 {
+	struct bch_fs *c = trans->c;
 	struct bkey_i *n = errptr_try(bch2_bkey_make_mut_noupdate(trans, extent));
 
-	bch2_bkey_drop_device(trans->c, bkey_i_to_s(n), dev);
+	bch2_bkey_drop_device(c, bkey_i_to_s(n), dev);
+
+	if (!bch2_bkey_can_read(c, bkey_i_to_s_c(n)))
+		bch2_set_bkey_error(c, n, KEY_TYPE_ERROR_double_allocation);
+
 	return bch2_btree_insert_trans(trans, btree, n, 0);
 }
 

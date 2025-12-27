@@ -574,19 +574,12 @@ unsigned bch2_bkey_sectors_compressed(const struct bch_fs *, struct bkey_s_c);
 
 unsigned bch2_bkey_replicas(struct bch_fs *, struct bkey_s_c);
 
-static inline unsigned __extent_ptr_durability(struct bch_dev *ca, struct extent_ptr_decoded *p)
-{
-	if (p->ptr.cached)
-		return 0;
-
-	return p->has_ec
-		? p->ec.redundancy + 1
-		: ca->mi.durability;
-}
-
-unsigned bch2_extent_ptr_desired_durability(struct bch_fs *, struct extent_ptr_decoded *);
-unsigned bch2_extent_ptr_durability(struct bch_fs *, struct extent_ptr_decoded *);
-unsigned bch2_bkey_durability(struct bch_fs *, struct bkey_s_c);
+unsigned bch2_dev_durability(struct bch_fs *, unsigned);
+int bch2_extent_ptr_desired_durability(struct btree_trans *, struct extent_ptr_decoded *);
+int bch2_extent_ptr_durability(struct btree_trans *, struct extent_ptr_decoded *);
+int bch2_bkey_durability(struct btree_trans *, struct bkey_s_c);
+unsigned bch2_btree_ptr_durability(struct bch_fs *, struct bkey_s_c);
+bool bch2_bkey_can_read(const struct bch_fs *, struct bkey_s_c);
 
 const struct bch_extent_ptr *bch2_bkey_has_device_c(const struct bch_fs *,
 						    struct bkey_s_c, unsigned);
@@ -686,7 +679,7 @@ void bch2_extent_ptr_set_cached(struct bch_fs *, struct bch_inode_opts *,
 
 int bch2_bkey_drop_stale_ptrs(struct btree_trans *, struct btree_iter *, struct bkey_s_c);
 void bch2_bkey_drop_extra_cached_ptrs(struct bch_fs *, struct bch_inode_opts *, struct bkey_s);
-void bch2_bkey_drop_extra_durability(struct bch_fs *, struct bch_inode_opts *, struct bkey_s);
+int bch2_bkey_drop_extra_durability(struct btree_trans *, struct bch_inode_opts *, struct bkey_s);
 
 void bch2_extent_ptr_to_text(struct printbuf *out, struct bch_fs *, const struct bch_extent_ptr *);
 void bch2_bkey_ptrs_to_text(struct printbuf *, struct bch_fs *,
