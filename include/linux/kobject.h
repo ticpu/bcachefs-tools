@@ -25,8 +25,6 @@
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
-struct kset;
-
 struct kobj_type {
 	void (*release)(struct kobject *kobj);
 	const struct sysfs_ops *sysfs_ops;
@@ -48,7 +46,6 @@ struct kobj_attribute {
 
 struct kobject {
 	struct kobject		*parent;
-	struct kset		*kset;
 	const struct kobj_type	*ktype;
 	struct kernfs_node	*sd; /* sysfs directory entry */
 	atomic_t		ref;
@@ -57,10 +54,6 @@ struct kobject {
 	unsigned int state_add_uevent_sent:1;
 	unsigned int state_remove_uevent_sent:1;
 	unsigned int uevent_suppress:1;
-};
-
-struct kset {
-	struct kobject		kobj;
 };
 
 #define kobject_add(...)	0
@@ -103,9 +96,6 @@ static inline void kobject_del(struct kobject *kobj)
 		return;
 
 	kobj->state_in_sysfs = 0;
-#if 0
-	kobj_kset_leave(kobj);
-#endif
 	kobject_put(kobj->parent);
 	kobj->parent = NULL;
 }
@@ -118,14 +108,6 @@ static inline struct kobject *kobject_get(struct kobject *kobj)
 	atomic_inc(&kobj->ref);
 	return kobj;
 }
-
-static inline void kset_unregister(struct kset *kset)
-{
-	kfree(kset);
-}
-
-#define kset_create_and_add(_name, _u, _parent)				\
-	((struct kset *) kzalloc(sizeof(struct kset), GFP_KERNEL))
 
 enum kobject_action {
 	KOBJ_ADD,
