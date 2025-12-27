@@ -118,6 +118,7 @@ fn main() -> ExitCode {
             commands::completions(args[1..].to_vec());
             ExitCode::SUCCESS
         }
+        "inode-opts" => commands::inode_opts(args[1..].to_vec()).report(),
         "list" => commands::list(args[1..].to_vec()).report(),
         "mount" => commands::mount(args, symlink_cmd),
         "subvolume" => commands::subvolume(args[1..].to_vec()).report(),
