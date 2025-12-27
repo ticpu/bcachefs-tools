@@ -52,6 +52,8 @@ fn main() {
         .allowlist_function("bcachefs_usage")
         .allowlist_function("raid_init")
         .allowlist_function("linux_shrinkers_init")
+        .allowlist_function("sysfs_.*")
+        .allowlist_var("linux_page_size")
         .allowlist_function("cmd_.*")
         .allowlist_function(".*_cmds")
         .allowlist_function(".*bch2_.*")

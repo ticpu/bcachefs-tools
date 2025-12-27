@@ -124,9 +124,6 @@ struct dir_context {
 	u64 pos;
 };
 
-/* /sys/fs */
-extern struct kobject *fs_kobj;
-
 struct file_operations {
 };
 

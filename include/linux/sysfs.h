@@ -19,10 +19,7 @@ struct sysfs_ops {
 	ssize_t	(*store)(struct kobject *, struct attribute *, const char *, size_t);
 };
 
-static inline int sysfs_create_file(struct kobject *kobj, const struct attribute *attr)
-{
-	return 0;
-}
+int sysfs_create_file(struct kobject *, const struct attribute *);
 
 static inline int sysfs_create_link(struct kobject *kobj,
 				    struct kobject *target, const char *name)
