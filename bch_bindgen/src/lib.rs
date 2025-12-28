@@ -136,7 +136,7 @@ impl FromStr for c::bch_bkey_type {
 }
 
 impl c::printbuf {
-    fn new() -> c::printbuf {
+    pub fn new() -> c::printbuf {
         let mut buf: c::printbuf = Default::default();
 
         buf.set_heap_allocated(true);
