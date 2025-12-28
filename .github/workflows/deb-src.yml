@@ -20,6 +20,7 @@ jobs:
       DEBFULLNAME: apt.bcachefs.org CI bot
       DEBEMAIL: linux-bcachefs@vger.kernel.org
       DEBPKG_EPOCH: 1
+      SUITE: ${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'release' || 'snapshot' }}
     steps:
       - name: Configure baseline system
         timeout-minutes: 1
@@ -246,7 +247,7 @@ jobs:
           NEW_VERSION="${{ env.DEBPKG_EPOCH }}:$(echo $CURR_TAG | sed 's/^v//')"
           git checkout -B WIP
           export EDITOR=/bin/true
-          if [ "${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'release' || 'snapshot' }}" = "release" ]; then
+          if [ "${{ env.SUITE }}" = "release" ]; then
           gbp dch --new-version="$NEW_VERSION" --since=$PREV_TAG --release
           else
           gbp dch --new-version="$NEW_VERSION" --since=$CURR_TAG --snapshot --snapshot-number=`date -u +%Y%m%d%H%M%S`

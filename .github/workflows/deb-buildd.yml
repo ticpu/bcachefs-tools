@@ -31,6 +31,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     env:
       CONTAINER_DISTRO: trixie
+      SUITE: ${{ (github.event_name == 'push' && github.ref_type == 'tag') && 'release' || 'snapshot' }}
     permissions:
       id-token: write
       contents: read
@@ -394,6 +395,9 @@ jobs:
         run: |
           set -xe
           cd "${{ github.workspace }}/deb-bin"
+          if [ "${{ env.SUITE }}" != "release" ]; then
+          export DEB_BUILD_OPTIONS=nostrip
+          fi
           echo '::group::Building the package'
           sbuild \
             --verbose \
