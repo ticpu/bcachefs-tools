@@ -1103,15 +1103,11 @@ static const struct fuse_lowlevel_ops bcachefs_fuse_ops = {
 
 struct bf_context {
 	char			*devices_str;
-	darray_const_str	devices;
 };
 
 static void bf_context_free(struct bf_context *ctx)
 {
 	free(ctx->devices_str);
-	darray_for_each(ctx->devices, i)
-		free((void *) *i);
-	darray_exit(&ctx->devices);
 }
 
 static struct fuse_opt bf_opts[] = {
@@ -1128,6 +1124,8 @@ static int bf_opt_proc(void *data, const char *arg, int key,
 	struct bf_context *ctx = data;
 
 	switch (key) {
+	case FUSE_OPT_KEY_OPT:
+		return 0;
 	case FUSE_OPT_KEY_NONOPT:
 		/* Just extract the first non-option string. */
 		if (!ctx->devices_str) {
@@ -1140,33 +1138,32 @@ static int bf_opt_proc(void *data, const char *arg, int key,
 	return 1;
 }
 
-/*
- * dev1:dev2 -> [ dev1, dev2 ]
- * dev	     -> [ dev ]
- */
-static void tokenize_devices(struct bf_context *ctx)
-{
-	char *devices_str = strdup(ctx->devices_str);
-	char *devices_tmp = devices_str;
-	char *dev = NULL;
-
-	while ((dev = strsep(&devices_tmp, ":")))
-		if (strlen(dev) > 0)
-			darray_push(&ctx->devices, strdup(dev));
-
-	free(devices_str);
-}
-
-static void usage(char *argv[])
+static void fusemount_usage(char *argv[])
 {
 	printf("Usage: %s fusemount [options] <dev>[:dev2:...] <mountpoint>\n",
 	       argv[0]);
 	printf("\n");
 }
 
+static void maybe_start_http(char *optstr)
+{
+	char *copied_opts = strdup(optstr);
+	char *opt;
+
+	while ((opt = strsep(&copied_opts, ",")) != NULL) {
+		if (!*opt)
+			continue;
+
+		char *name	= strsep(&opt, "=");
+		char *val	= opt;
+
+		if (!strcmp(name, "http"))
+			start_http(val);
+	}
+}
+
 int cmd_fusemount(int argc, char *argv[])
 {
-	struct fuse_session *se = NULL;
 	int ret = 0;
 
 	/* fuse argument parsing can't cope with unknown arguments - !? */
@@ -1183,6 +1180,24 @@ int cmd_fusemount(int argc, char *argv[])
 		}
 	}
 
+	char *opts_str = NULL;
+	static const struct option longopts[] = {
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
+	int opt;
+	while ((opt = getopt_long(argc, argv, ":o:h", longopts, NULL)) != -1)
+		switch (opt) {
+		case 'o':
+			opts_str = strdup(optarg);
+			break;
+		case 'h':
+			fusemount_usage(argv);
+			exit(0);
+		case ':':
+			continue;
+		}
+
 	/* Parse arguments. */
 	struct bf_context ctx = { 0 };
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
@@ -1194,61 +1209,53 @@ int cmd_fusemount(int argc, char *argv[])
 		die("fuse_parse_cmdline err: %m");
 
 	if (fuse_opts.show_help) {
-		usage(argv);
+		fusemount_usage(argv);
 		fuse_cmdline_help();
 		fuse_lowlevel_help();
-		ret = 0;
-		goto out;
+		exit(EXIT_SUCCESS);
 	}
 	if (fuse_opts.show_version) {
 		printf("FUSE library version %s\n", fuse_pkgversion());
 		fuse_lowlevel_version();
 		printf("bcachefs version: %s\n", bcachefs_version);
-		ret = 0;
-		goto out;
+		exit(EXIT_SUCCESS);
 	}
 	if (!fuse_opts.mountpoint) {
-		usage(argv);
-		printf("Please supply a mountpoint.\n");
-		ret = 1;
-		goto out;
+		fusemount_usage(argv);
+		die("Please supply a mountpoint.\n");
 	}
 	if (!ctx.devices_str) {
-		usage(argv);
-		printf("Please specify a device or device1:device2:...\n");
-		ret = 1;
-		goto out;
+		fusemount_usage(argv);
+		die("Please specify a device or device1:device2:...\n");
 	}
-	tokenize_devices(&ctx);
 
 	struct printbuf fsname = PRINTBUF;
-	prt_printf(&fsname, "fsname=");
-	darray_for_each(ctx.devices, i) {
-		if (i != ctx.devices.data)
-			prt_str(&fsname, ":");
-		prt_str(&fsname, *i);
-	}
-
+	prt_printf(&fsname, "fsname=%s", ctx.devices_str);
 	fuse_opt_add_arg(&args, "-o");
 	fuse_opt_add_arg(&args, fsname.buf);
 	fuse_opt_add_arg(&args, "-osubtype=bcachefs");
 
-	/* Open bch */
-	printf("Opening bcachefs filesystem on %s\n", ctx.devices_str);
+	char *dev = bch2_scan_devices(ctx.devices_str);
+	darray_const_str devs= {};
+	bch2_split_devs(dev, &devs);
 
 	struct bch_opts bch_opts = bch2_opts_empty();
-	struct bch_fs *c = bch2_fs_open(&ctx.devices, &bch_opts);
+	opt_set(bch_opts, nostart, true);
+	CLASS(printbuf, parse_later)();
+	ret = bch2_parse_mount_opts(NULL, &bch_opts, &parse_later, opts_str, false);
+	if (ret)
+		exit(EXIT_FAILURE);
+
+	struct bch_fs *c = bch2_fs_open(&devs, &bch_opts);
 	if (IS_ERR(c))
-		die("error opening %s: %s", ctx.devices_str,
-		    bch2_err_str(PTR_ERR(c)));
+		exit(EXIT_FAILURE);
 
 	/* Fuse */
-	se = fuse_session_new(&args, &bcachefs_fuse_ops,
-				sizeof(bcachefs_fuse_ops), c);
-	if (!se) {
-		fprintf(stderr, "fuse_lowlevel_new err: %m\n");
-		goto err;
-	}
+	struct fuse_session *se =
+		fuse_session_new(&args, &bcachefs_fuse_ops,
+				 sizeof(bcachefs_fuse_ops), c);
+	if (!se)
+		die("fuse_lowlevel_new err: %m");
 
 	if (fuse_set_signal_handlers(se) < 0) {
 		fprintf(stderr, "fuse_set_signal_handlers err: %m\n");
@@ -1260,12 +1267,13 @@ int cmd_fusemount(int argc, char *argv[])
 		goto err;
 	}
 
-	/* This print statement is a trigger for tests. */
-	printf("Fuse mount initialized.\n");
-
 	fuse_daemonize(fuse_opts.foreground);
 
 	linux_shrinkers_init();
+
+	ret = bch2_fs_start(c);
+	if (ret)
+		exit(EXIT_FAILURE);
 
 	ret = fuse_session_loop(se);
 
