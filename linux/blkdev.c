@@ -210,7 +210,11 @@ struct file *bdev_file_open_by_path(const char *path, blk_mode_t mode,
 	struct block_device *bdev = malloc(sizeof(*bdev));
 	memset(bdev, 0, sizeof(*bdev));
 
-	strncpy(bdev->name, path, sizeof(bdev->name));
+	/* strip directory */
+
+	char *fname = strrchr(path, '/');
+
+	strncpy(bdev->name, fname ? fname + 1 : path, sizeof(bdev->name));
 	bdev->name[sizeof(bdev->name) - 1] = '\0';
 
 	bdev->bd_dev		= xfstat(fd).st_rdev;
