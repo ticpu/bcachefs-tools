@@ -26,6 +26,12 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+ls -lah $(/sbin/modinfo --filename bcachefs)
+if [ $? -ne 0 ]; then
+  echo "Error: failed to ls the loaded module."
+  exit 1
+fi
+
 bcachefs version
 if [ $? -ne 0 ]; then
   echo "Error: failed to get bcachefs tools info."
