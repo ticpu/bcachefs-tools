@@ -187,6 +187,9 @@ static int data_update_index_update_key(struct btree_trans *trans,
 	struct extent_ptr_decoded p;
 	struct bch_extent_ptr *ptr;
 
+	if (u->opts.ptrs_kill_ec)
+		bch2_bkey_drop_ec_mask(c, insert, u->opts.ptrs_kill_ec);
+
 	unsigned rewrites_found = 0, ptr_bit = 1;
 	bkey_for_each_ptr_decode(old.k, bch2_bkey_ptrs_c(old), p, entry_c) {
 		if ((ptr_bit & u->opts.ptrs_rewrite) &&
@@ -560,20 +563,16 @@ void bch2_data_update_opts_to_text(struct printbuf *out, struct bch_fs *c,
 	bch2_target_to_text(out, c, data_opts->target);
 	prt_newline(out);
 
-	prt_str(out, "compression:\t");
-	bch2_compression_opt_to_text(out, io_opts->background_compression);
-	prt_newline(out);
-
-	prt_str(out, "opts.replicas:\t");
-	prt_u64(out, io_opts->data_replicas);
-	prt_newline(out);
-
 	prt_str(out, "extra replicas:\t");
 	prt_u64(out, data_opts->extra_replicas);
 	prt_newline(out);
 
 	prt_printf(out, "read_dev:\t%i\n", data_opts->read_dev);
 	prt_printf(out, "checksum_paranoia:\t%i\n", data_opts->checksum_paranoia);
+
+	prt_str(out, "io path options:\t");
+	bch2_inode_opts_to_text(out, c, *io_opts);
+	prt_newline(out);
 }
 
 void bch2_data_update_to_text(struct printbuf *out, struct data_update *m)
