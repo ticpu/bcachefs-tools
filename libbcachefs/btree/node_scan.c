@@ -219,13 +219,18 @@ static int read_btree_nodes_worker(void *p)
 	struct bch_dev *ca = w->ca;
 	unsigned long last_print = jiffies;
 	struct btree *b = NULL;
-
-	struct bio *bio __free(bio_put) =
-		bio_alloc(NULL, buf_pages(b->data, c->opts.btree_node_size), 0, GFP_KERNEL);
+	struct bio *bio = NULL;
 
 	b = __bch2_btree_node_mem_alloc(c);
 	if (!b) {
 		bch_err(c, "read_btree_nodes_worker: error allocating buf");
+		w->f->ret = -ENOMEM;
+		goto err;
+	}
+
+	bio = bio_alloc(NULL, buf_pages(b->data, c->opts.btree_node_size), 0, GFP_KERNEL);
+	if (!bio) {
+		bch_err(c, "read_btree_nodes_worker: error allocating bio");
 		w->f->ret = -ENOMEM;
 		goto err;
 	}
@@ -258,6 +263,7 @@ err:
 	if (b)
 		bch2_btree_node_data_free_locked(b);
 	kfree(b);
+	bio_put(bio);
 	enumerated_ref_put(&ca->io_ref[READ], BCH_DEV_READ_REF_btree_node_scan);
 	closure_put(w->cl);
 	kfree(w);

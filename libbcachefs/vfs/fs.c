@@ -1831,6 +1831,38 @@ static void bch2_evict_inode(struct inode *vinode)
 	if (!delete)
 		bch2_inode_hash_remove(c, inode);
 
+	if (IS_ENABLED(CONFIG_BCACHEFS_DEBUG) && delete)
+		write_inode_now(&inode->v, true);
+
+	if (IS_ENABLED(CONFIG_BCACHEFS_DEBUG) || !delete) {
+		BUG_ON(inode->v.i_state & I_DIRTY);
+
+		struct bch_inode_unpacked inode_u;
+		if (!is_bad_inode(&inode->v) &&
+		    !bch2_journal_error(&c->journal) &&
+		    !bch2_inode_find_by_inum(c, inode_inum(inode), &inode_u)) {
+			if (inode->v.i_size != inode_u.bi_size) {
+				CLASS(bch_log_msg, msg)(c);
+
+				prt_printf(&msg.m, "vfs i_size mismatch at evict: %llu != %llu\n",
+					   (u64) inode->v.i_size, inode_u.bi_size);
+				bch2_trans_do(c, bch2_inum_to_path(trans, inode_inum(inode), &msg.m));
+				bch2_inode_unpacked_to_text(&msg.m, &inode_u);
+				msg.m.suppress = !bch2_count_fsck_err(c, vfs_i_size_bad, &msg.m);
+			}
+
+			if (inode->v.i_blocks != inode_u.bi_sectors) {
+				CLASS(bch_log_msg, msg)(c);
+
+				prt_printf(&msg.m, "vfs i_sectors mismatch at evict: %llu != %llu\n",
+					   (u64) inode->v.i_blocks, inode_u.bi_sectors);
+				bch2_trans_do(c, bch2_inum_to_path(trans, inode_inum(inode), &msg.m));
+				bch2_inode_unpacked_to_text(&msg.m, &inode_u);
+				msg.m.suppress = !bch2_count_fsck_err(c, vfs_i_sectors_bad, &msg.m);
+			}
+		}
+	}
+
 	truncate_inode_pages_final(&inode->v.i_data);
 
 	cancel_delayed_work_sync(&inode->ei_writeback_timer);
@@ -2333,6 +2365,8 @@ static int bch2_fs_reconfigure(struct fs_context *fc)
 		guard(rwsem_write)(&c->state_lock);
 
 		if (opts->opts.read_only) {
+			try(sync_filesystem(sb));
+
 			bch2_fs_read_only(c);
 
 			sb->s_flags |= SB_RDONLY;
