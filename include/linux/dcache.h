@@ -1,12 +1,16 @@
 #ifndef __LINUX_DCACHE_H
 #define __LINUX_DCACHE_H
 
+#include <stdbool.h>
+
 struct super_block;
 struct inode;
 
 struct dentry {
-	struct super_block *d_sb;
-	struct inode *d_inode;
+	struct super_block	*d_sb;
+	struct inode		*d_inode;
+	bool			is_debugfs:1;
+	const char		*name;
 };
 
 static inline void shrink_dcache_sb(struct super_block *sb) {}

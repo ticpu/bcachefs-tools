@@ -1272,7 +1272,7 @@ int cmd_fusemount(int argc, char *argv[])
 		goto err;
 	}
 
-	//fuse_daemonize(fuse_opts.foreground);
+	fuse_daemonize(fuse_opts.foreground);
 
 	linux_shrinkers_init();
 	maybe_start_http(opts_str);

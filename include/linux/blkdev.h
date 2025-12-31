@@ -25,6 +25,7 @@ struct user_namespace;
 
 struct file {
 	struct inode		*f_inode;
+	void			*private_data;
 };
 
 static inline struct inode *file_inode(const struct file *f)
@@ -125,6 +126,10 @@ struct dir_context {
 };
 
 struct file_operations {
+	struct module *owner;
+	int (*open) (struct inode *, struct file *);
+	int (*release) (struct inode *, struct file *);
+	ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
 };
 
 static inline int register_chrdev(unsigned int major, const char *name,

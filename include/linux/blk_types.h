@@ -40,6 +40,7 @@ struct inode {
 	loff_t			i_size;
 	struct super_block	*i_sb;
 	blk_mode_t		mode;
+	void			*i_private;
 };
 
 struct request_queue {

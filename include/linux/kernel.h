@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <limits.h>
 
@@ -326,5 +327,11 @@ struct mnt_idmap;
 #include <linux/byteorder.h>
 
 #define __cold
+
+static inline size_t copy_to_user(void *dst, void *src, size_t len)
+{
+	memcpy(dst, src, len);
+	return 0;
+}
 
 #endif
