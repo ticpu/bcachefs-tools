@@ -141,6 +141,8 @@ struct bio {
 	struct bio_vec		*bi_io_vec;	/* the actual vec list */
 
 	struct bio_set		*bi_pool;
+
+	struct bio_vec		bi_inline_vecs[]
 };
 
 static inline struct bio_vec *bio_inline_vecs(struct bio *bio)
