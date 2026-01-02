@@ -256,7 +256,7 @@ static void bcachefs_fuse_mknod(fuse_req_t req, fuse_ino_t dir_ino,
 	int ret;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_mknod(%llu, %s, %x, %x)\n",
-		 dir.inum, name, mode, rdev);
+		 dir.inum, name, mode, (u32) rdev);
 
 	ret = do_create(c, dir, name, mode, rdev, &new_inode);
 	if (ret)
@@ -273,7 +273,7 @@ static void bcachefs_fuse_mkdir(fuse_req_t req, fuse_ino_t dir,
 				const char *name, mode_t mode)
 {
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_mkdir(%llu, %s, %x)\n",
-		 dir, name, mode);
+		 (u64) dir, name, mode);
 
 	BUG_ON(mode & S_IFMT);
 
@@ -303,7 +303,7 @@ static void bcachefs_fuse_unlink(fuse_req_t req, fuse_ino_t dir_ino,
 static void bcachefs_fuse_rmdir(fuse_req_t req, fuse_ino_t dir,
 				const char *name)
 {
-	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_rmdir(%llu, %s)\n", dir, name);
+	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_rmdir(%llu, %s)\n", (u64) dir, name);
 
 	bcachefs_fuse_unlink(req, dir, name);
 }
@@ -489,7 +489,7 @@ static void bcachefs_fuse_read(fuse_req_t req, fuse_ino_t ino,
 	struct bch_fs *c = fuse_req_userdata(req);
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_read(%llu, %zd, %lld)\n",
-		 inum, size, offset);
+		 inum.inum, size, (s64) offset);
 
 	/* Check inode size. */
 	struct bch_inode_unpacked bi;
@@ -605,7 +605,7 @@ static void bcachefs_fuse_write(fuse_req_t req, fuse_ino_t ino,
 	int			ret = 0;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_write(%llu, %zd, %lld)\n",
-		 inum, size, offset);
+		 inum.inum, size, (s64) offset);
 
 	struct fuse_align_io align = align_io(c, size, offset);
 	void *aligned_buf = aligned_alloc(PAGE_SIZE, align.size);
@@ -860,7 +860,7 @@ static int fuse_filldir(struct dir_context *_ctx,
 	};
 
 	fuse_log(FUSE_LOG_DEBUG, "fuse_filldir(name=%s inum=%llu pos=%llu)\n",
-		 name, statbuf.st_ino, pos);
+		 name, (u64) statbuf.st_ino, (s64) pos);
 
 	size_t len = fuse_add_direntry2(ctx->buf,
 					ctx->bufsize,
@@ -915,7 +915,7 @@ static void bcachefs_fuse_readdir(fuse_req_t req, fuse_ino_t dir_ino,
 	int ret = 0;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_readdir(dir=%llu, size=%zu, "
-		 "off=%lld)\n", dir.inum, size, off);
+		 "off=%lld)\n", dir.inum, size, (s64) off);
 
 	ret = bch2_inode_find_by_inum(c, dir, &bi);
 	if (ret)
