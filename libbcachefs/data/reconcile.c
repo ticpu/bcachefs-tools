@@ -611,7 +611,7 @@ static int bch2_bkey_needs_reconcile(struct btree_trans *trans, struct bkey_s_c 
 			r.ptrs_moving |= ptr_bit;
 		}
 
-		if (!p.ptr.cached && evacuating) {
+		if (evacuating) {
 			r.need_rb |= BIT(BCH_REBALANCE_data_replicas);
 			r.hipri = 1;
 			r.ptrs_moving |= ptr_bit;
@@ -1306,7 +1306,8 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 					return d;
 
 				if (dev_bad_or_evacuating(c, p.ptr.dev) ||
-				    (d && durability - d >= r->data_replicas)) {
+				    (!p.ptr.cached &&
+				     d && durability - d >= r->data_replicas)) {
 					data_opts->ptrs_kill |= ptr_bit;
 					durability -= d;
 				}
@@ -1332,7 +1333,11 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 			if (extent_ec_pending(trans, ptrs))
 				return false;
 
-			data_opts->extra_replicas = r->data_replicas;
+			data_opts->extra_replicas = 1;
+			data_opts->no_devs_have = true;
+
+			if (r->need_rb == BIT(BCH_REBALANCE_erasure_code))
+				data_opts->write_flags |= BCH_WRITE_must_ec;
 		} else {
 			unsigned ptr_bit = 1;
 			bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
@@ -1370,10 +1375,9 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 		    data_opts->ptrs_kill_ec ||
 		    data_opts->extra_replicas);
 	if (!ret) {
-		CLASS(printbuf, buf)();
-		prt_printf(&buf, "got extent to reconcile but nothing to do, confused\n  ");
-		bch2_bkey_val_to_text(&buf, c, k);
-		bch_err(c, "%s", buf.buf);
+		CLASS(bch_log_msg_ratelimited, msg)(c);
+		prt_printf(&msg.m, "got extent to reconcile but nothing to do, confused\n  ");
+		bch2_bkey_val_to_text(&msg.m, c, k);
 	}
 
 	return ret;
