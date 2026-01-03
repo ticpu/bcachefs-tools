@@ -4,5 +4,6 @@
 
 int bch2_dev_data_drop_by_backpointers(struct bch_fs *, unsigned, unsigned, struct printbuf *);
 int bch2_dev_data_drop(struct bch_fs *, unsigned, unsigned, struct printbuf *);
+int bch2_dev_evacuate_bucket_range(struct bch_fs *, struct bch_dev *, u64, u64, struct printbuf *);
 
 #endif /* _BCACHEFS_MIGRATE_H */
