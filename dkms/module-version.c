@@ -7,5 +7,6 @@
  */
 
 #include <linux/module.h>
+#include "version.h"
 
-MODULE_VERSION("@PACKAGE_VERSION@");
+MODULE_VERSION(bcachefs_version);

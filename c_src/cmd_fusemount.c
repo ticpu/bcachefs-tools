@@ -11,6 +11,7 @@
 #include "cmds.h"
 #include "libbcachefs.h"
 #include "tools-util.h"
+#include "version.h"
 
 #include "bcachefs.h"
 
@@ -1213,7 +1214,7 @@ int cmd_fusemount(int argc, char *argv[])
 	if (fuse_opts.show_version) {
 		printf("FUSE library version %s\n", fuse_pkgversion());
 		fuse_lowlevel_version();
-		printf("bcachefs version: %s\n", VERSION_STRING);
+		printf("bcachefs version: %s\n", bcachefs_version);
 		ret = 0;
 		goto out;
 	}
