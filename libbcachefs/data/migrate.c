@@ -262,3 +262,58 @@ int bch2_dev_data_drop(struct bch_fs *c, unsigned dev_idx,
 
 	return bch2_dev_metadata_drop(c, &progress, dev_idx, flags, err);
 }
+
+struct shrink_evacuate_arg {
+	struct bch_dev		*ca;
+	u64			bucket_start;
+	u64			bucket_end;
+};
+
+static int shrink_evacuate_pred(struct btree_trans *trans, void *_arg,
+				enum btree_id btree, struct bkey_s_c k,
+				struct bch_inode_opts *io_opts,
+				struct data_update_opts *data_opts)
+{
+	struct shrink_evacuate_arg *arg = _arg;
+	struct bch_fs *c = trans->c;
+
+	data_opts->read_dev = -1;
+
+	unsigned i = 0;
+	bkey_for_each_ptr(bch2_bkey_ptrs_c(k), ptr) {
+		if (ptr->dev == arg->ca->dev_idx && !ptr->cached) {
+			u64 bucket = sector_to_bucket(arg->ca, ptr->offset);
+			if (bucket >= arg->bucket_start && bucket < arg->bucket_end)
+				data_opts->ptrs_rewrite |= BIT(i);
+		}
+		i++;
+	}
+
+	return data_opts->ptrs_rewrite != 0;
+}
+
+int bch2_dev_evacuate_bucket_range(struct bch_fs *c, struct bch_dev *ca,
+				   u64 bucket_start, u64 bucket_end,
+				   struct printbuf *err)
+{
+	struct bch_move_stats stats;
+	bch2_move_stats_init(&stats, "shrink evacuate");
+
+	struct shrink_evacuate_arg arg = {
+		.ca		= ca,
+		.bucket_start	= bucket_start,
+		.bucket_end	= bucket_end,
+	};
+
+	int ret = bch2_move_data_phys(c, ca->dev_idx,
+				      bucket_start, bucket_end,
+				      ~0U,
+				      NULL,
+				      &stats,
+				      (struct write_point_specifier) { 0 },
+				      true,
+				      shrink_evacuate_pred, &arg);
+
+	bch2_move_stats_exit(&stats, c);
+	return ret;
+}

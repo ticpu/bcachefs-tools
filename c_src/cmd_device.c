@@ -504,6 +504,7 @@ static void device_resize_usage(void)
 	     "Usage: bcachefs device resize device [ size ]\n"
 	     "\n"
 	     "Options:\n"
+	     "  -d, --devs=DEVICES           Additional devices for multi-device fs (offline only)\n"
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
@@ -513,14 +514,19 @@ static void device_resize_usage(void)
 static int cmd_device_resize(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
+		{ "devs",			required_argument, NULL, 'd' },
 		{ "help",			no_argument, NULL, 'h' },
 		{ NULL }
 	};
+	char *additional_devs = NULL;
 	u64 size;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
+	while ((opt = getopt_long(argc, argv, "d:h", longopts, NULL)) != -1)
 		switch (opt) {
+		case 'd':
+			additional_devs = optarg;
+			break;
 		case 'h':
 			device_resize_usage();
 		}
@@ -564,39 +570,53 @@ static int cmd_device_resize(int argc, char *argv[])
 
 		u64 nbuckets = size / BCH_MEMBER_BUCKET_SIZE(&m);
 
-		if (nbuckets < le64_to_cpu(m.nbuckets))
-			die("Shrinking not supported yet");
-
 		printf("resizing %s to %llu buckets\n", dev, nbuckets);
 		bchu_disk_resize(fs, idx, nbuckets);
 	} else {
 		printf("Doing offline resize of %s\n", dev);
 
+		close(dev_fd);
+
+		struct bch_opts opts = bch2_opts_empty();
+		opt_set(opts, nostart, true);
+
+		struct bch_sb_handle sb = { NULL };
+		int ret = bch2_read_super(dev, &opts, &sb);
+		if (ret)
+			die("error reading superblock from %s: %s", dev, bch2_err_str(ret));
+
+		unsigned dev_idx = sb.sb->dev_idx;
+		bch2_free_super(&sb);
+
 		darray_const_str devs = {};
 		darray_push(&devs, dev);
 
-		struct bch_opts opts = bch2_opts_empty();
+		if (additional_devs) {
+			darray_const_str extra = get_or_split_cmdline_devs(1, &additional_devs);
+			darray_for_each(extra, d)
+				if (strcmp(*d, dev))
+					darray_push(&devs, *d);
+		}
+
+		opts = bch2_opts_empty();
 		struct bch_fs *c = bch2_fs_open(&devs, &opts);
 		if (IS_ERR(c))
 			die("error opening %s: %s", dev, bch2_err_str(PTR_ERR(c)));
 
-		struct bch_dev *resize = NULL;
+		struct bch_dev *resize = c->devs[dev_idx];
+		if (!resize)
+			die("device %s (idx %u) not found in filesystem", dev, dev_idx);
 
-		for_each_online_member(c, ca, 0) {
-			if (resize)
-				die("confused: more than one online device?");
-			resize = ca;
-			enumerated_ref_get(&resize->io_ref[READ], 0);
-		}
+		enumerated_ref_get(&resize->io_ref[READ], 0);
 
 		u64 nbuckets = size / resize->mi.bucket_size;
 
-		if (nbuckets < le64_to_cpu(resize->mi.nbuckets))
-			die("Shrinking not supported yet");
-
 		printf("resizing %s to %llu buckets\n", dev, nbuckets);
 		CLASS(printbuf, err)();
-		int ret = bch2_dev_resize(c, resize, nbuckets, &err);
+		if (nbuckets < resize->mi.nbuckets)
+			ret = bch2_dev_shrink(c, resize, nbuckets, &err);
+		else
+			ret = bch2_dev_resize(c, resize, nbuckets, &err);
 		if (ret)
 			fprintf(stderr, "resize error: %s\n%s", bch2_err_str(ret), err.buf);
 

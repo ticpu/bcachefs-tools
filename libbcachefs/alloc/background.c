@@ -1492,6 +1492,51 @@ int bch2_dev_remove_alloc(struct bch_fs *c, struct bch_dev *ca)
 	return ret;
 }
 
+/* device shrink */
+
+static int bch2_dev_shrink_lrus(struct bch_fs *c, struct bch_dev *ca,
+				u64 bucket_start, u64 bucket_end)
+{
+	CLASS(btree_trans, trans)(c);
+
+	int ret = bch2_btree_write_buffer_flush_sync(trans) ?:
+		for_each_btree_key(trans, iter,
+				 BTREE_ID_lru, POS_MIN, BTREE_ITER_prefetch, k, ({
+		struct bpos bucket = u64_to_bucket(k.k->p.offset);
+
+		(bucket.inode == ca->dev_idx &&
+		 bucket.offset >= bucket_start &&
+		 bucket.offset < bucket_end)
+		? (bch2_btree_delete_at(trans, &iter, 0) ?:
+		   bch2_trans_commit(trans, NULL, NULL, 0))
+		: 0;
+	}));
+	bch_err_fn(c, ret);
+	return ret;
+}
+
+int bch2_dev_shrink_alloc(struct bch_fs *c, struct bch_dev *ca,
+			  u64 old_nbuckets, u64 new_nbuckets)
+{
+	struct bpos start	= POS(ca->dev_idx, new_nbuckets);
+	struct bpos end		= POS(ca->dev_idx, old_nbuckets);
+	int ret;
+
+	ret =   bch2_dev_shrink_lrus(c, ca, new_nbuckets, old_nbuckets) ?:
+		bch2_btree_delete_range(c, BTREE_ID_need_discard, start, end,
+					BTREE_TRIGGER_norun) ?:
+		bch2_btree_delete_range(c, BTREE_ID_freespace, start, end,
+					BTREE_TRIGGER_norun) ?:
+		bch2_btree_delete_range(c, BTREE_ID_backpointers, start, end,
+					BTREE_TRIGGER_norun) ?:
+		bch2_btree_delete_range(c, BTREE_ID_bucket_gens, start, end,
+					BTREE_TRIGGER_norun) ?:
+		bch2_btree_delete_range(c, BTREE_ID_alloc, start, end,
+					BTREE_TRIGGER_norun);
+	bch_err_msg_dev(ca, ret, "shrinking dev alloc info");
+	return ret;
+}
+
 /* Bucket IO clocks: */
 
 static int __bch2_bucket_io_time_reset(struct btree_trans *trans, unsigned dev,

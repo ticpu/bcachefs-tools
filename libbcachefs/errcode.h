@@ -289,6 +289,10 @@
 	x(EINVAL,			remove_with_metadata_missing_unimplemented)\
 	x(EINVAL,			remove_would_lose_data)			\
 	x(EINVAL,			no_resize_with_buckets_nouse)		\
+	x(EINVAL,			shrink_size_too_small)			\
+	x(EINVAL,			shrink_journal_in_region)		\
+	x(EINVAL,			shrink_ec_in_region)			\
+	x(EINVAL,			shrink_data_remains)			\
 	x(EINVAL,			inode_unpack_error)			\
 	x(EINVAL,			inode_not_unlinked)			\
 	x(EINVAL,			inode_has_child_snapshot)		\

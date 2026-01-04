@@ -20,6 +20,7 @@
 
 #include "init/dev.h"
 #include "init/fs.h"
+#include "init/passes.h"
 
 #include "sb/members.h"
 
@@ -1018,6 +1019,158 @@ int bch2_dev_offline(struct bch_fs *c, struct bch_dev *ca, int flags, struct pri
 	return 0;
 }
 
+static int bch2_check_journal_not_in_range(struct bch_dev *ca, u64 bucket_start, u64 bucket_end)
+{
+	struct journal_device *ja = &ca->journal;
+
+	for (unsigned i = 0; i < ja->nr; i++)
+		if (ja->buckets[i] >= bucket_start && ja->buckets[i] < bucket_end)
+			return -BCH_ERR_shrink_journal_in_region;
+	return 0;
+}
+
+static int bch2_check_ec_not_in_range(struct bch_fs *c, struct bch_dev *ca,
+				      u64 bucket_start, u64 bucket_end)
+{
+	CLASS(btree_trans, trans)(c);
+
+	return for_each_btree_key(trans, iter, BTREE_ID_stripes, POS_MIN, 0, k, ({
+		if (k.k->type != KEY_TYPE_stripe)
+			continue;
+
+		const struct bch_stripe *s = bkey_s_c_to_stripe(k).v;
+		int ret = 0;
+
+		for (unsigned i = 0; i < s->nr_blocks; i++) {
+			const struct bch_extent_ptr *ptr = &s->ptrs[i];
+			if (ptr->dev == ca->dev_idx) {
+				u64 bucket = sector_to_bucket(ca, ptr->offset);
+				if (bucket >= bucket_start && bucket < bucket_end) {
+					ret = -BCH_ERR_shrink_ec_in_region;
+					break;
+				}
+			}
+		}
+		ret;
+	}));
+}
+
+static int bch2_check_data_not_in_range(struct bch_fs *c, struct bch_dev *ca,
+					u64 bucket_start, u64 bucket_end)
+{
+	CLASS(btree_trans, trans)(c);
+
+	return for_each_btree_key_max(trans, iter, BTREE_ID_backpointers,
+				  POS(ca->dev_idx, bucket_to_sector(ca, bucket_start)),
+				  POS(ca->dev_idx, bucket_to_sector(ca, bucket_end)),
+				  BTREE_ITER_prefetch, k,
+		k.k->type == KEY_TYPE_backpointer
+			? -BCH_ERR_shrink_data_remains
+			: 0
+	);
+}
+
+int bch2_dev_shrink(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets,
+		    struct printbuf *err)
+{
+	u64 old_nbuckets = ca->mi.nbuckets;
+	int ret;
+
+	if (nbuckets - ca->mi.first_bucket < BCH_MIN_NR_NBUCKETS) {
+		prt_printf(err, "New size too small (min %u usable buckets)\n",
+			   BCH_MIN_NR_NBUCKETS);
+		return bch_err_throw(c, shrink_size_too_small);
+	}
+
+	ret = bch2_check_journal_not_in_range(ca, nbuckets, old_nbuckets);
+	if (ret) {
+		prt_printf(err, "Journal buckets in shrink region; resize journal first\n");
+		return ret;
+	}
+
+	ret = bch2_check_ec_not_in_range(c, ca, nbuckets, old_nbuckets);
+	if (ret) {
+		prt_printf(err, "EC stripes in shrink region\n");
+		return ret;
+	}
+
+	ret = bch2_dev_evacuate_bucket_range(c, ca, nbuckets, old_nbuckets, err);
+	if (ret) {
+		prt_printf(err, "Failed to evacuate data: %s\n", bch2_err_str(ret));
+		return ret;
+	}
+
+	bch2_btree_interior_updates_flush(c);
+
+	ret = bch2_check_data_not_in_range(c, ca, nbuckets, old_nbuckets);
+	if (ret) {
+		prt_printf(err, "data remains in shrink region after evacuation\n");
+		return ret;
+	}
+
+	ret = bch2_dev_shrink_alloc(c, ca, old_nbuckets, nbuckets);
+	if (ret) {
+		prt_printf(err, "bch2_dev_shrink_alloc() error: %s\n", bch2_err_str(ret));
+		return ret;
+	}
+
+	bch2_journal_flush_all_pins(&c->journal);
+
+	ret = bch2_journal_flush_device_pins(&c->journal, ca->dev_idx);
+	if (ret) {
+		prt_printf(err, "bch2_journal_flush_device_pins() error: %s\n", bch2_err_str(ret));
+		return ret;
+	}
+
+	ret = bch2_journal_flush(&c->journal);
+	if (ret) {
+		prt_printf(err, "bch2_journal_flush() error: %s\n", bch2_err_str(ret));
+		return ret;
+	}
+
+	ret = bch2_dev_buckets_resize(c, ca, nbuckets);
+	if (ret) {
+		prt_printf(err, "bch2_dev_buckets_resize() error: %s\n", bch2_err_str(ret));
+		return ret;
+	}
+
+	scoped_guard(mutex, &c->sb_lock) {
+		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
+		m->nbuckets = cpu_to_le64(nbuckets);
+
+		struct bch_sb_layout *layout = &ca->disk_sb.sb->layout;
+		u64 new_sb_end = nbuckets * ca->mi.bucket_size;
+		u64 sb_size = 1 << layout->sb_max_size_bits;
+
+		for (unsigned i = 0; i < layout->nr_superblocks; i++) {
+			u64 offset = le64_to_cpu(layout->sb_offset[i]);
+			if (offset >= new_sb_end) {
+				u64 new_backup = new_sb_end - sb_size;
+				new_backup = rounddown(new_backup, ca->mi.bucket_size);
+				layout->sb_offset[i] = cpu_to_le64(new_backup);
+			}
+		}
+
+		bch2_write_super(c);
+	}
+
+	ret = bch2_trans_mark_dev_sb(c, ca, BTREE_TRIGGER_transactional);
+	if (ret) {
+		prt_printf(err, "bch2_trans_mark_dev_sb() error: %s\n", bch2_err_str(ret));
+		return ret;
+	}
+
+	scoped_guard(mutex, &c->sb_lock) {
+		struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
+		__set_bit_le64(BCH_RECOVERY_PASS_STABLE_check_allocations, ext->recovery_passes_required);
+		__set_bit_le64(BCH_FSCK_ERR_accounting_mismatch, ext->errors_silent);
+		bch2_write_super(c);
+	}
+
+	bch2_recalc_capacity(c);
+	return 0;
+}
+
 int bch2_dev_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets, struct printbuf *err)
 {
 	u64 old_nbuckets;
@@ -1027,7 +1180,7 @@ int bch2_dev_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets, struct p
 	old_nbuckets = ca->mi.nbuckets;
 
 	if (nbuckets < ca->mi.nbuckets) {
-		prt_printf(err, "Cannot shrink yet\n");
+		prt_printf(err, "Online shrink not supported; use offline resize\n");
 		return -EINVAL;
 	}
 
