@@ -605,6 +605,7 @@ static int bch2_bkey_needs_reconcile(struct btree_trans *trans, struct bkey_s_c 
 
 		if (!poisoned &&
 		    !evacuating &&
+		    !p.ptr.cached &&
 		    r.background_target &&
 		    !bch2_dev_in_target(c, p.ptr.dev, r.background_target)) {
 			r.need_rb |= BIT(BCH_REBALANCE_background_target);
@@ -627,7 +628,8 @@ static int bch2_bkey_needs_reconcile(struct btree_trans *trans, struct bkey_s_c 
 			d = 0;
 
 		durability += d;
-		min_durability = min(min_durability, d);
+		if (!p.ptr.cached)
+			min_durability = min(min_durability, d);
 
 		ec |= p.has_ec;
 
@@ -1363,6 +1365,7 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 				data_opts->ptrs_rewrite |= ptr_bit;
 
 			if ((r->need_rb & BIT(BCH_REBALANCE_background_target)) &&
+			    !p.ptr.cached &&
 			    !bch2_dev_in_target_rcu(c, p.ptr.dev, r->background_target))
 				data_opts->ptrs_rewrite |= ptr_bit;
 
