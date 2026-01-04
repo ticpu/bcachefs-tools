@@ -1,5 +1,7 @@
 ifneq ($(wildcard .git),)
 VERSION=$(shell git -c safe.directory=$$PWD -c core.abbrev=12 describe)
+else ifneq ($(wildcard .version),)
+VERSION=$(shell cat .version)
 else
 VERSION=$(shell cargo metadata --format-version 1 | jq -r '.packages[] | select(.name | test("bcachefs-tools")) | .version')
 endif
@@ -155,12 +157,20 @@ libbcachefs.a: $(OBJS)
 	@echo "    [AR]     $@"
 	$(Q)$(AR) -rc $@ $+
 
-VERSION_FILE=$(shell echo "#define bcachefs_version \\\"$(VERSION)\\\"")
+.PHONY: force
 
-.PHONY: version.h
-version.h:
-	$(Q)echo "$(VERSION_FILE)" > version.h.new
+.version: force
+	$(Q)echo "$(VERSION)" > .version.new
+	$(Q)cmp -s .version.new .version || mv .version.new .version
+
+VERSION_H=$(shell echo "#define bcachefs_version \\\"$(VERSION)\\\"")
+
+version.h: force
+	$(Q)echo "$(VERSION_H)" > version.h.new
 	$(Q)cmp -s version.h.new version.h || mv version.h.new version.h
+
+.PHONY: generate_version
+generate_version: .version version.h
 
 # Rebuild the 'version' command any time the version string changes
 c_src/cmd_version.o : version.h
