@@ -596,6 +596,7 @@ static int cmd_device_resize(int argc, char *argv[])
 			darray_for_each(extra, d)
 				if (strcmp(*d, dev))
 					darray_push(&devs, *d);
+			darray_exit(&extra);
 		}
 
 		opts = bch2_opts_empty();

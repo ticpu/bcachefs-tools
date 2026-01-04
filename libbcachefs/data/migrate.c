@@ -293,8 +293,7 @@ static int shrink_evacuate_pred(struct btree_trans *trans, void *_arg,
 }
 
 int bch2_dev_evacuate_bucket_range(struct bch_fs *c, struct bch_dev *ca,
-				   u64 bucket_start, u64 bucket_end,
-				   struct printbuf *err)
+				   u64 bucket_start, u64 bucket_end)
 {
 	struct bch_move_stats stats;
 	bch2_move_stats_init(&stats, "shrink evacuate");

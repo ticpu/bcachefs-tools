@@ -1019,6 +1019,73 @@ int bch2_dev_offline(struct bch_fs *c, struct bch_dev *ca, int flags, struct pri
 	return 0;
 }
 
+static int bch2_relocate_superblocks_for_shrink(struct bch_dev *ca, u64 new_nbuckets,
+						struct printbuf *err)
+{
+	struct bch_sb_layout *layout = &ca->disk_sb.sb->layout;
+	u64 new_dev_size = new_nbuckets * ca->mi.bucket_size;
+	u64 sb_size = 1 << layout->sb_max_size_bits;
+	u64 new_offsets[ARRAY_SIZE(layout->sb_offset)];
+	unsigned nr_to_relocate = 0;
+
+	for (unsigned i = 0; i < layout->nr_superblocks; i++) {
+		u64 offset = le64_to_cpu(layout->sb_offset[i]);
+		if (offset + sb_size > new_dev_size)
+			nr_to_relocate++;
+		new_offsets[i] = offset;
+	}
+
+	if (!nr_to_relocate)
+		return 0;
+
+	/*
+	 * Find new positions for superblocks that need relocation.
+	 * Place them at the end of the new device size, working backwards
+	 * and ensuring no overlap with each other.
+	 */
+	u64 next_available = new_dev_size;
+
+	for (unsigned i = 0; i < layout->nr_superblocks; i++) {
+		u64 offset = le64_to_cpu(layout->sb_offset[i]);
+
+		if (offset + sb_size <= new_dev_size)
+			continue;
+
+		u64 new_offset = rounddown(next_available - sb_size, ca->mi.bucket_size);
+
+		if (new_offset < (u64)ca->mi.first_bucket * ca->mi.bucket_size) {
+			prt_printf(err, "Cannot relocate superblock %u: no space "
+				   "(need %llu sectors, available from sector %llu)\n",
+				   i, sb_size,
+				   (u64)ca->mi.first_bucket * ca->mi.bucket_size);
+			return -BCH_ERR_shrink_sb_relocation_failed;
+		}
+
+		/* Check for overlap with other superblocks */
+		for (unsigned j = 0; j < layout->nr_superblocks; j++) {
+			if (i == j)
+				continue;
+
+			u64 other = new_offsets[j];
+			u64 other_end = other + sb_size;
+
+			if (new_offset < other_end && new_offset + sb_size > other) {
+				prt_printf(err, "Cannot relocate superblock %u: "
+					   "would overlap with superblock %u\n", i, j);
+				return -BCH_ERR_shrink_sb_relocation_failed;
+			}
+		}
+
+		new_offsets[i] = new_offset;
+		next_available = new_offset;
+	}
+
+	for (unsigned i = 0; i < layout->nr_superblocks; i++)
+		layout->sb_offset[i] = cpu_to_le64(new_offsets[i]);
+
+	return 0;
+}
+
 static int bch2_check_journal_not_in_range(struct bch_dev *ca, u64 bucket_start, u64 bucket_end)
 {
 	struct journal_device *ja = &ca->journal;
@@ -1076,7 +1143,8 @@ int bch2_dev_shrink(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets,
 	u64 old_nbuckets = ca->mi.nbuckets;
 	int ret;
 
-	if (nbuckets - ca->mi.first_bucket < BCH_MIN_NR_NBUCKETS) {
+	if (nbuckets <= ca->mi.first_bucket ||
+	    nbuckets - ca->mi.first_bucket < BCH_MIN_NR_NBUCKETS) {
 		prt_printf(err, "New size too small (min %u usable buckets)\n",
 			   BCH_MIN_NR_NBUCKETS);
 		return bch_err_throw(c, shrink_size_too_small);
@@ -1094,7 +1162,7 @@ int bch2_dev_shrink(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets,
 		return ret;
 	}
 
-	ret = bch2_dev_evacuate_bucket_range(c, ca, nbuckets, old_nbuckets, err);
+	ret = bch2_dev_evacuate_bucket_range(c, ca, nbuckets, old_nbuckets);
 	if (ret) {
 		prt_printf(err, "Failed to evacuate data: %s\n", bch2_err_str(ret));
 		return ret;
@@ -1138,18 +1206,9 @@ int bch2_dev_shrink(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets,
 		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
 		m->nbuckets = cpu_to_le64(nbuckets);
 
-		struct bch_sb_layout *layout = &ca->disk_sb.sb->layout;
-		u64 new_sb_end = nbuckets * ca->mi.bucket_size;
-		u64 sb_size = 1 << layout->sb_max_size_bits;
-
-		for (unsigned i = 0; i < layout->nr_superblocks; i++) {
-			u64 offset = le64_to_cpu(layout->sb_offset[i]);
-			if (offset >= new_sb_end) {
-				u64 new_backup = new_sb_end - sb_size;
-				new_backup = rounddown(new_backup, ca->mi.bucket_size);
-				layout->sb_offset[i] = cpu_to_le64(new_backup);
-			}
-		}
+		ret = bch2_relocate_superblocks_for_shrink(ca, nbuckets, err);
+		if (ret)
+			return ret;
 
 		bch2_write_super(c);
 	}
