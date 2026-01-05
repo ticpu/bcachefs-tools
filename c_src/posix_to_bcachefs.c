@@ -39,7 +39,7 @@ static int unlink_and_rm(struct bch_fs *c,
 	struct bch_inode_unpacked child;
 	int ret = bch2_trans_commit_do(c, NULL, NULL,
 			BCH_TRANS_COMMIT_no_enospc,
-		bch2_unlink_trans(trans, dir_inum, dir, &child, &child_name_q, false));
+		bch2_unlink_trans(trans, dir_inum, dir, (subvol_inum) {}, &child, &child_name_q, false));
 	bch_err_msg(c, ret, "unlinking %s", child_name);
 	if (ret)
 		return ret;

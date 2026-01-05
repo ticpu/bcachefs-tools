@@ -546,14 +546,6 @@ static inline bool bkey_should_have_rb_opts(struct bkey_s_c k,
 	return new.need_rb;
 }
 
-static inline bool dev_bad_or_evacuating(struct bch_fs *c, unsigned dev)
-{
-	guard(rcu)();
-
-	struct bch_dev *ca = bch2_dev_rcu_noerror(c, dev);
-	return !ca || ca->mi.state == BCH_MEMBER_STATE_evacuating;
-}
-
 static int bch2_bkey_needs_reconcile(struct btree_trans *trans, struct bkey_s_c k,
 				     struct bch_inode_opts *opts,
 				     int *need_update_invalid_devs,
@@ -592,7 +584,7 @@ static int bch2_bkey_needs_reconcile(struct btree_trans *trans, struct bkey_s_c 
 		incompressible	|= p.crc.compression_type == BCH_COMPRESSION_TYPE_incompressible;
 		unwritten	|= p.ptr.unwritten;
 
-		bool evacuating = dev_bad_or_evacuating(c, p.ptr.dev);
+		bool evacuating = bch2_dev_bad_or_evacuating(c, p.ptr.dev);
 
 		if (!poisoned &&
 		    !btree &&
@@ -1295,19 +1287,17 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 			guard(rcu)();
 
 			bkey_for_each_ptr(ptrs, ptr) {
-				if (dev_bad_or_evacuating(c, ptr->dev))
+				if (bch2_dev_bad_or_evacuating(c, ptr->dev))
 					data_opts->ptrs_kill |= ptr_bit;
 				ptr_bit <<= 1;
 			}
-
-			data_opts->extra_replicas = r->data_replicas - durability;
 		} else {
 			bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
 				int d = bch2_extent_ptr_durability(trans, &p);
 				if (d < 0)
 					return d;
 
-				if (dev_bad_or_evacuating(c, p.ptr.dev) ||
+				if (bch2_dev_bad_or_evacuating(c, p.ptr.dev) ||
 				    (!p.ptr.cached &&
 				     d && durability - d >= r->data_replicas)) {
 					data_opts->ptrs_kill |= ptr_bit;
@@ -1343,10 +1333,8 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 		} else {
 			unsigned ptr_bit = 1;
 			bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
-				if (p.has_ec) {
+				if (p.has_ec)
 					data_opts->ptrs_kill_ec |= ptr_bit;
-					data_opts->extra_replicas += p.ec.redundancy;
-				}
 
 				ptr_bit <<= 1;
 			}
@@ -1358,23 +1346,22 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 		bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
 			if ((r->need_rb & BIT(BCH_REBALANCE_data_checksum)) &&
 			    p.crc.csum_type != csum_type)
-				data_opts->ptrs_rewrite |= ptr_bit;
+				data_opts->ptrs_kill |= ptr_bit;
 
 			if ((r->need_rb & BIT(BCH_REBALANCE_background_compression)) &&
 			    p.crc.compression_type != compression_type)
-				data_opts->ptrs_rewrite |= ptr_bit;
+				data_opts->ptrs_kill |= ptr_bit;
 
 			if ((r->need_rb & BIT(BCH_REBALANCE_background_target)) &&
 			    !p.ptr.cached &&
 			    !bch2_dev_in_target_rcu(c, p.ptr.dev, r->background_target))
-				data_opts->ptrs_rewrite |= ptr_bit;
+				data_opts->ptrs_kill |= ptr_bit;
 
 			ptr_bit <<= 1;
 		}
 	}
 
-	bool ret = (data_opts->ptrs_rewrite ||
-		    data_opts->ptrs_kill ||
+	bool ret = (data_opts->ptrs_kill ||
 		    data_opts->ptrs_kill_ec ||
 		    data_opts->extra_replicas);
 	if (!ret) {
@@ -1462,8 +1449,13 @@ static int __do_reconcile_extent(struct moving_context *ctxt,
 	if (bch2_err_matches(ret, BCH_ERR_transaction_restart) ||
 	    bch2_err_matches(ret, EROFS))
 		return ret;
-	if (is_reconcile_pending_err(c, k, ret))
+	if (is_reconcile_pending_err(c, k, ret)) {
+		/*
+		 * we need actual target from reconcile_set_data_opts so we can
+		 * check for offline/ro devices
+		 */
 		return bch2_extent_reconcile_pending_mod(trans, iter, k, true);
+	}
 	if (ret) {
 		WARN_ONCE(ret != -BCH_ERR_data_update_fail_no_snapshot,
 			  "unhandled error from move_extent: %s", bch2_err_str(ret));
@@ -1498,16 +1490,23 @@ static int do_reconcile_extent(struct moving_context *ctxt,
 		struct data_update_opts data_opts = { .read_dev = -1 };
 		reconcile_set_data_opts(trans, NULL, data_pos.btree, k, &opts, &data_opts);
 
-		struct bch_devs_list devs_have = bch2_data_update_devs_keeping(c, &data_opts, k);
-		int ret = bch2_can_do_write(c, &opts, &data_opts, k, &devs_have);
-		if (ret) {
-			if (is_reconcile_pending_err(c, k, ret))
-				return 0;
+		int ret = bch2_can_do_data_update(trans, &opts, &data_opts, k);
+		if (is_reconcile_pending_err(c, k, ret))
+			return 0;
+		if (ret)
 			return ret;
-		}
 
-		if (extent_has_rotational(c, k))
+		if (extent_has_rotational(c, k)) {
+			/*
+			 * The pending list is in logical inode:offset order,
+			 * but if the extent is on spinning rust we want do it
+			 * in device LBA order.
+			 *
+			 * Just take it off the pending list for now, and we'll
+			 * pick it up when we scan reconcile_work_phys:
+			 */
 			return bch2_extent_reconcile_pending_mod(trans, &iter, k, false);
+		}
 	}
 
 	event_add_trace(c, reconcile_data, k.k->size, buf,

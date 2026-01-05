@@ -95,7 +95,7 @@ static void count_data_update_key_fail(struct data_update *u,
 
 			unsigned ptr_bit = 1;
 			bkey_for_each_ptr_decode(old.k, bch2_bkey_ptrs_c(old), p, entry) {
-				if ((ptr_bit & u->opts.ptrs_rewrite) &&
+				if ((ptr_bit & u->opts.ptrs_kill ) &&
 				    (ptr = bch2_extent_has_ptr(c, old, p, bkey_i_to_s(insert))) &&
 				    !ptr->cached)
 					rewrites_found |= ptr_bit;
@@ -181,7 +181,7 @@ static int data_update_index_update_key(struct btree_trans *trans,
 	 * other updates
 	 * @new: extent with new pointers that we'll be adding to @insert
 	 *
-	 * Fist, drop ptrs_rewrite from @new:
+	 * Fist, drop ptrs_kill from @new:
 	 */
 	const union bch_extent_entry *entry_c;
 	struct extent_ptr_decoded p;
@@ -192,7 +192,7 @@ static int data_update_index_update_key(struct btree_trans *trans,
 
 	unsigned rewrites_found = 0, ptr_bit = 1;
 	bkey_for_each_ptr_decode(old.k, bch2_bkey_ptrs_c(old), p, entry_c) {
-		if ((ptr_bit & u->opts.ptrs_rewrite) &&
+		if ((ptr_bit & u->opts.ptrs_kill ) &&
 		    (ptr = bch2_extent_has_ptr(c, old, p, bkey_i_to_s(insert)))) {
 			if (ptr_bit & u->opts.ptrs_io_error)
 				bch2_bkey_drop_ptr_noerror(c, bkey_i_to_s(insert), ptr);
@@ -204,7 +204,7 @@ static int data_update_index_update_key(struct btree_trans *trans,
 		ptr_bit <<= 1;
 	}
 
-	if (u->opts.ptrs_rewrite && !rewrites_found) {
+	if (u->opts.ptrs_kill && !rewrites_found) {
 		int durability = bch2_bkey_durability(trans, k);
 		if (durability < 0)
 			return durability;
@@ -383,12 +383,12 @@ void bch2_data_update_read_done(struct data_update *u)
 
 		bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
 			if ((u->opts.ptrs_io_error & ptr_bit) &&
-			    !(u->opts.ptrs_rewrite & ptr_bit)) {
+			    !(u->opts.ptrs_kill & ptr_bit)) {
 				int d = bch2_trans_do(c, bch2_extent_ptr_durability(trans, &p));
 
 				if (d >= 0)
 					u->op.nr_replicas += d;
-				u->opts.ptrs_rewrite |= ptr_bit;
+				u->opts.ptrs_kill |= ptr_bit;
 				bch2_dev_list_drop_dev(&u->op.devs_have, p.ptr.dev);
 			}
 
@@ -562,7 +562,6 @@ void bch2_data_update_opts_to_text(struct printbuf *out, struct bch_fs *c,
 	prt_str(out, bch2_data_update_type_strs[data_opts->type]);
 	prt_newline(out);
 
-	ptr_bits_to_text(out, data_opts->ptrs_rewrite,	"rewrite");
 	ptr_bits_to_text(out, data_opts->ptrs_io_error,	"io error");
 	ptr_bits_to_text(out, data_opts->ptrs_kill,	"kill");
 	ptr_bits_to_text(out, data_opts->ptrs_kill_ec,	"kill ec");
@@ -681,50 +680,31 @@ static int bch2_data_update_bios_init(struct data_update *m, struct bch_fs *c,
 	return 0;
 }
 
-struct bch_devs_list bch2_data_update_devs_keeping(struct bch_fs *c,
-						   struct data_update_opts *opts,
-						   struct bkey_s_c k)
-{
-	struct bch_devs_list ret = (struct bch_devs_list) { 0 };
-
-	/* We always rewrite btree nodes entirely */
-	if (bkey_is_btree_ptr(k.k))
-		return ret;
-
-	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
-	unsigned ptr_bit = 1;
-
-	bkey_for_each_ptr(ptrs, ptr) {
-		if (!(ptr_bit & (opts->ptrs_rewrite|
-				 opts->ptrs_kill)))
-			ret.data[ret.nr++] = ptr->dev;
-		ptr_bit <<= 1;
-	}
-
-	return ret;
-}
-
 static unsigned durability_available_on_target(struct bch_fs *c,
 					       enum bch_watermark watermark,
-					       unsigned target)
+					       enum bch_data_type data_type,
+					       unsigned target,
+					       struct bch_devs_list *devs_have,
+					       bool nonblocking)
 {
-	struct bch_devs_mask devs = target_rw_devs(c, BCH_DATA_user, target);
-	unsigned ret = 0;
+	guard(rcu)();
+	struct bch_devs_mask devs = target_rw_devs(c, data_type, target);
+	unsigned durability = 0;
 
 	unsigned i;
 	for_each_set_bit(i, devs.d, BCH_SB_MEMBERS_MAX) {
-		struct bch_dev *ca = bch2_dev_rcu_noerror(c, i);
-		if (!ca)
+		if (bch2_dev_list_has_dev(*devs_have, i))
 			continue;
 
-		struct bch_dev_usage usage;
-		bch2_dev_usage_read_fast(ca, &usage);
-
-		if (dev_buckets_free(ca, usage, watermark))
-			ret += ca->mi.durability;
+		struct bch_dev *ca = bch2_dev_rcu_noerror(c, i);
+		if (ca &&
+		    (nonblocking
+		     ? dev_buckets_free(ca, watermark)
+		     : dev_buckets_available(ca, watermark)))
+			durability += ca->mi.durability;
 	}
 
-	return ret;
+	return durability;
 }
 
 static unsigned bch2_btree_ptr_durability_on_target(struct bch_fs *c, struct bkey_s_c k,
@@ -752,60 +732,91 @@ static int bch2_can_do_write_btree(struct bch_fs *c,
 				   struct data_update_opts *data_opts, struct bkey_s_c k)
 {
 	enum bch_watermark watermark = data_opts->commit_flags & BCH_WATERMARK_MASK;
+	struct bch_devs_list empty = {};
 
-	if (durability_available_on_target(c, watermark, data_opts->target) >
+	if (durability_available_on_target(c, watermark, BCH_DATA_btree, data_opts->target, &empty,
+					   data_opts->write_flags & BCH_WRITE_alloc_nowait) >
 	    bch2_btree_ptr_durability_on_target(c, k, data_opts->target))
 		return 0;
 
 	if (!(data_opts->write_flags & BCH_WRITE_only_specified_devs)) {
 		unsigned d = bch2_btree_ptr_durability(c, k);
 		if (d < opts->data_replicas &&
-		    d < durability_available_on_target(c, watermark, 0))
+		    d < durability_available_on_target(c, watermark, BCH_DATA_btree, 0, &empty,
+						       data_opts->write_flags & BCH_WRITE_alloc_nowait))
 			return 0;
 	}
 
 	return bch_err_throw(c, data_update_fail_no_rw_devs);
 }
 
-int bch2_can_do_write(struct bch_fs *c,
-		      struct bch_inode_opts *opts,
-		      struct data_update_opts *data_opts,
-		      struct bkey_s_c k, struct bch_devs_list *devs_have)
+static int __bch2_can_do_write(struct bch_fs *c,
+			       struct bch_inode_opts *opts,
+			       struct data_update_opts *data_opts,
+			       struct bch_devs_list *devs_have,
+			       struct bkey_s_c k)
 {
+	bool btree = bkey_is_btree_ptr(k.k);
 	enum bch_watermark watermark = data_opts->commit_flags & BCH_WATERMARK_MASK;
+	enum bch_data_type data_type = btree
+		? BCH_DATA_btree
+		: BCH_DATA_user;
+	unsigned target = data_opts->write_flags & BCH_WRITE_only_specified_devs
+		? data_opts->target
+		: 0;
 
 	if ((data_opts->write_flags & BCH_WRITE_alloc_nowait) &&
 	    unlikely(c->allocator.open_buckets_nr_free <= bch2_open_buckets_reserved(watermark)))
 		return bch_err_throw(c, data_update_fail_would_block);
 
-	guard(rcu)();
-
-	if (bkey_is_btree_ptr(k.k))
+	if (btree &&
+	    data_opts->type == BCH_DATA_UPDATE_reconcile &&
+	    !bch2_bkey_has_dev_bad_or_evacuating(c, k))
 		return bch2_can_do_write_btree(c, opts, data_opts, k);
 
-	unsigned target = data_opts->write_flags & BCH_WRITE_only_specified_devs
-		? data_opts->target
-		: 0;
-	struct bch_devs_mask devs = target_rw_devs(c, BCH_DATA_user, target);
+	return durability_available_on_target(c, watermark, data_type, target, devs_have,
+					      data_opts->write_flags & BCH_WRITE_alloc_nowait)
+		? 0
+		: bch_err_throw(c, data_update_fail_no_rw_devs);
+}
 
-	darray_for_each(*devs_have, i)
-		if (*i != BCH_SB_MEMBER_INVALID)
-			__clear_bit(*i, devs.d);
+int bch2_can_do_data_update(struct btree_trans *trans,
+			    struct bch_inode_opts *opts,
+			    struct data_update_opts *data_opts,
+			    struct bkey_s_c k)
+{
+	struct bch_fs *c = trans->c;
+	struct bch_devs_list devs_have = {};
+	unsigned durability_keeping = 0;
 
-	unsigned i;
-	for_each_set_bit(i, devs.d, BCH_SB_MEMBERS_MAX) {
-		struct bch_dev *ca = bch2_dev_rcu_noerror(c, i);
-		if (!ca)
-			continue;
+	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+	const union bch_extent_entry *entry;
+	struct extent_ptr_decoded p;
+	unsigned ptr_bit = 1;
 
-		struct bch_dev_usage usage;
-		bch2_dev_usage_read_fast(ca, &usage);
+	bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
+		if (p.ptr.dev != BCH_SB_MEMBER_INVALID &&
+		    !(ptr_bit & data_opts->ptrs_kill)) {
+			int d = ptr_bit & data_opts->ptrs_kill_ec
+				? bch2_dev_durability(c, p.ptr.dev)
+				: bch2_extent_ptr_durability(trans, &p);
+			if (d < 0)
+				return d;
 
-		if (dev_buckets_free(ca, usage, watermark))
-			return 0;
+			durability_keeping += d;
+			if (!data_opts->no_devs_have)
+				devs_have.data[devs_have.nr++] = p.ptr.dev;
+		}
+
+		ptr_bit <<= 1;
 	}
 
-	return bch_err_throw(c, data_update_fail_no_rw_devs);
+	if (!bkey_is_btree_ptr(k.k) &&
+	    !data_opts->extra_replicas &&
+	    durability_keeping >= opts->data_replicas)
+		return 0;
+
+	return __bch2_can_do_write(c, opts, data_opts, &devs_have, k);
 }
 
 /*
@@ -839,12 +850,12 @@ static void checksummed_and_non_checksummed_handling(struct data_update *u, stru
 	unsigned ptr_bit = 1;
 
 	bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
-		if (ptr_bit & u->opts.ptrs_rewrite) {
+		if (ptr_bit & u->opts.ptrs_kill) {
 			if (!rewrite_found) {
 				rewrite_found = true;
 				u->opts.read_dev = p.ptr.dev;
 			} else {
-				u->opts.ptrs_rewrite &= ~ptr_bit;
+				u->opts.ptrs_kill &= ~ptr_bit;
 			}
 		}
 
@@ -903,48 +914,36 @@ int bch2_data_update_init(struct btree_trans *trans,
 		goto out;
 	}
 
-	unsigned durability_have = 0, durability_removing = 0;
+	if (m->opts.extra_replicas) {
+		ret = bch2_disk_reservation_add(c, &m->op.res, k.k->size * m->opts.extra_replicas, 0);
+		if (ret)
+			goto out;
+	}
 
 	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(bkey_i_to_s_c(m->k.k));
 	const union bch_extent_entry *entry;
 	struct extent_ptr_decoded p;
-	unsigned reserve_sectors = k.k->size * data_opts.extra_replicas;
 	unsigned buf_bytes = 0;
 	bool unwritten = false;
+	unsigned durability_keeping = 0;
 
-	if (m->opts.ptrs_rewrite)
+	if (m->opts.ptrs_kill)
 		checksummed_and_non_checksummed_handling(m, ptrs);
 
 	unsigned ptr_bit = 1;
 	bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
-		if (!p.ptr.cached) {
-			if (!(ptr_bit & (m->opts.ptrs_rewrite|
-					 m->opts.ptrs_kill))) {
-				int d = bch2_extent_ptr_durability(trans, &p);
-				if (d < 0)
-					return d;
-
-				durability_have += d;
-				if (!m->opts.no_devs_have)
-					bch2_dev_list_add_dev(&m->op.devs_have, p.ptr.dev);
+		if (!(ptr_bit & m->opts.ptrs_kill)) {
+			int d = ptr_bit & m->opts.ptrs_kill_ec
+				? bch2_dev_durability(c, p.ptr.dev)
+				: bch2_extent_ptr_durability(trans, &p);
+			if (d < 0) {
+				ret = d;
+				goto out;
 			}
 
-			if (ptr_bit & m->opts.ptrs_rewrite) {
-				if (crc_is_compressed(p.crc))
-					reserve_sectors += k.k->size;
-
-				int d = bch2_extent_ptr_desired_durability(trans, &p);
-				if (d < 0)
-					return d;
-
-				m->op.nr_replicas += d;
-				durability_removing += d;
-			}
-		} else {
-			if (m->opts.ptrs_rewrite & ptr_bit) {
-				m->opts.ptrs_kill |= ptr_bit;
-				m->opts.ptrs_rewrite ^= ptr_bit;
-			}
+			durability_keeping += d;
+			if (!m->opts.no_devs_have)
+				bch2_dev_list_add_dev(&m->op.devs_have, p.ptr.dev);
 		}
 
 		/*
@@ -967,8 +966,6 @@ int bch2_data_update_init(struct btree_trans *trans,
 	}
 
 	if (m->opts.type != BCH_DATA_UPDATE_scrub) {
-		unsigned durability_required = max(0, (int) (io_opts->data_replicas - durability_have));
-
 		/*
 		 * If current extent durability is less than io_opts.data_replicas,
 		 * we're not trying to rereplicate the extent up to data_alloc/replicas.here -
@@ -977,18 +974,9 @@ int bch2_data_update_init(struct btree_trans *trans,
 		 * Increasing replication is an explicit operation triggered by
 		 * rereplicate, currently, so that users don't get an unexpected -ENOSPC
 		 */
-		m->op.nr_replicas = min(durability_removing, durability_required) +
+		m->op.nr_replicas = max(0, (int) (io_opts->data_replicas - durability_keeping)) +
 			m->opts.extra_replicas;
-
-		/*
-		 * If device(s) were set to durability=0 after data was written to them
-		 * we can end up with a duribilty=0 extent, and the normal algorithm
-		 * that tries not to increase durability doesn't work:
-		 */
-		if (!(durability_have + durability_removing))
-			m->op.nr_replicas = max((unsigned) m->op.nr_replicas, 1);
-
-		m->op.nr_replicas_required = m->op.nr_replicas;
+		m->op.nr_replicas_required = 1;
 
 		/*
 		 * It might turn out that we don't need any new replicas, if the
@@ -996,8 +984,6 @@ int bch2_data_update_init(struct btree_trans *trans,
 		 * was written:
 		 */
 		if (!m->op.nr_replicas) {
-			m->opts.ptrs_kill |= m->opts.ptrs_rewrite;
-			m->opts.ptrs_rewrite = 0;
 			/* if iter == NULL, it's just a promote */
 			if (iter)
 				ret = bch2_extent_drop_ptrs(trans, iter, k, io_opts, &m->opts);
@@ -1020,16 +1006,7 @@ int bch2_data_update_init(struct btree_trans *trans,
 		 *   single durability=2 device)
 		 */
 		if (data_opts.type != BCH_DATA_UPDATE_copygc) {
-			ret = bch2_can_do_write(c, io_opts, &m->opts, k, &m->op.devs_have);
-			if (ret)
-				goto out;
-		}
-
-		if (reserve_sectors) {
-			ret = bch2_disk_reservation_add(c, &m->op.res, reserve_sectors,
-					m->opts.extra_replicas
-					? 0
-					: BCH_DISK_RESERVATION_NOFAIL);
+			ret = __bch2_can_do_write(c, io_opts, &m->opts, &m->op.devs_have, k);
 			if (ret)
 				goto out;
 		}

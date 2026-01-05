@@ -302,7 +302,8 @@ static void bcachefs_fuse_unlink(fuse_req_t req, fuse_ino_t dir_ino,
 	int ret = bch2_trans_commit_do(c, NULL, NULL,
 				BCH_TRANS_COMMIT_no_enospc,
 			    bch2_unlink_trans(trans, dir, &dir_u,
-					      &inode_u, &qstr, false));
+					      (subvol_inum) {}, &inode_u,
+					      &qstr, false));
 
 	fuse_reply_err(req, -ret);
 }
