@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <getopt.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,14 @@
 #include "libbcachefs.h"
 
 #include "sb/counters.h"
+
+static const char *restore_screen_str = "\033[?1049l";
+
+static void exit_restore_screen(int n)
+{
+	write(STDOUT_FILENO, restore_screen_str, strlen(restore_screen_str));
+	exit(EXIT_SUCCESS);
+}
 
 static const u8 counters_to_stable_map[] = {
 #define x(n, id, ...)	[BCH_COUNTER_##n] = BCH_COUNTER_STABLE_##n,
@@ -56,6 +65,11 @@ static void fs_top(const char *path, bool human_readable)
 	struct bch_ioctl_query_counters *prev = NULL;
 
 	unsigned interval_secs = 1;
+
+	struct sigaction act = { .sa_handler = exit_restore_screen };
+	sigaction(SIGINT, &act, NULL);
+
+	fputs("\033[?1049h", stdout);
 
 	while (true) {
 		sleep(interval_secs);
@@ -115,6 +129,8 @@ static void fs_top(const char *path, bool human_readable)
 	}
 
 	bcache_fs_close(fs);
+
+	fputs(restore_screen_str, stdout);
 }
 
 static void fs_top_usage(void)

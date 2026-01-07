@@ -1,5 +1,6 @@
 
 #include <getopt.h>
+#include <signal.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -467,6 +468,14 @@ static size_t count_newlines(const char *str)
 	return ret;
 }
 
+static const char *restore_screen_str = "\033[?1049l";
+
+static void exit_restore_screen(int n)
+{
+	write(STDOUT_FILENO, restore_screen_str, strlen(restore_screen_str));
+	exit(EXIT_SUCCESS);
+}
+
 int cmd_reconcile_wait(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
@@ -499,6 +508,11 @@ int cmd_reconcile_wait(int argc, char *argv[])
 
 	write_file_str(fs.sysfs_fd, "internal/trigger_reconcile_wakeup", "1");
 
+	struct sigaction act = { .sa_handler = exit_restore_screen };
+	sigaction(SIGINT, &act, NULL);
+
+	fputs("\033[?1049h", stdout);
+
 	while (true) {
 		CLASS(printbuf, buf)();
 		bool pending = reconcile_status(&buf, fs, types);
@@ -511,6 +525,8 @@ int cmd_reconcile_wait(int argc, char *argv[])
 
 		sleep(1);
 	}
+
+	fputs(restore_screen_str, stdout);
 
 	return 0;
 }
