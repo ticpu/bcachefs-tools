@@ -217,6 +217,7 @@ static void fsck_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_fsck(int argc, char *argv[])
@@ -390,6 +391,7 @@ static void recovery_pass_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_recovery_pass(int argc, char *argv[])

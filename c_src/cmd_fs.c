@@ -677,6 +677,7 @@ static void fs_usage_usage(void)
 	     "  -H, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_fs_usage(int argc, char *argv[])
@@ -745,7 +746,7 @@ int fs_usage(void)
 	     "  top                          Show runtime performance information\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	return 0;
+	exit(EXIT_SUCCESS);
 }
 
 int fs_cmds(int argc, char *argv[])

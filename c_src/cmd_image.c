@@ -526,6 +526,7 @@ static void image_create_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static int cmd_image_create(int argc, char *argv[])
@@ -757,6 +758,7 @@ static void image_update_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static int cmd_image_update(int argc, char *argv[])
@@ -816,7 +818,7 @@ static int image_usage(void)
             "  update                       Update a disk image, minimizing changes\n"
             "\n"
             "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	return 0;
+	exit(EXIT_SUCCESS);
 }
 
 int image_cmds(int argc, char *argv[])

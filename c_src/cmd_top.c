@@ -143,6 +143,7 @@ static void fs_top_usage(void)
 	     "  -H, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_fs_top(int argc, char *argv[])

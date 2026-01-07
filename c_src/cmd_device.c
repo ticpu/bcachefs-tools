@@ -44,6 +44,7 @@ static void device_add_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static int cmd_device_add(int argc, char *argv[])
@@ -212,6 +213,7 @@ static void device_online_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static int cmd_device_online(int argc, char *argv[])
@@ -253,6 +255,7 @@ static void device_offline_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static int cmd_device_offline(int argc, char *argv[])
@@ -298,6 +301,7 @@ static void device_evacuate_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static int evacuate_v0(struct bchfs_handle fs, unsigned dev_idx, const char *dev_path)
@@ -721,7 +725,7 @@ static int device_usage(void)
             "  resize-journal               Resize journal on a device\n"
             "\n"
             "Report bugs to <linux-bcachefs@vger.kernel.org>");
-       return 0;
+       exit(EXIT_SUCCESS);
 }
 
 int device_cmds(int argc, char *argv[])

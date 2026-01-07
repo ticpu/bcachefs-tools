@@ -25,6 +25,7 @@ static void unlock_usage(void)
 	     "  -h, --help             Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_unlock(int argc, char *argv[])
@@ -106,6 +107,7 @@ static void set_passphrase_usage(void)
 	     "  -h, --help             Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_set_passphrase(int argc, char *argv[])
@@ -172,6 +174,7 @@ static void remove_passphrase_usage(void)
 	     "  -h, --help             Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_remove_passphrase(int argc, char *argv[])

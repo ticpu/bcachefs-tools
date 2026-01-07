@@ -154,7 +154,7 @@ static int data_usage(void)
 	     "  job                          Kick off low level data jobs\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	return 0;
+	exit(EXIT_SUCCESS);
 }
 
 int data_cmds(int argc, char *argv[])
@@ -596,7 +596,7 @@ static int reconcile_usage(void)
 	     "  wait                         Wait on background data processing to complete\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	return 0;
+	exit(EXIT_SUCCESS);
 }
 
 int reconcile_cmds(int argc, char *argv[])

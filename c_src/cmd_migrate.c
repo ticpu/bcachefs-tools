@@ -195,6 +195,7 @@ static void migrate_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static const struct option migrate_opts[] = {
@@ -390,6 +391,7 @@ static void migrate_superblock_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static void add_default_sb_layout(struct bch_sb* sb, unsigned *out_sb_size)

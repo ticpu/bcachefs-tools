@@ -111,6 +111,7 @@ void bcachefs_usage(void)
 	     "\n"
 #endif
 	     "Miscellaneous:\n"
-         "  completions              Generate shell completions\n"
+	     "  completions              Generate shell completions\n"
 	     "  version                  Display the version of the invoked bcachefs tool\n");
+	exit(EXIT_SUCCESS);
 }
