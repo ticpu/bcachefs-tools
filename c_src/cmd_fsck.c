@@ -217,6 +217,7 @@ static void fsck_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_fsck(int argc, char *argv[])
@@ -382,14 +383,13 @@ static void recovery_pass_usage(void)
 	puts("bcachefs recovery-pass - list and manage scheduled recovery passes\n"
 	     "Usage: bcachefs recovery-pass [OPTION]... <devices>\n"
 	     "\n"
-	     "Currently only supports unmounted/offline filesystems\n"
-	     "\n"
 	     "Options:\n"
 	     "  -s, --set                    Schedule a recovery pass in the superblock\n"
 	     "  -u, --unset                  Deschedule a recovery pass\n"
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_recovery_pass(int argc, char *argv[])

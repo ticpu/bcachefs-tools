@@ -677,6 +677,7 @@ static void fs_usage_usage(void)
 	     "  -H, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_fs_usage(int argc, char *argv[])
@@ -738,14 +739,14 @@ int cmd_fs_usage(int argc, char *argv[])
 int fs_usage(void)
 {
 	puts("bcachefs fs - manage a running filesystem\n"
-	     "Usage: bcachefs fs <CMD> [OPTIONS]\n"
+	     "Usage: bcachefs fs <usage|top> [OPTION]...\n"
 	     "\n"
 	     "Commands:\n"
 	     "  usage                        Display detailed filesystem usage\n"
 	     "  top                          Show runtime performance information\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	return 0;
+	exit(EXIT_SUCCESS);
 }
 
 int fs_cmds(int argc, char *argv[])

@@ -15,7 +15,7 @@
 static void unlock_usage(void)
 {
 	puts("bcachefs unlock - unlock an encrypted filesystem so it can be mounted\n"
-	     "Usage: bcachefs unlock [OPTION] device\n"
+	     "Usage: bcachefs unlock [OPTION]... <device>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -c, --check            Check if a device is encrypted\n"
@@ -25,6 +25,7 @@ static void unlock_usage(void)
 	     "  -h, --help             Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_unlock(int argc, char *argv[])
@@ -99,13 +100,14 @@ int cmd_unlock(int argc, char *argv[])
 
 static void set_passphrase_usage(void)
 {
-	puts("bcachefs set-passphares - change passphrase on an encrypted filesystem\n"
-	     "Usage: bcachefs set-passphares device\n"
+	puts("bcachefs set-passphrase - change passphrase on an encrypted filesystem\n"
+	     "Usage: bcachefs set-passphrase <device>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help             Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_set_passphrase(int argc, char *argv[])
@@ -165,13 +167,14 @@ int cmd_set_passphrase(int argc, char *argv[])
 
 static void remove_passphrase_usage(void)
 {
-	puts("bcachefs remove-passphares - remove passphrase on an encrypted filesystem\n"
-	     "Usage: bcachefs remove-passphares device\n"
+	puts("bcachefs remove-passphrase - remove passphrase on an encrypted filesystem\n"
+	     "Usage: bcachefs remove-passphrase <device>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help             Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_remove_passphrase(int argc, char *argv[])

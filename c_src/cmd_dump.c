@@ -384,6 +384,7 @@ static void dump_usage(void)
 	     "  -h, --help                    Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_dump(int argc, char *argv[])
@@ -474,6 +475,7 @@ static void undump_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 struct undump {

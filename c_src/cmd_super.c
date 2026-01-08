@@ -38,14 +38,14 @@
 
 static void show_super_usage(void)
 {
-	puts("bcachefs show-super \n"
-	     "Usage: bcachefs show-super [OPTION].. device\n"
+	puts("bcachefs show-super - dump superblock information to stdout\n"
+	     "Usage: bcachefs show-super [OPTION]... <device>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -f, --fields=(fields)       list of sections to print\n"
-	     "      --field-only=fiel)      print superblock section only, no header\n"
-	     "  -l, --layout                print superblock layout\n"
-	     "  -h, --help                  display this help and exit\n"
+	     "  -f, --fields=(fields)       List of sections to print\n"
+	     "      --field-only=fiel)      Print superblock section only, no header\n"
+	     "  -l, --layout                Print superblock layout\n"
+	     "  -h, --help                  Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);
@@ -380,24 +380,20 @@ static struct bch_sb *recover_super_from_member(struct recover_super_args args)
 
 static void recover_super_usage(void)
 {
-	puts("bcachefs recover-super \n"
-	     "Usage: bcachefs recover-super [OPTION].. device\n"
-	     "\n"
-	     "Attempt to recover a filesystem on a device that has had the main superblock\n"
-	     "and superblock layout overwritten.\n"
-	     "All options will be guessed if not provided\n"
+	puts("bcachefs recover-super - attempt to recover overwritten superblock from backups\n"
+	     "Usage: bcachefs recover-super [OPTION]... <device>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -d, --dev_size              size of filessytem on device, in bytes \n"
-	     "  -o, --offset                offset to probe, in bytes\n"
+	     "  -d, --dev_size              Size of filessytem on device, in bytes \n"
+	     "  -o, --offset                Offset to probe, in bytes\n"
 	     "  -l, --scan_len              Length in bytes to scan from start and end of device\n"
 	     "                              Should be >= bucket size to find sb at end of device\n"
-	     "                              Default 16M\n"
-	     "  -s, --src_device            member device to recover from, in a multi device fs\n"
-	     "  -i, --dev_idx               index of this device, if recovering from another device\n"
+	     "                              (Default: 16M)\n"
+	     "  -s, --src_device            Member device to recover from, in a multi device fs\n"
+	     "  -i, --dev_idx               Index of this device, if recovering from another device\n"
 	     "  -y, --yes                   Recover without prompting\n"
 	     "  -v, --verbose               Increase logging level\n"
-	     "  -h, --help                  display this help and exit\n"
+	     "  -h, --help                  Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);

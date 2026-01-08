@@ -87,6 +87,7 @@ static void format_usage(void)
 	     "  bcachefs format --label cache /dev/sdb /dev/sdc\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 enum {

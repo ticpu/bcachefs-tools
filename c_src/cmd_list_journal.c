@@ -496,6 +496,7 @@ static void list_journal_usage(void)
 	     "  -h, --help                       Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_list_journal(int argc, char *argv[])

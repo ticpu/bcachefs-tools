@@ -135,7 +135,7 @@ static void fs_top(const char *path, bool human_readable)
 
 static void fs_top_usage(void)
 {
-	puts("bcachefs fs top - display runtime perfomance info\n"
+	puts("bcachefs fs top - display runtime performance info\n"
 	     "Usage: bcachefs fs top [OPTION]... <mountpoint>\n"
 	     "\n"
 	     "Options:\n"
@@ -143,6 +143,7 @@ static void fs_top_usage(void)
 	     "  -H, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 int cmd_fs_top(int argc, char *argv[])
