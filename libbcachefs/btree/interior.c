@@ -643,6 +643,7 @@ static void btree_update_new_nodes_mark_sb(struct btree_update *as)
 {
 	struct bch_fs *c = as->c;
 
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
 	bool write_sb = false;
 	darray_for_each(as->new_nodes, i)
@@ -1212,6 +1213,12 @@ bch2_btree_update_start(struct btree_trans *trans, struct btree_path *path,
 	u32 restart_count = trans->restart_count;
 
 	BUG_ON(!path->should_be_locked);
+
+	if (watermark == BCH_WATERMARK_stripe) {
+		watermark = BCH_WATERMARK_normal;
+		commit_flags &= ~BCH_WATERMARK_MASK;
+		commit_flags |= watermark;
+	}
 
 	if (watermark < BCH_WATERMARK_reclaim &&
 	    journal_low_on_space(&c->journal)) {

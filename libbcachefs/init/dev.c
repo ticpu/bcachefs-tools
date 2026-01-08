@@ -481,7 +481,8 @@ static int __bch2_dev_attach_bdev(struct bch_fs *c, struct bch_dev *ca,
 	if (model.nr && model.data[model.nr - 1] == '\n')
 		model.data[--model.nr] = '\0';
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
 
 		strtomem_pad(m->device_name, name.buf, '\0');
@@ -726,7 +727,8 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 	 * Free this device's slot in the bch_member array - all pointers to
 	 * this device must be gone:
 	 */
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, dev_idx);
 
 		if (fast_device_removal)
@@ -809,7 +811,8 @@ int bch2_dev_add(struct bch_fs *c, const char *path, struct printbuf *err)
 	}
 
 	scoped_guard(rwsem_write, &c->state_lock) {
-		scoped_guard(mutex, &c->sb_lock) {
+		scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+			guard(mutex)(&c->sb_lock);
 			SET_BCH_SB_MULTI_DEVICE(c->disk_sb.sb, true);
 
 			ret = bch2_sb_from_fs(c, ca);
@@ -965,7 +968,8 @@ int bch2_dev_online(struct bch_fs *c, const char *path, struct printbuf *err)
 		}
 	}
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx)->last_mount =
 			cpu_to_le64(ktime_get_real_seconds());
 		bch2_write_super(c);
@@ -1063,7 +1067,8 @@ int bch2_dev_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets, struct p
 		return ret;
 	}
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
 		m->nbuckets = cpu_to_le64(nbuckets);
 
@@ -1179,12 +1184,12 @@ static void bch2_fs_bdev_mark_dead(struct block_device *bdev, bool surprise)
 			evict_inodes(sb);
 		}
 
-		if (dev) {
-			__bch2_dev_offline(c, ca);
-		} else {
+		if (!dev) {
 			bch2_journal_flush(&c->journal);
 			print = bch2_fs_emergency_read_only(c, &buf);
 		}
+
+		__bch2_dev_offline(c, ca);
 
 		if (print)
 			bch2_print_str(c, KERN_ERR, buf.buf);
