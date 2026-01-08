@@ -811,7 +811,7 @@ static int cmd_image_update(int argc, char *argv[])
 static int image_usage(void)
 {
 	puts("bcachefs image - commands for creating and updating image files\n"
-	     "Usage: bcachefs image <CMD> [OPTION]...\n"
+	     "Usage: bcachefs image <create|update> [OPTION]... <file>\n"
             "\n"
             "Commands:\n"
             "  create                       Create a minimally-sized disk image\n"

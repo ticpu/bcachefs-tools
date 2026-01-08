@@ -146,7 +146,7 @@ static int cmd_data_job(int argc, char *argv[])
 static int data_usage(void)
 {
 	puts("bcachefs data - manage filesystem data\n"
-	     "Usage: bcachefs data <CMD> [OPTIONS]\n"
+	     "Usage: bcachefs data <rereplicate|scrub|job> [OPTION]...\n"
 	     "\n"
 	     "Commands:\n"
 	     "  rereplicate                  Rereplicate degraded data\n"
@@ -178,10 +178,8 @@ int data_cmds(int argc, char *argv[])
 
 static void scrub_usage(void)
 {
-	puts("bcachefs scrub\n"
-	     "Usage: bcachefs scrub [filesystem|device]\n"
-	     "\n"
-	     "Check data for errors, fix from another replica if possible\n"
+	puts("bcachefs scrub - verify checksums and correct errors, if possible\n"
+	     "Usage: bcachefs scrub <filesystem|device>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -m, --metadata               Check metadata only\n"
@@ -390,10 +388,8 @@ static void reconcile_wait_usage(void)
 	CLASS(printbuf, buf)();
 	prt_bitflags(&buf, __bch2_reconcile_accounting_types, ~0UL);
 
-	printf("bcachefs reconcile wait\n"
+	printf("bcachefs reconcile wait - wait for reconcile to finish background data processing\n"
 	     "Usage: bcachefs reconcile wait [OPTION]... <mountpoint>\n"
-	     "\n"
-	     "Wait for reconcile to finish background data processing of one or more types\n"
 	     "\n"
 	     "Options:\n"
 	     "  -t, --types=TYPES            List of reconcile types to wait on\n"
@@ -536,7 +532,7 @@ static void reconcile_status_usage(void)
 	CLASS(printbuf, buf)();
 	prt_bitflags(&buf, __bch2_reconcile_accounting_types, ~0UL);
 
-	printf("bcachefs reconcile status\n"
+	printf("bcachefs reconcile status - show the status of a background reconciliation processing\n"
 	       "Usage: bcachefs reconcile status [OPTION]... <mountpoint>\n"
 	       "\n"
 	       "Options:\n"
@@ -589,7 +585,7 @@ int cmd_reconcile_status(int argc, char *argv[])
 static int reconcile_usage(void)
 {
 	puts("bcachefs reconcile - manage data reconcile\n"
-	     "Usage: bcachefs reconcile <CMD> [OPTIONS]\n"
+	     "Usage: bcachefs reconcile <status|wait> [OPTION]...\n"
 	     "\n"
 	     "Commands:\n"
 	     "  status                       Show status of background data processing\n"

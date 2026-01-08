@@ -104,6 +104,7 @@ void bcachefs_usage(void)
 	     "  undump                   Convert qcow2 metadata dumps to sparse raw files\n"
 	     "  list                     List filesystem metadata in textual form\n"
 	     "  list_journal             List contents of journal\n"
+	     "  kill_btree_node          Make btree nodes unreadable\n"
 	     "\n"
 #ifdef BCACHEFS_FUSE
 	     "FUSE:\n"

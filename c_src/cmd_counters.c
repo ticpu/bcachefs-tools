@@ -8,12 +8,12 @@
 
 static void reset_counters_usage(void)
 {
-	puts("bcachefs reset-counters \n"
-	     "Usage: bcachefs reset-counters device\n"
+	puts("bcachefs reset-counters - reset all counters on an unmounted device\n"
+	     "Usage: bcachefs reset-counters <device>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -c, --counters=<counters>   reset specific counters, not all\n"
-	     "  -h, --help                  display this help and exit\n"
+	     "  -c, --counters=<counters>   Reset specific counters, not all\n"
+	     "  -h, --help                  Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);

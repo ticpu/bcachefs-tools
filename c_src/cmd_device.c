@@ -33,9 +33,9 @@
 static void device_add_usage(void)
 {
 	puts("bcachefs device add - add a device to an existing filesystem\n"
-	     "Usage: bcachefs device add [OPTION]... filesystem device\n"
+	     "Usage: bcachefs device add [OPTION]... <filesystem> <device>\n"
 	     "\n"
-	     "Options:\n");
+	     "Options:");
 
 	bch2_opts_usage(OPT_FORMAT|OPT_DEVICE);
 
@@ -136,9 +136,8 @@ static int cmd_device_add(int argc, char *argv[])
 
 static void device_remove_usage(void)
 {
-	puts("bcachefs device_remove - remove a device from a filesystem\n"
-	     "Usage:\n"
-	     "  bcachefs device remove <device>|<devid> <path>\n"
+	puts("bcachefs device remove - remove a device from a filesystem\n"
+	     "Usage: bcachefs device remove <device|dev_id> <path>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -f, --force                  Force removal, even if some data couldn't be migrated\n"
@@ -206,8 +205,8 @@ static int cmd_device_remove(int argc, char *argv[])
 
 static void device_online_usage(void)
 {
-	puts("bcachefs device online - readd a device to a running filesystem\n"
-	     "Usage: bcachefs device online [OPTION]... device\n"
+	puts("bcachefs device online - read a device to a running filesystem\n"
+	     "Usage: bcachefs device online [OPTION]... <device>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help                   Display this help and exit\n"
@@ -248,7 +247,7 @@ static int cmd_device_online(int argc, char *argv[])
 static void device_offline_usage(void)
 {
 	puts("bcachefs device offline - take a device offline, without removing it\n"
-	     "Usage: bcachefs device offline [OPTION]... device\n"
+	     "Usage: bcachefs device offline [OPTION]... <device>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -f, --force                  Force, if data redundancy will be degraded\n"
@@ -295,7 +294,7 @@ static int cmd_device_offline(int argc, char *argv[])
 static void device_evacuate_usage(void)
 {
 	puts("bcachefs device evacuate - move data off of a given device\n"
-	     "Usage: bcachefs device evacuate [OPTION]... device\n"
+	     "Usage: bcachefs device evacuate [OPTION]... <device>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help                   Display this help and exit\n"
@@ -383,11 +382,9 @@ static int cmd_device_evacuate(int argc, char *argv[])
 
 static void device_set_state_usage(void)
 {
-	puts("bcachefs device set-state\n"
-	     "Usage: bcachefs device set-state <new-state> <device>|<devid> <path>\n"
-	     "\n"
-	     "<new-state>: one of rw, ro, evacuating or spare\n"
-	     "<path>: path to mounted filesystem, optional unless specifying device by id\n"
+	puts("bcachefs device set-state - change the state of a device\n"
+	     "Usage: bcachefs device set-state <rw|ro|evacuating|spare> <device> [path]\n"
+	     "       bcachefs device set-state <rw|ro|evacuating|spare> <dev_id> <path>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -f, --force                  Force if data redundancy will be degraded\n"
@@ -504,8 +501,8 @@ static int cmd_device_set_state(int argc, char *argv[])
 
 static void device_resize_usage(void)
 {
-	puts("bcachefs device resize \n"
-	     "Usage: bcachefs device resize device [ size ]\n"
+	puts("bcachefs device resize - resize the filesystem on a device\n"
+	     "Usage: bcachefs device resize <device> <size>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help                   Display this help and exit\n"
@@ -612,8 +609,8 @@ static int cmd_device_resize(int argc, char *argv[])
 
 static void device_resize_journal_usage(void)
 {
-	puts("bcachefs device resize-journal \n"
-	     "Usage: bcachefs device resize-journal device size\n"
+	puts("bcachefs device resize-journal - resize the journal on a device\n"
+	     "Usage: bcachefs device resize-journal <device> <size>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help                   Display this help and exit\n"
@@ -712,7 +709,7 @@ static int cmd_device_resize_journal(int argc, char *argv[])
 static int device_usage(void)
 {
        puts("bcachefs device - manage devices within a running filesystem\n"
-            "Usage: bcachefs device <CMD> [OPTION]\n"
+            "Usage: bcachefs device <CMD> [OPTION]...\n"
             "\n"
             "Commands:\n"
             "  add                          Add a new device to an existing filesystem\n"

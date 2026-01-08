@@ -739,7 +739,7 @@ int cmd_fs_usage(int argc, char *argv[])
 int fs_usage(void)
 {
 	puts("bcachefs fs - manage a running filesystem\n"
-	     "Usage: bcachefs fs <CMD> [OPTIONS]\n"
+	     "Usage: bcachefs fs <usage|top> [OPTION]...\n"
 	     "\n"
 	     "Commands:\n"
 	     "  usage                        Display detailed filesystem usage\n"

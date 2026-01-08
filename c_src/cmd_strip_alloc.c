@@ -77,9 +77,10 @@ void strip_fs_alloc(struct bch_fs *c)
 static void strip_alloc_usage(void)
 {
 	puts("bcachefs strip-alloc - remove alloc info and journal from a filesystem\n"
+	     "Usage: bcachefs strip_alloc [OPTION]... <devices>\n"
+	     "\n"
 	     "Removes metadata unneeded for running in read-only mode\n"
 	     "Alloc info and journal will be recreated on first RW mount\n"
-	     "Usage: bcachefs strip_alloc [OPTION]... <devices>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help              Display this help and exit\n"

@@ -135,7 +135,7 @@ static void fs_top(const char *path, bool human_readable)
 
 static void fs_top_usage(void)
 {
-	puts("bcachefs fs top - display runtime perfomance info\n"
+	puts("bcachefs fs top - display runtime performance info\n"
 	     "Usage: bcachefs fs top [OPTION]... <mountpoint>\n"
 	     "\n"
 	     "Options:\n"

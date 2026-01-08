@@ -121,7 +121,7 @@ static void do_setattr(char *path, struct bch_opt_strs opts, bool remove_all)
 static void setattr_usage(void)
 {
 	puts("bcachefs set-file-option - set attributes on files in a bcachefs filesystem\n"
-	     "Usage: bcachefs set-file-option [OPTIONS]... <files>\n"
+	     "Usage: bcachefs set-file-option [OPTION]... <files>\n"
 	     "\n"
 	     "Options:");
 
