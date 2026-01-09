@@ -54,7 +54,6 @@ bitflags! {
         const NOT_EXTENTS = c::btree_iter_update_trigger_flags::BTREE_ITER_not_extents.0;
         const CACHED = c::btree_iter_update_trigger_flags::BTREE_ITER_cached.0;
         const KEY_CACHED = c::btree_iter_update_trigger_flags::BTREE_ITER_with_key_cache.0;
-        const WITH_UPDATES = c::btree_iter_update_trigger_flags::BTREE_ITER_with_updates.0;
         const WITH_JOURNAL = c::btree_iter_update_trigger_flags::BTREE_ITER_with_journal.0;
         const SNAPSHOT_FIELD = c::btree_iter_update_trigger_flags::BTREE_ITER_snapshot_field.0;
         const ALL_SNAPSHOTS = c::btree_iter_update_trigger_flags::BTREE_ITER_all_snapshots.0;
