@@ -421,17 +421,12 @@ void bch2_promote_op_to_text(struct printbuf *out,
 void bch2_read_err_msg_trans(struct btree_trans *trans, struct printbuf *out,
 			     struct bch_read_bio *rbio, struct bpos read_pos)
 {
+	prt_str(out, "data read error at ");
 	bch2_inum_offset_err_msg_trans(trans, out, rbio->subvol, read_pos);
 
 	if (rbio->data_update)
-		prt_str(out, "(internal move) ");
-}
-
-static void bch2_read_err_msg(struct bch_fs *c, struct printbuf *out,
-			      struct bch_read_bio *rbio, struct bpos read_pos)
-{
-	CLASS(btree_trans, trans)(c);
-	bch2_read_err_msg_trans(trans, out, rbio, read_pos);
+		prt_str(out, " (internal move) ");
+	prt_str(out, ": ");
 }
 
 enum rbio_context {
@@ -700,7 +695,6 @@ static void bch2_rbio_retry(struct work_struct *work)
 
 			bch2_read_err_msg_trans(trans, &msg.m, rbio, read_pos);
 
-			prt_str(&msg.m, "data read error, ");
 			if (!ret) {
 				prt_str(&msg.m, "successful retry");
 				if (rbio->self_healing)
@@ -807,11 +801,17 @@ static noinline void bch2_rbio_narrow_crcs(struct bch_read_bio *rbio)
 		}));
 }
 
-/* Inner part that may run in process context */
-static void __bch2_read_endio(struct work_struct *work)
+static int bch2_rbio_decrypt(struct bch_fs *c, struct bch_read_bio *rbio,
+			     struct bch_extent_crc_unpacked crc, struct nonce nonce)
 {
-	struct bch_read_bio *rbio =
-		container_of(work, struct bch_read_bio, work);
+	return bch2_encrypt_bio(c, crc.csum_type, nonce, &rbio->bio)
+		? bch_err_throw(c, data_read_decrypt_err)
+		: 0;
+}
+
+/* Inner part that may run in process context */
+static int __bch2_read_endio_work(struct bch_read_bio *rbio)
+{
 	struct bch_fs *c	= rbio->c;
 	struct bch_dev *ca = rbio->have_ioref ? bch2_dev_have_ref(c, rbio->pick.ptr.dev) : NULL;
 	struct bch_read_bio *parent	= bch2_rbio_parent(rbio);
@@ -848,16 +848,13 @@ static void __bch2_read_endio(struct work_struct *work)
 	 */
 	if (!csum_good && !rbio->bounce && (rbio->flags & BCH_READ_user_mapped)) {
 		rbio->flags |= BCH_READ_must_bounce;
-		bch2_rbio_error(rbio, bch_err_throw(c, data_read_retry_csum_err_maybe_userspace));
-		return;
+		return bch_err_throw(c, data_read_retry_csum_err_maybe_userspace);
 	}
 
 	bch2_account_io_completion(ca, BCH_MEMBER_ERROR_checksum, 0, csum_good);
 
-	if (!csum_good) {
-		bch2_rbio_error(rbio, bch_err_throw(c, data_read_retry_csum_err));
-		return;
-	}
+	if (!csum_good)
+		return bch_err_throw(c, data_read_retry_csum_err);
 
 	/*
 	 * XXX
@@ -869,8 +866,7 @@ static void __bch2_read_endio(struct work_struct *work)
 	if (unlikely(rbio->narrow_crcs))
 		bch2_rbio_narrow_crcs(rbio);
 
-	if (likely(!parent->data_update) ||
-	    parent->data_update_verify_decompress) {
+	if (likely(!parent->data_update)) {
 		/* Adjust crc to point to subset of data we want: */
 		crc.offset     += rbio->offset_into_extent;
 		crc.live_size	= bvec_iter_sectors(rbio->bvec_iter);
@@ -878,27 +874,12 @@ static void __bch2_read_endio(struct work_struct *work)
 		if (crc_is_compressed(crc)) {
 			BUG_ON(!rbio->bounce);
 
-			ret = bch2_encrypt_bio(c, crc.csum_type, nonce, src);
-			if (ret) {
-				bch2_rbio_error(rbio, bch_err_throw(c, data_read_decrypt_err));
-				return;
-			}
+			try(bch2_rbio_decrypt(c, rbio, crc, nonce));
 
-			if (bch2_bio_uncompress(c, src, dst, dst_iter, crc) &&
-			    !c->opts.no_data_io) {
-				bch2_rbio_error(rbio, bch_err_throw(c, data_read_decompress_err));
-				return;
-			}
-
-			if (unlikely(parent->data_update)) {
-				/* We decrypted to decompress; re-encrypt: */
-				ret = bch2_encrypt_bio(c, crc.csum_type, nonce, src);
-				if (ret) {
-					bch2_rbio_error(rbio, bch_err_throw(c, data_read_decrypt_err));
-					return;
-				}
-			}
-		} else if (likely(!parent->data_update)) {
+			ret = bch2_bio_uncompress(c, src, dst, dst_iter, crc);
+			if (ret && !c->opts.no_data_io)
+				return ret;
+		} else {
 			/* don't need to decrypt the entire bio: */
 			nonce = nonce_add(nonce, crc.offset << 9);
 			bio_advance(src, crc.offset << 9);
@@ -906,11 +887,7 @@ static void __bch2_read_endio(struct work_struct *work)
 			BUG_ON(src->bi_iter.bi_size < dst_iter.bi_size);
 			src->bi_iter.bi_size = dst_iter.bi_size;
 
-			ret = bch2_encrypt_bio(c, crc.csum_type, nonce, src);
-			if (ret) {
-				bch2_rbio_error(rbio, bch_err_throw(c, data_read_decrypt_err));
-				return;
-			}
+			try(bch2_rbio_decrypt(c, rbio, crc, nonce));
 
 			if (rbio->bounce) {
 				struct bvec_iter src_iter = src->bi_iter;
@@ -918,9 +895,28 @@ static void __bch2_read_endio(struct work_struct *work)
 				bio_copy_data_iter(dst, &dst_iter, src, &src_iter);
 			}
 		}
-	}
+	} else {
+		if (parent->data_update_verify_decompress &&
+		    crc_is_compressed(crc)) {
+			BUG_ON(!rbio->bounce);
 
-	if (unlikely(parent->data_update)) {
+			try(bch2_rbio_decrypt(c, rbio, crc, nonce));
+
+			/*
+			 * dst_iter doesn't make sense here, it refers to the
+			 * size of the compressed extent on disk (what the data
+			 * update path generally wants), and here we're just
+			 * verifying thath the data decompresses and throwing
+			 * away the result:
+			 */
+			ret = bch2_bio_uncompress(c, src, dst, (struct bvec_iter) {}, crc);
+			if (ret && !c->opts.no_data_io)
+				return ret;
+
+			/* We decrypted to decompress; re-encrypt: */
+			try(bch2_rbio_decrypt(c, rbio, crc, nonce));
+		}
+
 		if (rbio->split)
 			rbio->parent->pick = rbio->pick;
 
@@ -936,17 +932,24 @@ static void __bch2_read_endio(struct work_struct *work)
 		 * Re encrypt data we decrypted, so it's consistent with
 		 * rbio->crc:
 		 */
-		ret = bch2_encrypt_bio(c, crc.csum_type, nonce, src);
-		if (ret) {
-			bch2_rbio_error(rbio, bch_err_throw(c, data_read_decrypt_err));
-			return;
-		}
+		try(bch2_rbio_decrypt(c, rbio, crc, nonce));
 	}
 
 	if (likely(!(rbio->flags & BCH_READ_in_retry))) {
 		rbio = bch2_rbio_free(rbio);
 		bch2_rbio_done(rbio);
 	}
+
+	return 0;
+}
+
+static void bch2_read_endio_work(struct work_struct *work)
+{
+	struct bch_read_bio *rbio =
+		container_of(work, struct bch_read_bio, work);
+	int ret = __bch2_read_endio_work(rbio);
+	if (ret)
+		bch2_rbio_error(rbio, ret);
 }
 
 static void bch2_read_endio(struct bio *bio)
@@ -991,7 +994,7 @@ static void bch2_read_endio(struct bio *bio)
 	else if (rbio->pick.crc.csum_type)
 		context = RBIO_CONTEXT_HIGHPRI,	wq = system_highpri_wq;
 
-	bch2_rbio_punt(rbio, __bch2_read_endio, context, wq);
+	bch2_rbio_punt(rbio, bch2_read_endio_work, context, wq);
 }
 
 static noinline void read_from_stale_dirty_pointer(struct btree_trans *trans,
@@ -1646,7 +1649,11 @@ void bch2_read_bio_to_text(struct printbuf *out,
 			   struct bch_fs *c,
 			   struct bch_read_bio *rbio)
 {
-	bch2_read_err_msg(c, out, rbio, rbio->read_pos);
+	CLASS(btree_trans, trans)(c);
+	bch2_inum_offset_err_msg_trans(trans, out, rbio->subvol, rbio->read_pos);
+
+	if (rbio->data_update)
+		prt_str(out, " (internal move) ");
 	prt_newline(out);
 	__bch2_read_bio_to_text(out, rbio);
 }
