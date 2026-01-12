@@ -269,6 +269,7 @@
 	x(BCH_ERR_data_update_fail,	data_update_fail_in_flight)		\
 	x(BCH_ERR_data_update_fail,	data_update_fail_no_snapshot)		\
 	x(BCH_ERR_data_update_fail,	data_update_fail_no_rw_devs)		\
+	x(BCH_ERR_data_update_fail,	data_update_fail_need_copygc)		\
 	x(EINVAL,			device_state_not_allowed)		\
 	x(EINVAL,			member_info_missing)			\
 	x(EINVAL,			mismatched_block_size)			\
@@ -396,6 +397,7 @@
 	x(EIO,				no_encryption_key)			\
 	x(EIO,				insufficient_journal_devices)		\
 	x(EIO,				device_offline)				\
+	x(EIO,				stripe_create_device_offline)			\
 	x(EIO,				EIO_fault_injected)			\
 	x(EIO,				ec_block_read)				\
 	x(EIO,				ec_block_write)				\

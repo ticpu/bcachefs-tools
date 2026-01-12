@@ -640,7 +640,7 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 	try(__bch2_dev_set_state(c, ca, BCH_MEMBER_STATE_evacuating, flags, err));
 
 	ret = fast_device_removal
-		? bch2_dev_data_drop_by_backpointers(c, ca->dev_idx, flags, err)
+		? bch2_dev_data_drop_by_backpointers(c, ca, flags, err)
 		: (bch2_dev_data_drop(c, ca->dev_idx, flags, err) ?:
 		   bch2_dev_remove_stripes(c, ca->dev_idx, flags, err));
 	if (ret)
@@ -654,11 +654,14 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 		if (!data_type_is_empty(i) &&
 		    !data_type_is_hidden(i) &&
 		    usage.buckets[i]) {
-			prt_printf(err, "Remove failed: still has data (%s, %llu buckets)\n",
-				   __bch2_data_types[i], usage.buckets[i]);
-			ret = -EBUSY;
-			goto err;
+			if (!ret) {
+				prt_printf(err, "Remove failed: still has data\n");
+				ret = -EBUSY;
+			}
+			prt_printf(err, "  %s: %llu buckets\n", __bch2_data_types[i], usage.buckets[i]);
 		}
+	if (ret)
+		goto err;
 
 	ret = bch2_dev_remove_alloc(c, ca);
 	if (ret) {

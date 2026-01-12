@@ -14,6 +14,7 @@
 #include "btree/write_buffer.h"
 
 #include "data/compress.h"
+#include "data/copygc.h"
 #include "data/ec.h"
 #include "data/move.h"
 #include "data/reconcile.h"
@@ -1381,7 +1382,7 @@ static void bkey_reconcile_pending_mod(struct bch_fs *c, struct bkey_i *k, bool 
 }
 
 static int bch2_extent_reconcile_pending_mod(struct btree_trans *trans, struct btree_iter *iter,
-					     struct bkey_s_c k, bool set)
+					     unsigned level, struct bkey_s_c k, bool set)
 {
 	struct bch_fs *c = trans->c;
 
@@ -1393,14 +1394,14 @@ static int bch2_extent_reconcile_pending_mod(struct btree_trans *trans, struct b
 	struct bkey_i *n = errptr_try(bch2_trans_kmalloc(trans, bkey_bytes(k.k)));
 	bkey_reassemble(n, k);
 
-	if (!iter->min_depth) {
+	if (!level) {
 		bkey_reconcile_pending_mod(c, n, set);
 
 		return  bch2_trans_update(trans, iter, n, 0) ?:
 			bch2_trans_commit(trans, NULL, NULL,
 					  BCH_TRANS_COMMIT_no_enospc);
 	} else {
-		CLASS(btree_node_iter, iter2)(trans, iter->btree_id, k.k->p, 0, iter->min_depth - 1, 0);
+		CLASS(btree_node_iter, iter2)(trans, iter->btree_id, k.k->p, 0, level - 1, 0);
 		struct btree *b = errptr_try(bch2_btree_iter_peek_node(&iter2));
 
 		if (!bkey_and_val_eq(bkey_i_to_s_c(&b->key), bkey_i_to_s_c(n))) {
@@ -1448,7 +1449,9 @@ static int __do_reconcile_extent(struct moving_context *ctxt,
 				 struct bch_inode_opts *opts,
 				 struct data_update_opts *data_opts,
 				 struct bbpos work,
-				 struct btree_iter *iter, struct bkey_s_c k)
+				 struct btree_iter *iter,
+				 unsigned level,
+				 struct bkey_s_c k)
 {
 	if (!bkey_extent_is_direct_data(k.k))
 		return 0;
@@ -1460,7 +1463,7 @@ static int __do_reconcile_extent(struct moving_context *ctxt,
 	ctxt->stats = &c->reconcile.work_stats;
 
 	try(bch2_bkey_get_io_opts(trans, snapshot_io_opts, k, opts));
-	try(bch2_update_reconcile_opts(trans, snapshot_io_opts, opts, iter, iter->min_depth, k,
+	try(bch2_update_reconcile_opts(trans, snapshot_io_opts, opts, iter, level, k,
 				       SET_NEEDS_REBALANCE_other));
 
 	CLASS(disk_reservation, res)(c);
@@ -1487,16 +1490,17 @@ static int __do_reconcile_extent(struct moving_context *ctxt,
 			 * Just take it off the pending list for now, and we'll
 			 * pick it up when we scan reconcile_work_phys:
 			 */
-			return bch2_extent_reconcile_pending_mod(trans, iter, k, false);
+			return bch2_extent_reconcile_pending_mod(trans, iter, level, k, false);
 		}
 	}
 
-	ret = bch2_move_extent(ctxt, NULL, opts, data_opts,
-			       iter, iter->min_depth, k);
+	ret = bch2_move_extent(ctxt, NULL, opts, data_opts, iter, level, k);
+	BUG_ON(ret > 0);
 	ret = check_reconcile_pending_err(trans, opts, data_opts, k, ret);
 	if (ret > 0)
-		return bch2_extent_reconcile_pending_mod(trans, iter, k, true);
-	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
+		return bch2_extent_reconcile_pending_mod(trans, iter, level, k, true);
+	if (bch2_err_matches(ret, BCH_ERR_transaction_restart) ||
+	    bch2_err_matches(ret, BCH_ERR_data_update_fail_need_copygc))
 		return ret;
 	if (ret) {
 		WARN_ONCE(ret != -BCH_ERR_data_update_fail_no_snapshot &&
@@ -1528,7 +1532,7 @@ static int do_reconcile_extent(struct moving_context *ctxt,
 
 	struct bch_inode_opts opts;
 	struct data_update_opts data_opts = {};
-	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts, work, &iter, k));
+	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts, work, &iter, 0, k));
 
 	event_add_trace(c, reconcile_data, k.k->size, buf, ({
 		prt_newline(&buf);
@@ -1553,8 +1557,8 @@ static int do_reconcile_extent_phys(struct moving_context *ctxt,
 		return 0;
 
 	CLASS(btree_iter_uninit, iter)(trans);
-	struct bkey_s_c k = bkey_try(bch2_backpointer_get_key(trans, bkey_s_c_to_backpointer(bp_k),
-							      &iter, 0, last_flushed));
+	struct bkey_s_c_backpointer bp = bkey_s_c_to_backpointer(bp_k);
+	struct bkey_s_c k = bkey_try(bch2_backpointer_get_key(trans, bp, &iter, 0, last_flushed));
 	if (!k.k)
 		return 0;
 
@@ -1563,7 +1567,7 @@ static int do_reconcile_extent_phys(struct moving_context *ctxt,
 		.read_dev	= work.pos.inode,
 		.read_flags	= BCH_READ_soft_require_read_device,
 	};
-	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts, work, &iter, k));
+	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts, work, &iter, bp.v->level, k));
 
 	event_add_trace(c, reconcile_phys, k.k->size, buf, ({
 		prt_newline(&buf);
@@ -1593,7 +1597,7 @@ static int do_reconcile_btree(struct moving_context *ctxt,
 
 	struct bch_inode_opts opts;
 	struct data_update_opts data_opts = {};
-	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts, work, &iter, k));
+	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts, work, &iter, bp.v->level, k));
 
 	event_add_trace(c, reconcile_btree, btree_sectors(c), buf, ({
 		prt_newline(&buf);
@@ -1712,42 +1716,11 @@ static int do_reconcile_scan_btree(struct moving_context *ctxt,
 	struct bch_fs *c = trans->c;
 	struct bch_fs_reconcile *r = &c->reconcile;
 
-	/*
-	 * peek(), peek_slot() don't know how to fetch btree root keys - we
-	 * really should fix this
-	 */
-	while (level == bch2_btree_id_root(c, btree)->level + 1) {
-		bch2_trans_begin(trans);
-
-		CLASS(btree_node_iter, iter)(trans, btree, start, 0, level - 1,
-					     BTREE_ITER_prefetch|
-					     BTREE_ITER_not_extents|
-					     BTREE_ITER_all_snapshots);
-		struct btree *b = bch2_btree_iter_peek_node(&iter);
-		int ret = PTR_ERR_OR_ZERO(b);
-		if (ret)
-			goto root_err;
-
-		if (b != btree_node_root(c, b))
-			continue;
-
-		if (btree_node_fake(b))
-			return 0;
-
-		struct bkey_s_c k = bkey_i_to_s_c(&b->key);
-
+	try(for_btree_root_key_at_level(trans, iter, btree, level, k, ({
 		struct bch_inode_opts opts;
-		ret =   bch2_bkey_get_io_opts(trans, snapshot_io_opts, k, &opts) ?:
-			update_reconcile_opts_scan(trans, snapshot_io_opts, &opts, &iter, level, k, s);
-root_err:
-		if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
-			continue;
-		if (bch2_err_matches(ret, BCH_ERR_data_update_fail))
-			ret = 0; /* failure for this extent, keep going */
-		WARN_ONCE(ret && !bch2_err_matches(ret, EROFS),
-			  "unhandled error from move_extent: %s", bch2_err_str(ret));
-		return ret;
-	}
+		bch2_bkey_get_io_opts(trans, snapshot_io_opts, k, &opts) ?:
+		update_reconcile_opts_scan(trans, snapshot_io_opts, &opts, &iter, level, k, s);
+	})));
 
 	bch2_trans_begin(trans);
 	CLASS(btree_node_iter, iter)(trans, btree, start, 0, level,
@@ -1960,6 +1933,7 @@ static int do_reconcile(struct moving_context *ctxt)
 	struct bch_fs_reconcile *r = &c->reconcile;
 	u64 sectors_scanned = 0;
 	u32 kick = r->kick;
+	u32 copygc_run_count = c->copygc.run_count;
 	int ret = 0;
 
 	CLASS(darray_reconcile_work, work)();
@@ -2057,6 +2031,16 @@ static int do_reconcile(struct moving_context *ctxt)
 		} else {
 			ret = lockrestart_do(trans,
 				do_reconcile_extent(ctxt, &snapshot_io_opts, r->work_pos));
+		}
+
+		if (bch2_err_matches(ret, BCH_ERR_data_update_fail_need_copygc)) {
+			bch2_trans_unlock_long(trans);
+			bch2_copygc_wakeup(c);
+			wait_event(c->copygc.running_wq,
+				   c->copygc.run_count != copygc_run_count ||
+				   kthread_should_stop());
+			ret = 0;
+			continue;
 		}
 
 		if (bch2_err_matches(ret, BCH_ERR_transaction_restart)) {
@@ -2534,22 +2518,25 @@ static int check_reconcile_work_phys(struct btree_trans *trans)
 }
 
 static int btree_node_update_key_get_node(struct btree_trans *trans, struct btree_iter *iter,
-					  struct bkey_i *new_key)
+					  unsigned level, struct bkey_i *new_key)
 {
-	CLASS(btree_node_iter, iter2)(trans, iter->btree_id, iter->pos, 0, iter->min_depth - 1, 0);
+	BUG_ON(!bkey_is_btree_ptr(&new_key->k));
+
+	CLASS(btree_node_iter, iter2)(trans, iter->btree_id, iter->pos, 0, level - 1, 0);
 	struct btree *b = errptr_try(bch2_btree_iter_peek_node(&iter2));
 
 	return bch2_btree_node_update_key(trans, &iter2, b, new_key, BCH_TRANS_COMMIT_no_enospc, false);
 }
 
 static int check_reconcile_work_btree_key(struct btree_trans *trans,
-					  struct btree_iter *iter, struct bkey_s_c k)
+					  struct btree_iter *iter,
+					  unsigned level, struct bkey_s_c k)
 {
 	struct bch_fs *c = trans->c;
 
 	struct bch_inode_opts opts;
 	try(bch2_bkey_get_io_opts(trans, NULL, k, &opts));
-	try(bch2_update_reconcile_opts(trans, NULL, &opts, iter, iter->min_depth, k,
+	try(bch2_update_reconcile_opts(trans, NULL, &opts, iter, level, k,
 				       SET_NEEDS_REBALANCE_other));
 
 	struct bpos bp_pos = bch2_bkey_get_reconcile_bp_pos(c, k);
@@ -2564,10 +2551,9 @@ static int check_reconcile_work_btree_key(struct btree_trans *trans,
 
 		bkey_reassemble(n, k);
 
-		try(reconcile_bp_add(trans, iter->btree_id, iter->min_depth,
-				     bkey_i_to_s(n), &bp_pos));
+		try(reconcile_bp_add(trans, iter->btree_id, level, bkey_i_to_s(n), &bp_pos));
 		bch2_bkey_set_reconcile_bp(c, bkey_i_to_s(n), bp_pos.offset);
-		return btree_node_update_key_get_node(trans, iter, n);;
+		return btree_node_update_key_get_node(trans, iter, level, n);
 	}
 
 	if (ret_fsck_err_on(!bp_pos.inode && bp_pos.offset,
@@ -2579,14 +2565,14 @@ static int check_reconcile_work_btree_key(struct btree_trans *trans,
 		bkey_reassemble(n, k);
 		bch2_bkey_set_reconcile_bp(c, bkey_i_to_s(n), 0);
 
-		return btree_node_update_key_get_node(trans, iter, n);;
+		return btree_node_update_key_get_node(trans, iter, level, n);
 	}
 
 	if (!bpos_eq(bp_pos, POS_MIN)) {
 		CLASS(btree_iter, rb_iter)(trans, BTREE_ID_reconcile_scan, bp_pos, BTREE_ITER_intent);
 		struct bkey_s_c bp_k = bkey_try(bch2_btree_iter_peek_slot(&rb_iter));
 
-		struct bch_backpointer bp = rb_bp(iter->btree_id, iter->min_depth, k);
+		struct bch_backpointer bp = rb_bp(iter->btree_id, level, k);
 
 		if (bp_k.k->type != KEY_TYPE_backpointer || memcmp(bp_k.v, &bp, sizeof(bp))) {
 			CLASS(printbuf, buf)();
@@ -2608,9 +2594,11 @@ static int check_reconcile_work_btree_key(struct btree_trans *trans,
 				new_bp->v = bp;
 
 				struct bkey_i *n = errptr_try(bch2_trans_kmalloc(trans, bkey_bytes(k.k)));
+				bkey_reassemble(n, k);
+
 				bch2_bkey_set_reconcile_bp(c, bkey_i_to_s(n), rb_iter.pos.offset);
 
-				return btree_node_update_key_get_node(trans, iter, n);;
+				return btree_node_update_key_get_node(trans, iter, level, n);
 			}
 		}
 	}
@@ -2632,6 +2620,13 @@ static int check_reconcile_work_btrees(struct btree_trans *trans)
 			continue;
 
 		for (unsigned level = 1; level < BTREE_MAX_DEPTH; level++) {
+			try(for_btree_root_key_at_level(trans, iter, btree, level, k, ({
+				BUG_ON(!bkey_is_btree_ptr(k.k));
+				check_reconcile_work_btree_key(trans, &iter, level, k) ?:
+				bch2_trans_commit(trans, &res.r, NULL, BCH_TRANS_COMMIT_no_enospc);
+			})));
+
+			bch2_trans_begin(trans);
 			CLASS(btree_node_iter, iter)(trans, btree, POS_MIN, 0, level,
 						     BTREE_ITER_prefetch|
 						     BTREE_ITER_not_extents|
@@ -2640,7 +2635,7 @@ static int check_reconcile_work_btrees(struct btree_trans *trans)
 			try(for_each_btree_key_continue(trans, iter, 0, k, ({
 				bch2_disk_reservation_put(c, &res.r);
 				bch2_progress_update_iter(trans, &progress, &iter) ?:
-				check_reconcile_work_btree_key(trans, &iter, k) ?:
+				check_reconcile_work_btree_key(trans, &iter, level, k) ?:
 				bch2_trans_commit(trans, &res.r, NULL, BCH_TRANS_COMMIT_no_enospc);
 			})));
 		}
