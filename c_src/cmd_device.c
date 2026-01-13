@@ -205,7 +205,7 @@ static int cmd_device_remove(int argc, char *argv[])
 
 static void device_online_usage(void)
 {
-	puts("bcachefs device online - read a device to a running filesystem\n"
+	puts("bcachefs device online - re-add a device to a running filesystem\n"
 	     "Usage: bcachefs device online [OPTION]... <device>\n"
 	     "\n"
 	     "Options:\n"
