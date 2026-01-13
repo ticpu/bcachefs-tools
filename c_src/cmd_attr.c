@@ -26,6 +26,11 @@ static void propagate_recurse(int dirfd)
 		    !strcmp(d->d_name, ".."))
 			continue;
 
+		struct stat st = xfstatat(dirfd, d->d_name,
+					  AT_SYMLINK_NOFOLLOW);
+		if (S_ISLNK(st.st_mode))
+			continue;
+
 		int ret = ioctl(dirfd, BCHFS_IOC_REINHERIT_ATTRS,
 			    d->d_name);
 		if (ret < 0) {
@@ -36,9 +41,6 @@ static void propagate_recurse(int dirfd)
 
 		if (!ret) /* did no work */
 			continue;
-
-		struct stat st = xfstatat(dirfd, d->d_name,
-					  AT_SYMLINK_NOFOLLOW);
 		if (!S_ISDIR(st.st_mode))
 			continue;
 
