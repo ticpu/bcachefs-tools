@@ -1,8 +1,10 @@
 #ifndef _TOOLS_LINUX_BITOPS_H_
 #define _TOOLS_LINUX_BITOPS_H_
 
+#include <stdbool.h>
 #include <asm/types.h>
 #include <linux/compiler.h>
+#include <linux/kernel.h>
 #include <linux/page.h>
 
 #ifndef __WORDSIZE
