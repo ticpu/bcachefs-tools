@@ -93,7 +93,6 @@ int bch2_extent_fallocate(struct btree_trans *trans,
 				&devs_have,
 				opts.data_replicas,
 				opts.data_replicas,
-				opts.data_replicas,
 				BCH_WATERMARK_normal, 0, &cl, &wp);
 		if (bch2_err_matches(ret, BCH_ERR_operation_blocked))
 			ret = bch_err_throw(c, transaction_restart_nested);
@@ -247,7 +246,8 @@ static int truncate_set_isize(struct btree_trans *trans,
 	CLASS(btree_iter_uninit, iter)(trans);
 	struct bch_inode_unpacked inode_u;
 
-	return __bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent, warn) ?:
+	return __bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent,
+				 warn ? __func__ : NULL) ?:
 		(inode_u.bi_size = new_i_size, 0) ?:
 		bch2_inode_write(trans, &iter, &inode_u);
 }
@@ -331,7 +331,8 @@ static int adjust_i_size(struct btree_trans *trans, subvol_inum inum,
 	CLASS(btree_iter_uninit, iter)(trans);
 	struct bch_inode_unpacked inode_u;
 
-	try(__bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent, warn));
+	try(__bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent,
+			      warn ? __func__ : NULL));
 
 	if (len > 0) {
 		if (MAX_LFS_FILESIZE - inode_u.bi_size < len)

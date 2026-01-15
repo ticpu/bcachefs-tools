@@ -275,7 +275,7 @@ void bch2_ec_stripe_head_put(struct bch_fs *, struct ec_stripe_head *);
 
 struct alloc_request;
 struct ec_stripe_head *bch2_ec_stripe_head_get(struct btree_trans *,
-			struct alloc_request *, unsigned, struct closure *);
+			struct alloc_request *, unsigned);
 
 void bch2_do_stripe_deletes(struct bch_fs *);
 void bch2_ec_do_stripe_creates(struct bch_fs *);
@@ -321,6 +321,8 @@ void bch2_new_stripes_to_text(struct printbuf *, struct bch_fs *);
 void bch2_fs_ec_exit(struct bch_fs *);
 void bch2_fs_ec_init_early(struct bch_fs *);
 int bch2_fs_ec_init(struct bch_fs *);
+
+int bch2_bucket_nr_stripes(struct btree_trans *, struct bpos);
 
 int bch2_check_stripe_refs(struct btree_trans *);
 
