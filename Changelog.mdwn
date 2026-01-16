@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.35.1 - Fri Jan 16 2026
+
+- Self healing for the new stripe refcount field in `bch_alloc_v4`
+
+  This fixes issues upgrading to 1.35 with (still experimental) erasure coding
+  feature.
+
+- Major allocator refactoring, simplifying the central control flow. Prep work
+  for failure domains.
+
+- Erasure coding can now delete stripes from triggers; this gives better
+  behaviour when data being deleted with no other activity to cause stripes to
+  be deleted.
+
+- Fix a deadlock in device add when allocating journal on the new device; this
+  fixes a regression from the watermark cleanup.
+
+- Fedora builds are working again
+
 ## v1.35.0 - Mon Jan 12 2026
 
 bcachefs_metadata_version_bucket_stripe_index
@@ -42,7 +61,7 @@ bcachefs_metadata_version_bucket_stripe_index
 
 Along with numerous other bugfixes.
 
-## v1.34.0 - Sat Dec 27
+## v1.34.0 - Sat Dec 27 2025
 
 bcachefs_metadata_version_extended_key_type_error
 
