@@ -114,8 +114,8 @@ static void sched_init(void)
 
 	current = p;
 
-	rcu_init();
-	rcu_register_thread();
+	//rcu_init();
+	//rcu_register_thread();
 }
 
 #ifndef SYS_getrandom

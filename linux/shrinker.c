@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#include <linux/blkdev.h>
 #include <linux/kthread.h>
 #include <linux/list.h>
 #include <linux/mm.h>
@@ -123,6 +124,11 @@ unsigned long _totalram_pages;
 
 void linux_shrinkers_init(void)
 {
+	rcu_init();
+	rcu_register_thread();
+
+	blkdev_init();
+
 	struct sysinfo info;
 	si_meminfo(&info);
 	_totalram_pages = info.totalram >> PAGE_SHIFT;
