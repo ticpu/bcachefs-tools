@@ -180,52 +180,42 @@ static void bcachefs_fuse_setattr(fuse_req_t req, fuse_ino_t ino,
 				  struct fuse_file_info *fi)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
-	struct bch_inode_unpacked inode_u;
-	struct btree_trans *trans;
-	struct btree_iter iter;
-	u64 now;
-	int ret;
 
 	subvol_inum inum = map_root_ino(ino);
+	struct bch_inode_unpacked inode_u;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_setattr(%llu, %x)\n", inum.inum, to_set);
 
-	trans = bch2_trans_get(c);
-retry:
-	bch2_trans_begin(trans);
-	now = bch2_current_time(c);
+	CLASS(btree_trans, trans)(c);
+	int ret = commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+		u64 now = bch2_current_time(c);
 
-	ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
-	if (ret)
-		goto err;
+		CLASS(btree_iter_uninit, iter)(trans);
+		ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
+		if (ret)
+			goto err;
 
-	if (to_set & FUSE_SET_ATTR_MODE)
-		inode_u.bi_mode	= attr->st_mode;
-	if (to_set & FUSE_SET_ATTR_UID)
-		inode_u.bi_uid	= attr->st_uid;
-	if (to_set & FUSE_SET_ATTR_GID)
-		inode_u.bi_gid	= attr->st_gid;
-	if (to_set & FUSE_SET_ATTR_SIZE)
-		inode_u.bi_size	= attr->st_size;
-	if (to_set & FUSE_SET_ATTR_ATIME)
-		inode_u.bi_atime = timespec_to_bch2_time(c, attr->st_atim);
-	if (to_set & FUSE_SET_ATTR_MTIME)
-		inode_u.bi_mtime = timespec_to_bch2_time(c, attr->st_mtim);
-	if (to_set & FUSE_SET_ATTR_ATIME_NOW)
-		inode_u.bi_atime = now;
-	if (to_set & FUSE_SET_ATTR_MTIME_NOW)
-		inode_u.bi_mtime = now;
-	/* TODO: CTIME? */
-
-	ret   = bch2_inode_write(trans, &iter, &inode_u) ?:
-		bch2_trans_commit(trans, NULL, NULL,
-				  BCH_TRANS_COMMIT_no_enospc);
+		if (to_set & FUSE_SET_ATTR_MODE)
+			inode_u.bi_mode	= attr->st_mode;
+		if (to_set & FUSE_SET_ATTR_UID)
+			inode_u.bi_uid	= attr->st_uid;
+		if (to_set & FUSE_SET_ATTR_GID)
+			inode_u.bi_gid	= attr->st_gid;
+		if (to_set & FUSE_SET_ATTR_SIZE)
+			inode_u.bi_size	= attr->st_size;
+		if (to_set & FUSE_SET_ATTR_ATIME)
+			inode_u.bi_atime = timespec_to_bch2_time(c, attr->st_atim);
+		if (to_set & FUSE_SET_ATTR_MTIME)
+			inode_u.bi_mtime = timespec_to_bch2_time(c, attr->st_mtim);
+		if (to_set & FUSE_SET_ATTR_ATIME_NOW)
+			inode_u.bi_atime = now;
+		if (to_set & FUSE_SET_ATTR_MTIME_NOW)
+			inode_u.bi_mtime = now;
+		/* TODO: CTIME? */
 err:
-        bch2_trans_iter_exit(&iter);
-	if (ret == -EINTR)
-		goto retry;
-
-	bch2_trans_put(trans);
+		ret ?:
+		bch2_inode_write(trans, &iter, &inode_u);
+	}));
 
 	if (!ret) {
 		*attr = inode_to_stat(c, &inode_u);
@@ -534,37 +524,23 @@ static void bcachefs_fuse_read(fuse_req_t req, fuse_ino_t ino,
 
 static int inode_update_times(struct bch_fs *c, subvol_inum inum)
 {
-	struct btree_trans *trans;
-	struct btree_iter iter;
-	struct bch_inode_unpacked inode_u;
-	int ret = 0;
-	u64 now;
+	CLASS(btree_trans, trans)(c);
+	return commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+		u64 now = bch2_current_time(c);
 
-	trans = bch2_trans_get(c);
-retry:
-	bch2_trans_begin(trans);
-	now = bch2_current_time(c);
+		CLASS(btree_iter_uninit, iter)(trans);
+		struct bch_inode_unpacked inode_u;
+		int ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
+		if (ret)
+			goto err;
 
-	ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
-	if (ret)
-		goto err;
-
-	inode_u.bi_mtime = now;
-	inode_u.bi_ctime = now;
-
-	ret = bch2_inode_write(trans, &iter, &inode_u);
-	if (ret)
-		goto err;
-
-	ret = bch2_trans_commit(trans, NULL, NULL,
-				BCH_TRANS_COMMIT_no_enospc);
+		inode_u.bi_mtime = now;
+		inode_u.bi_ctime = now;
 err:
-        bch2_trans_iter_exit(&iter);
-	if (ret == -EINTR)
-		goto retry;
+		ret ?:
+		bch2_inode_write(trans, &iter, &inode_u);
+	}));
 
-	bch2_trans_put(trans);
-	return ret;
 }
 
 static int write_aligned(struct bch_fs *c, subvol_inum inum,
