@@ -260,6 +260,10 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	sb.sb->nr_devices	= devs.nr;
 	SET_BCH_SB_VERSION_INCOMPAT_ALLOWED(sb.sb, opts.version);
 
+	/* These are no longer options, only provided for compatibility with old verions */
+	SET_BCH_SB_META_REPLICAS_REQ(sb.sb, 1);
+	SET_BCH_SB_DATA_REPLICAS_REQ(sb.sb, 1);
+
 	if (opts.version > bcachefs_metadata_version_disk_accounting_big_endian)
 		sb.sb->features[0] |= cpu_to_le64(BCH_SB_FEATURES_ALL);
 
