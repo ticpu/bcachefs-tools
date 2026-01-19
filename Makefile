@@ -247,6 +247,7 @@ update-bcachefs-sources:
 	cp -r $(LINUX_DIR)/fs/bcachefs/* libbcachefs/
 	git add libbcachefs/*.[ch]
 	git add libbcachefs/*/*.[ch]
+	git add libbcachefs/*/*/*.[ch]
 	git add libbcachefs/Makefile
 	git add libbcachefs/Kconfig
 	git rm -f libbcachefs/util/mean_and_variance_test.c

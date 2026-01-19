@@ -14,13 +14,13 @@
 #include "btree/interior.h"
 #include "btree/write_buffer.h"
 
-#include "data/ec.h"
+#include "data/ec/init.h"
 #include "data/extents.h"
 #include "data/write.h"
 #include "data/keylist.h"
 #include "data/migrate.h"
 #include "data/move.h"
-#include "data/reconcile.h"
+#include "data/reconcile/trigger.h"
 
 #include "journal/journal.h"
 

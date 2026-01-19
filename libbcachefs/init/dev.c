@@ -10,9 +10,9 @@
 
 #include "btree/interior.h"
 
-#include "data/ec.h"
+#include "data/ec/init.h"
 #include "data/migrate.h"
-#include "data/reconcile.h"
+#include "data/reconcile/work.h"
 
 #include "debug/sysfs.h"
 

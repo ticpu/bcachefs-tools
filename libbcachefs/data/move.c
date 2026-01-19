@@ -16,11 +16,10 @@
 #include "btree/write_buffer.h"
 
 #include "data/compress.h"
-#include "data/ec.h"
 #include "data/keylist.h"
 #include "data/move.h"
 #include "data/read.h"
-#include "data/reconcile.h"
+#include "data/reconcile/trigger.h"
 #include "data/reflink.h"
 #include "data/write.h"
 

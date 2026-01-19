@@ -12,8 +12,9 @@
 #include "btree/node_scan.h"
 
 #include "data/copygc.h"
-#include "data/ec.h"
-#include "data/reconcile.h"
+#include "data/ec/init.h"
+#include "data/reconcile/check.h"
+#include "data/reconcile/work.h"
 
 #include "fs/check.h"
 #include "fs/inode.h"

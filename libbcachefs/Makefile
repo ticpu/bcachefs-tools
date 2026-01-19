@@ -39,7 +39,10 @@ bcachefs-y		:=			\
 	data/checksum.o				\
 	data/compress.o				\
 	data/copygc.o				\
-	data/ec.o				\
+	data/ec/create.o			\
+	data/ec/init.o				\
+	data/ec/io.o				\
+	data/ec/trigger.o			\
 	data/extents.o				\
 	data/extents_sb.o			\
 	data/extent_update.o			\
@@ -49,7 +52,9 @@ bcachefs-y		:=			\
 	data/move.o				\
 	data/nocow_locking.o			\
 	data/read.o				\
-	data/reconcile.o			\
+	data/reconcile/check.o			\
+	data/reconcile/trigger.o		\
+	data/reconcile/work.o			\
 	data/reflink.o				\
 	data/update.o				\
 	data/write.o				\
