@@ -257,9 +257,12 @@ static int extent_ec_pending(struct btree_trans *trans, struct bkey_ptrs_c ptrs)
 	return false;
 }
 
+static int bch2_extent_reconcile_pending_mod(struct btree_trans *, struct btree_iter *,
+					     unsigned, struct bkey_s_c, bool);
+
 static int reconcile_set_data_opts(struct btree_trans *trans,
-				   void *arg,
-				   enum btree_id btree,
+				   struct btree_iter *iter,
+				   unsigned level,
 				   struct bkey_s_c k,
 				   struct bch_inode_opts *opts,
 				   struct data_update_opts *data_opts)
@@ -287,13 +290,12 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 	unsigned compression_type = bch2_compression_opt_to_type(r->background_compression);
 
 	if (r->need_rb & BIT(BCH_REBALANCE_data_replicas)) {
-		int durability = bch2_bkey_durability(trans, k);
-		if (durability < 0)
-			return durability;
+		struct bkey_durability durability;
+		try(bch2_bkey_durability(trans, k, &durability));
 
 		unsigned ptr_bit = 1;
 
-		if (durability <= r->data_replicas) {
+		if (durability.total <= r->data_replicas) {
 			guard(rcu)();
 
 			bkey_for_each_ptr(ptrs, ptr) {
@@ -302,6 +304,44 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 				ptr_bit <<= 1;
 			}
 		} else {
+			if (durability.total != durability.online) {
+				/* Try dropping offline devices first */
+				bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
+					if (p.ptr.dev == BCH_SB_MEMBER_INVALID ||
+					    !test_bit(p.ptr.dev, c->devs_online.d)) {
+						int d = bch2_extent_ptr_durability(trans, &p);
+						if (d < 0)
+							return d;
+
+						if (bch2_dev_bad_or_evacuating(c, p.ptr.dev) ||
+						    (!p.ptr.cached &&
+						     d && durability.total - d >= r->data_replicas)) {
+							data_opts->ptrs_kill |= ptr_bit;
+							durability.total -= d;
+						}
+					}
+
+					ptr_bit <<= 1;
+				}
+
+				/* Stripe ec? */
+				ptr_bit = 1;
+				bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
+					if (p.ptr.dev == BCH_SB_MEMBER_INVALID ||
+					    !test_bit(p.ptr.dev, c->devs_online.d)) {
+						if (p.has_ec && durability.total - p.ec.redundancy >= r->data_replicas) {
+							data_opts->ptrs_kill_ec |= ptr_bit;
+							durability.total -= p.ec.redundancy;
+						}
+					}
+
+					ptr_bit <<= 1;
+				}
+			}
+
+			/* Don't let online durability go below data_replicas */
+
+			/* Drop entire pointers? */
 			bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
 				int d = bch2_extent_ptr_durability(trans, &p);
 				if (d < 0)
@@ -309,19 +349,20 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 
 				if (bch2_dev_bad_or_evacuating(c, p.ptr.dev) ||
 				    (!p.ptr.cached &&
-				     d && durability - d >= r->data_replicas)) {
+				     d && durability.online - d >= r->data_replicas)) {
 					data_opts->ptrs_kill |= ptr_bit;
-					durability -= d;
+					durability.online -= d;
 				}
 
 				ptr_bit <<= 1;
 			}
 
+			/* Stripe ec? */
 			ptr_bit = 1;
 			bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
-				if (p.has_ec && durability - p.ec.redundancy >= r->data_replicas) {
+				if (p.has_ec && durability.online - p.ec.redundancy >= r->data_replicas) {
 					data_opts->ptrs_kill_ec |= ptr_bit;
-					durability -= p.ec.redundancy;
+					durability.online -= p.ec.redundancy;
 				}
 
 				ptr_bit <<= 1;
@@ -375,9 +416,20 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 		    data_opts->ptrs_kill_ec ||
 		    data_opts->extra_replicas);
 	if (!ret) {
-		CLASS(bch_log_msg_ratelimited, msg)(c);
-		prt_printf(&msg.m, "got extent to reconcile but nothing to do, confused\n  ");
-		bch2_bkey_val_to_text(&msg.m, c, k);
+		if (r->need_rb == BIT(BCH_REBALANCE_data_replicas)) {
+			/*
+			 * We can end up here because you have all devices set
+			 * to durability=2 and replicas set to 1, 3 - we can't
+			 * exactly match the replicas setting - or because we
+			 * want to drop replicas and we can't without reducing
+			 * online durability
+			 */
+			return bch2_extent_reconcile_pending_mod(trans, iter, level, k, true);
+		} else {
+			CLASS(bch_log_msg_ratelimited, msg)(c);
+			prt_printf(&msg.m, "got extent to reconcile but nothing to do, confused\n  ");
+			bch2_bkey_val_to_text(&msg.m, c, k);
+		}
 	}
 
 	return ret;
@@ -480,7 +532,7 @@ static int __do_reconcile_extent(struct moving_context *ctxt,
 	CLASS(disk_reservation, res)(c);
 	try(bch2_trans_commit_lazy(trans, &res.r, NULL, BCH_TRANS_COMMIT_no_enospc));
 
-	int ret = reconcile_set_data_opts(trans, NULL, iter->btree_id, k, opts, data_opts);
+	int ret = reconcile_set_data_opts(trans, iter, level, k, opts, data_opts);
 	if (ret <= 0)
 		return ret;
 
@@ -938,6 +990,59 @@ static int do_reconcile_phys(struct bch_fs *c, enum btree_id btree)
 	return 0;
 }
 
+struct reconcile_scan_phase {
+	enum btree_id	btree;
+	struct bpos	start, end;
+};
+
+static const struct reconcile_scan_phase reconcile_phases[] = {
+	/* Scan cookies: */
+	{ BTREE_ID_reconcile_scan, POS_MIN, POS(0, U64_MAX), },
+
+	/* Hipri work first - evacuate/rereplicate */
+
+	/*
+	 * Btree nodes first - they're indexed separately from the normal work
+	 * btrees because they require backpointers:
+	 */
+	{ BTREE_ID_reconcile_scan, POS(RECONCILE_WORK_hipri, 0), POS(RECONCILE_WORK_hipri, U64_MAX) },
+
+	/*
+	 * User data:
+	 * Phys btrees first: pending work there will also be present in the normal work btrees
+	 * Then the logical btrees, this will be data on SSDS:
+	 * */
+	{ BTREE_ID_reconcile_hipri_phys,	POS_MIN, SPOS_MAX },
+	{ BTREE_ID_reconcile_hipri,		POS_MIN, SPOS_MAX },
+
+	/* Normal priority work: */
+	{ BTREE_ID_reconcile_scan, POS(RECONCILE_WORK_normal, 0), POS(RECONCILE_WORK_normal, U64_MAX) },
+	{ BTREE_ID_reconcile_work_phys,		POS_MIN, SPOS_MAX },
+	{ BTREE_ID_reconcile_work,		POS_MIN, SPOS_MAX },
+
+	/*
+	 * Lastly, work that we marked as unable to complete until system
+	 * configuration changes: this won't be process unless kicked by
+	 * something else
+	 */
+	{ BTREE_ID_reconcile_scan, POS(RECONCILE_WORK_pending, 0), POS(RECONCILE_WORK_pending, U64_MAX) },
+	{ BTREE_ID_reconcile_pending,		POS_MIN, SPOS_MAX },
+};
+
+static struct bbpos reconcile_phase_start(unsigned i)
+{
+	struct reconcile_scan_phase p = reconcile_phases[i];
+	return BBPOS(p.btree, p.start);
+}
+
+static bool reconcile_phase_is_pending(unsigned i)
+{
+	struct reconcile_scan_phase p = reconcile_phases[i];
+	return (p.btree == BTREE_ID_reconcile_scan &&
+		p.start.inode == RECONCILE_WORK_pending) ||
+		p.btree == BTREE_ID_reconcile_pending;
+}
+
 static int do_reconcile(struct moving_context *ctxt)
 {
 	struct btree_trans *trans = ctxt->trans;
@@ -955,17 +1060,9 @@ static int do_reconcile(struct moving_context *ctxt)
 
 	CLASS(per_snapshot_io_opts, snapshot_io_opts)(c);
 
-	static enum btree_id scan_btrees[] = {
-		BTREE_ID_reconcile_scan,
-		BTREE_ID_reconcile_hipri_phys,
-		BTREE_ID_reconcile_hipri,
-		BTREE_ID_reconcile_work_phys,
-		BTREE_ID_reconcile_work,
-		BTREE_ID_reconcile_pending,
-	};
 	unsigned i = 0;
 
-	r->work_pos = BBPOS(scan_btrees[i], POS_MIN);
+	r->work_pos = reconcile_phase_start(i);
 
 	struct bkey_i_cookie pending_cookie;
 	bkey_init(&pending_cookie.k);
@@ -988,7 +1085,8 @@ static int do_reconcile(struct moving_context *ctxt)
 		if (kick != r->kick) {
 			kick		= r->kick;
 			i		= 0;
-			r->work_pos	= BBPOS(scan_btrees[i], POS_MIN);
+			r->work_pos	= BBPOS(reconcile_phases[i].btree,
+						reconcile_phases[i].start);
 			work.nr		= 0;
 		}
 
@@ -1000,12 +1098,12 @@ static int do_reconcile(struct moving_context *ctxt)
 			break;
 
 		if (!k.k) {
-			if (++i == ARRAY_SIZE(scan_btrees))
+			if (++i == ARRAY_SIZE(reconcile_phases))
 				break;
 
-			r->work_pos = BBPOS(scan_btrees[i], POS_MIN);
+			r->work_pos = reconcile_phase_start(i);
 
-			if (r->work_pos.btree == BTREE_ID_reconcile_pending &&
+			if (reconcile_phase_is_pending(i) &&
 			    bkey_deleted(&pending_cookie.k))
 				break;
 
@@ -1028,18 +1126,12 @@ static int do_reconcile(struct moving_context *ctxt)
 						le64_to_cpu(bkey_s_c_to_cookie(k).v->cookie),
 						&sectors_scanned, &last_flushed);
 		} else if (k.k->type == KEY_TYPE_backpointer) {
-			if (k.k->p.inode == RECONCILE_WORK_pending &&
-			    bkey_deleted(&pending_cookie.k)) {
-				r->work_pos = BBPOS(scan_btrees[++i], POS_MIN);
-				continue;
-			}
-
 			ret = do_reconcile_btree(ctxt, &snapshot_io_opts,
 						 r->work_pos, bkey_s_c_to_backpointer(k));
 		} else if (btree_is_reconcile_phys(r->work_pos.btree)) {
 			bch2_trans_unlock_long(trans);
 			ret = do_reconcile_phys(c, r->work_pos.btree);
-			r->work_pos = BBPOS(scan_btrees[++i], POS_MIN);
+			r->work_pos = reconcile_phase_start(++i);
 		} else {
 			ret = lockrestart_do(trans,
 				do_reconcile_extent(ctxt, &snapshot_io_opts, r->work_pos));
