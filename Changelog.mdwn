@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.35.2 - Tue Jan 20 2026
+
+- Linux v6.19 is now supported
+
+- Reconcile now considers the amount of durability we have available among
+  online devices when dropping extra replicas (because the replicas setting was
+  changed), and won't let the online durability go below the replicas setting.
+
+- Fix a race in the nocow write path when checking if we need to fall back to a
+  normal COW write
+
+- Fix a livelock when walking btree roots in reconcile and elsewhere
+
+- Journal discards are now done asynchronously instead of being done by the
+  journal reclaim thread, and we try to keep more of the journal discarded to
+  avoid journal writes having to block and do discards synchronously
+
+- Fix several bugs with copygc <-> reconcile interaction, and copygc should no
+  longer spin when a device is completely full with no fragmented buckets for it
+  to evacuate.
+
+- Fix propagating the incompressible bit in the data update path: sometimes this
+  would be lost, leading to spurious "extent with bad/missing reconcile options"
+  errors.
+
 ## v1.35.1 - Fri Jan 16 2026
 
 - Self healing for the new stripe refcount field in `bch_alloc_v4`
