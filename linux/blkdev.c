@@ -33,13 +33,16 @@ struct fops {
 static void sync_check(struct bio *bio, int ret)
 {
 	if (ret != bio->bi_iter.bi_size) {
-		die("IO error: %s\n", strerror(-ret));
+		fprintf(stderr, "IO error: %s\n", strerror(-ret));
+		bio->bi_status = BLK_STS_IOERR;
 	}
 
 	if (bio->bi_opf & REQ_FUA) {
 		ret = fdatasync(bio->bi_bdev->bd_fd);
-		if (ret)
-			die("fsync error: %s\n", strerror(-ret));
+		if (ret) {
+			fprintf(stderr, "fsync error: %s\n", strerror(-ret));
+			bio->bi_status = BLK_STS_IOERR;
+		}
 	}
 	bio_endio(bio);
 }
