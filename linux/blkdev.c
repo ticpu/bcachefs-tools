@@ -190,7 +190,7 @@ unsigned bdev_logical_block_size(struct block_device *bdev)
 		return statbuf.st_blksize;
 
 	unsigned blksize;
-	xioctl(bdev->bd_fd, BLKPBSZGET, &blksize);
+	xioctl(bdev->bd_fd, BLKSSZGET, &blksize);
 	return blksize;
 }
 
