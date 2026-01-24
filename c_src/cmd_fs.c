@@ -672,7 +672,7 @@ static void fs_usage_usage(void)
 	     "Options:\n"
 	     "  -f, --fields=FIELDS          List of accounting sections to print:\n"
 	     "                                 replicas, btree, compression, rebalance_work, devices\n"
-	     "  -a                           Print all accounting fields\n"
+	     "  -a, --all                    Print all accounting fields\n"
 	     "  -h, --human-readable         Human readable units\n"
 	     "  -H, --help                   Display this help and exit\n"
 	     "\n"
