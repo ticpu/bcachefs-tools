@@ -703,6 +703,7 @@ int cmd_fs_usage(int argc, char *argv[])
 			break;
 		case 'a':
 			fields = ~0;
+			break;
 		case 'h':
 			human_readable = true;
 			break;
