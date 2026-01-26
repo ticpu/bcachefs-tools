@@ -69,16 +69,16 @@ void bch2_io_failures_to_text(struct printbuf *out,
 				prt_printf(out, "(invalid device %u)", f->dev);
 		}
 
-		if (!f->csum_nr && !f->ec && !f->errcode)
+		if (!f->csum_nr && !f->ec_errcode && !f->errcode)
 			prt_str(out, " no error - confused");
 
 		if (f->csum_nr)
 			prt_printf(out, " checksum (%u)", f->csum_nr);
-		if (f->ec)
-			prt_str(out, " ec reconstruct");
 		if (f->errcode)
 			prt_printf(out, " %s", bch2_err_str(f->errcode));
 		prt_newline(out);
+		if (f->ec_errcode)
+			prt_printf(out, "  ec reconstruct %s\n", bch2_err_str(f->ec_errcode));
 	}
 }
 
@@ -106,10 +106,13 @@ struct bch_dev_io_failures *bch2_dev_io_failures_mut(struct bch_io_failures *fai
 void bch2_mark_io_failure(struct bch_io_failures *failed,
 			  struct extent_ptr_decoded *p, int err)
 {
+	BUG_ON(!err);
+	BUG_ON(bch2_err_matches(err, BCH_ERR_transaction_restart));
+
 	struct bch_dev_io_failures *f = bch2_dev_io_failures_mut(failed, p->ptr.dev);
 
 	if (p->do_ec_reconstruct)
-		f->ec = true;
+		f->ec_errcode = err;
 	else if (err == -BCH_ERR_data_read_retry_csum_err)
 		f->csum_nr++;
 	else
@@ -235,11 +238,11 @@ int bch2_bkey_pick_read_device(struct bch_fs *c, struct bkey_s_c k,
 			unlikely(failed) ? bch2_dev_io_failures(failed, p.ptr.dev) : NULL;
 		if (unlikely(f)) {
 			p.crc_retry_nr	   = f->csum_nr;
-			p.has_ec	  &= !f->ec;
+			p.has_ec	  &= !f->ec_errcode;
 
 			if (ca) {
 				have_io_errors	|= f->errcode != 0;
-				have_io_errors	|= f->ec;
+				have_io_errors	|= f->ec_errcode;
 			}
 			have_csum_errors	|= f->csum_nr != 0;
 
@@ -1673,6 +1676,7 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 	unsigned nr_ptrs = 0;
 	bool have_written = false, have_unwritten = false, have_ec = false, crc_since_last_ptr = false;
 	bool have_non_inval_dev_ptrs = false;
+	bool have_non_inval_dev_ptrs_dirty = false;
 	int ret = 0;
 
 	if (bkey_is_btree_ptr(k.k))
@@ -1705,12 +1709,14 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 			else
 				have_unwritten = true;
 
+			if (entry->ptr.dev != BCH_SB_MEMBER_INVALID || have_ec) {
+				if (!entry->ptr.cached)
+					have_non_inval_dev_ptrs_dirty = true;
+				have_non_inval_dev_ptrs = true;
+			}
+
 			have_ec = false;
 			crc_since_last_ptr = false;
-
-			if (entry->ptr.dev != BCH_SB_MEMBER_INVALID)
-				have_non_inval_dev_ptrs = true;
-
 			nr_ptrs++;
 			break;
 		case BCH_EXTENT_ENTRY_crc32:
@@ -1758,7 +1764,6 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 					 c, ptr_stripe_redundant,
 					 "redundant stripe entry");
 			have_ec = true;
-			have_non_inval_dev_ptrs = true;
 			break;
 		case BCH_EXTENT_ENTRY_reconcile:
 			try(bch2_extent_reconcile_validate(c, k, from, &entry->reconcile));
@@ -1792,14 +1797,20 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 			 c, extent_ptrs_redundant_stripe,
 			 "redundant stripe entry");
 
-	/*
-	 * we don't use KEY_TYPE_error for dead btree nodes - we still want the
-	 * other fields in bch_btree_ptr_v2
-	 */
-	bkey_fsck_err_on(!bkey_is_btree_ptr(k.k) &&
-			 !have_non_inval_dev_ptrs && !have_ec,
-			 c, extent_ptrs_all_invalid,
-			 "extent ptrs all to BCH_SB_MEMBER_INVALID");
+	if (!bkey_is_btree_ptr(k.k)) {
+		/*
+		 * we don't use KEY_TYPE_error for dead btree nodes - we still want the
+		 * other fields in bch_btree_ptr_v2
+		 */
+		bkey_fsck_err_on(!have_non_inval_dev_ptrs,
+				 c, extent_ptrs_all_invalid,
+				 "extent ptrs all to BCH_SB_MEMBER_INVALID");
+
+		bkey_fsck_err_on(from.from == BKEY_VALIDATE_commit &&
+				 !have_non_inval_dev_ptrs_dirty,
+				 c, extent_ptrs_all_invalid,
+				 "extent ptrs all to BCH_SB_MEMBER_INVALID");
+	}
 fsck_err:
 	return ret;
 }

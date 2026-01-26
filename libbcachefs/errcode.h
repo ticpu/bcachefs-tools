@@ -324,6 +324,7 @@
 	x(EROFS,			erofs_filesystem_full)			\
 	x(EROFS,			insufficient_devices)			\
 	x(EROFS,			erofs_recovery_cancelled)		\
+	x(EROFS,			emergency_ro)				\
 	x(ESHUTDOWN,			btree_not_started)			\
 	x(0,				operation_blocked)			\
 	x(BCH_ERR_operation_blocked,	btree_cache_cannibalize_lock_blocked)	\
@@ -391,7 +392,12 @@
 	x(EIO,				trigger_stripe_pointer)			\
 	x(EIO,				metadata_bucket_inconsistency)		\
 	x(EIO,				mark_stripe)				\
-	x(EIO,				stripe_reconstruct)			\
+	x(EIO,				stripe_read)				\
+	x(BCH_ERR_stripe_read,		stripe_read_device_offline)		\
+	x(BCH_ERR_stripe_read,		stripe_read_ptr_stale)			\
+	x(BCH_ERR_stripe_read,		stripe_read_csum_err)			\
+	x(BCH_ERR_stripe_read,		stripe_reconstruct)			\
+	x(BCH_ERR_stripe_read,		stripe_reconstruct_insufficient_blocks)	\
 	x(EIO,				key_type_error)				\
 	x(EIO,				extent_poisoned)			\
 	x(EIO,				missing_indirect_extent)		\
@@ -399,7 +405,7 @@
 	x(EIO,				no_encryption_key)			\
 	x(EIO,				insufficient_journal_devices)		\
 	x(EIO,				device_offline)				\
-	x(EIO,				stripe_create_device_offline)			\
+	x(EIO,				stripe_create_device_offline)		\
 	x(EIO,				EIO_fault_injected)			\
 	x(EIO,				ec_block_read)				\
 	x(EIO,				ec_block_write)				\

@@ -495,13 +495,15 @@ static int bch2_bkey_needs_reconcile(struct btree_trans *trans, struct bkey_s_c 
 		    r.background_target &&
 		    !bch2_dev_in_target(c, p.ptr.dev, r.background_target)) {
 			r.need_rb |= BIT(BCH_REBALANCE_background_target);
-			r.ptrs_moving |= ptr_bit;
+			if (p.ptr.dev != BCH_SB_MEMBER_INVALID)
+				r.ptrs_moving |= ptr_bit;
 		}
 
 		if (evacuating) {
 			r.need_rb |= BIT(BCH_REBALANCE_data_replicas);
 			r.hipri = 1;
-			r.ptrs_moving |= ptr_bit;
+			if (p.ptr.dev != BCH_SB_MEMBER_INVALID)
+				r.ptrs_moving |= ptr_bit;
 		}
 
 		int d = bch2_extent_ptr_desired_durability(trans, &p);
@@ -679,7 +681,7 @@ static int new_needs_rb_allowed(struct btree_trans *trans,
 		if (!new_need_rb)
 			return 0;
 
-		if (opt_change_cookie != atomic_read(&c->opt_change_cookie))
+		if (opt_change_cookie != c->opt_change_cookie)
 			return 0;
 	}
 
@@ -896,7 +898,7 @@ int bch2_bkey_get_io_opts(struct btree_trans *trans,
 		 */
 
 		bool metadata = mode == IO_OPTS_metadata;
-		if (snapshot_opts->fs_io_opts.change_cookie	!= atomic_read(&c->opt_change_cookie) ||
+		if (snapshot_opts->fs_io_opts.change_cookie	!= c->opt_change_cookie ||
 		    snapshot_opts->metadata			!= metadata) {
 			bch2_inode_opts_get(c, &snapshot_opts->fs_io_opts, metadata);
 
