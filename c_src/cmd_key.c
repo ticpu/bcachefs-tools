@@ -98,7 +98,7 @@ int cmd_unlock(int argc, char *argv[])
 				passphrase = read_passphrase("incorrect passphrase\nEnter passphrase: ");
 				res = bch2_add_key(sb.sb, "user", keyring, passphrase);
 				i++;
-			};
+		};
 		if (res)
 			die("incorrect passphrase limit reached");
 	}
