@@ -407,7 +407,7 @@ static bool reconcile_status(struct printbuf *out,
 {
 	bool scan_pending = read_file_u64(fs.sysfs_fd, "reconcile_scan_pending");
 
-	u64 v[BCH_REBALANCE_ACCOUNTING_NR][2];
+	u64 v[BCH_RECONCILE_ACCOUNTING_NR][2];
 	memset(v, 0, sizeof(v));
 
 	struct bch_ioctl_query_accounting *a =
@@ -479,7 +479,7 @@ int cmd_reconcile_wait(int argc, char *argv[])
 		{ "help",		no_argument,		NULL, 'h' },
 		{ NULL }
 	};
-	unsigned types = ~0U & ~BIT(BCH_REBALANCE_ACCOUNTING_pending);
+	unsigned types = ~0U & ~BIT(BCH_RECONCILE_ACCOUNTING_pending);
 	int opt;
 
 	while ((opt = getopt_long(argc, argv, "t:h", longopts, NULL)) != -1)

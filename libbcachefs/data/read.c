@@ -1339,17 +1339,13 @@ int __bch2_read_extent(struct btree_trans *trans,
 
 	if (unlikely(ret < 0))
 		return read_extent_pick_err(trans, orig, read_pos, data_btree, k, flags, ret);
-	ret = 0;
 
 	if (bch2_csum_type_is_encryption(pick.crc.csum_type) &&
 	    unlikely(!c->chacha20_key_set))
 		return read_extent_no_encryption_key(trans, orig, read_pos, k, flags);
 
-	struct bch_dev *ca =
-		likely(!pick.do_ec_reconstruct)
-		? bch2_dev_get_ioref(c, pick.ptr.dev, READ,
-				     BCH_DEV_READ_REF_io_read)
-		: NULL;
+	struct bch_dev *ca = bch2_dev_get_ioref(c, pick.ptr.dev, READ,
+					BCH_DEV_READ_REF_io_read);
 
 	/*
 	 * Stale dirty pointers are treated as IO errors, but @failed isn't
@@ -1364,7 +1360,7 @@ int __bch2_read_extent(struct btree_trans *trans,
 		enumerated_ref_put(&ca->io_ref[READ], BCH_DEV_READ_REF_io_read);
 		read_from_stale_dirty_pointer(trans, ca, k, pick.ptr);
 
-		bch2_mark_io_failure(failed, &pick, bch_err_throw(c, data_read_ptr_stale_dirty));
+		bch2_mark_io_failure(failed, &pick, ret);
 		propagate_io_error_to_data_update(c, orig, &pick);
 
 		return read_extent_done(orig, flags, bch_err_throw(c, data_read_ptr_stale_dirty));
@@ -1451,8 +1447,8 @@ int __bch2_read_extent(struct btree_trans *trans,
 		trans->notrace_relock_fail = true;
 	} else {
 		/* Attempting reconstruct read: */
-		ret = bch2_ec_read_extent(trans, rbio, k);
-		if (ret) {
+		if (bch2_ec_read_extent(trans, rbio, k)) {
+			ret = bch_err_throw(c, data_read_retry_ec_reconstruct_err);
 			bch2_rbio_error(rbio, ret);
 			goto out;
 		}
@@ -1466,12 +1462,10 @@ out:
 	} else {
 		bch2_trans_unlock(trans);
 
-		if (!ret) {
-			rbio->context = RBIO_CONTEXT_UNBOUND;
-			bch2_read_endio(&rbio->bio);
+		rbio->context = RBIO_CONTEXT_UNBOUND;
+		bch2_read_endio(&rbio->bio);
 
-			ret = rbio->ret;
-		}
+		ret = rbio->ret;
 		rbio = bch2_rbio_free(rbio);
 
 		if (bch2_err_matches(ret, BCH_ERR_data_read_retry_avoid) ||

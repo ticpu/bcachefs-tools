@@ -12,7 +12,6 @@
 #include "data/read.h"
 
 #include "init/error.h"
-#include "init/passes.h"
 
 #include <linux/string_choices.h>
 
@@ -92,25 +91,24 @@ void bch2_ec_stripe_buf_exit(struct ec_stripe_buf *buf)
 {
 	if (buf->key.k.type == KEY_TYPE_stripe) {
 		struct bkey_i_stripe *s = bkey_i_to_stripe(&buf->key);
+		unsigned i;
 
-		for (unsigned i = 0; i < s->v.nr_blocks; i++) {
+		for (i = 0; i < s->v.nr_blocks; i++) {
 			kvfree(buf->data[i]);
 			buf->data[i] = NULL;
 		}
 	}
-
-	closure_sync(&buf->io);
-	closure_debug_destroy(&buf->io);
 }
 
 /* XXX: this is a non-mempoolified memory allocation: */
-int __bch2_ec_stripe_buf_init(struct bch_fs *c,
-			      struct ec_stripe_buf *buf,
-			      unsigned offset, unsigned size)
+int bch2_ec_stripe_buf_init(struct bch_fs *c,
+			    struct ec_stripe_buf *buf,
+			    unsigned offset, unsigned size)
 {
 	struct bch_stripe *v = &bkey_i_to_stripe(&buf->key)->v;
 	unsigned csum_granularity = 1U << v->csum_granularity_bits;
 	unsigned end = offset + size;
+	unsigned i;
 
 	BUG_ON(end > le16_to_cpu(v->sectors));
 
@@ -121,15 +119,15 @@ int __bch2_ec_stripe_buf_init(struct bch_fs *c,
 	buf->offset	= offset;
 	buf->size	= end - offset;
 
-	for (unsigned i = 0; i < v->nr_blocks; i++) {
+	memset(buf->valid, 0xFF, sizeof(buf->valid));
+
+	for (i = 0; i < v->nr_blocks; i++) {
 		buf->data[i] = kvmalloc(buf->size << 9, GFP_KERNEL);
 		if (!buf->data[i]) {
 			bch2_ec_stripe_buf_exit(buf);
 			return bch_err_throw(c, ENOMEM_stripe_buf);
 		}
 	}
-
-	closure_init(&buf->io, NULL);
 
 	return 0;
 }
@@ -143,18 +141,21 @@ void bch2_ec_generate_ec(struct ec_stripe_buf *buf)
 	raid_gen(nr_data, v->nr_redundant, bytes, buf->data);
 }
 
-static int bch2_ec_do_recov(struct bch_fs *c, struct ec_stripe_buf *buf)
+int bch2_ec_do_recov(struct bch_fs *c, struct ec_stripe_buf *buf)
 {
 	struct bch_stripe *v = &bkey_i_to_stripe(&buf->key)->v;
-	unsigned failed[BCH_BKEY_PTRS_MAX], nr_failed = 0;
+	unsigned i, failed[BCH_BKEY_PTRS_MAX], nr_failed = 0;
 	unsigned nr_data = v->nr_blocks - v->nr_redundant;
 	unsigned bytes = buf->size << 9;
 
-	if (ec_nr_failed(buf) > v->nr_redundant)
-		return bch_err_throw(c, stripe_reconstruct_insufficient_blocks);
+	if (ec_nr_failed(buf) > v->nr_redundant) {
+		bch_err_ratelimited(c,
+			"error doing reconstruct read: unable to read enough blocks");
+		return -1;
+	}
 
-	for (unsigned i = 0; i < nr_data; i++)
-		if (buf->err[i])
+	for (i = 0; i < nr_data; i++)
+		if (!test_bit(i, buf->valid))
 			failed[nr_failed++] = i;
 
 	raid_rec(nr_failed, failed, nr_data, v->nr_redundant, bytes, buf->data);
@@ -200,21 +201,20 @@ void bch2_ec_generate_checksums(struct ec_stripe_buf *buf)
 				ec_block_checksum(buf, i, j << v->csum_granularity_bits));
 }
 
-static void bch2_ec_validate_checksums(struct bch_fs *c, struct ec_stripe_buf *buf,
-				       bool data_only)
+void bch2_ec_validate_checksums(struct bch_fs *c, struct ec_stripe_buf *buf)
 {
 	struct bch_stripe *v = &bkey_i_to_stripe(&buf->key)->v;
-	unsigned nr_data = v->nr_blocks - v->nr_redundant;
 	unsigned csum_granularity = 1 << v->csum_granularity_bits;
+	unsigned i;
 
 	if (!v->csum_type)
 		return;
 
-	for (unsigned i = 0; i < (data_only ? nr_data : v->nr_blocks); i++) {
+	for (i = 0; i < v->nr_blocks; i++) {
 		unsigned offset = buf->offset;
 		unsigned end = buf->offset + buf->size;
 
-		if (buf->err[i])
+		if (!test_bit(i, buf->valid))
 			continue;
 
 		while (offset < end) {
@@ -224,90 +224,27 @@ static void bch2_ec_validate_checksums(struct bch_fs *c, struct ec_stripe_buf *b
 			struct bch_csum got = ec_block_checksum(buf, i, offset);
 
 			if (bch2_crc_cmp(want, got)) {
-				buf->err[i] = bch_err_throw(c, stripe_read_csum_err);
-				buf->csum_good[i] = want;
-				buf->csum_bad[i] = got;
-
 				CLASS(bch2_dev_bkey_tryget, ca)(c, bkey_i_to_s_c(&buf->key),
 								v->ptrs[i].dev);
-				if (ca)
+				if (ca) {
+					CLASS(printbuf, err)();
+
+					prt_str(&err, "stripe ");
+					bch2_csum_err_msg(&err, v->csum_type, want, got);
+					prt_printf(&err, "  for %ps at %u of\n  ", (void *) _RET_IP_, i);
+					bch2_bkey_val_to_text(&err, c, bkey_i_to_s_c(&buf->key));
+					bch_err_dev_ratelimited(ca, "%s", err.buf);
+
 					bch2_io_error(ca, BCH_MEMBER_ERROR_checksum);
+				}
+
+				clear_bit(i, buf->valid);
 				break;
 			}
 
 			offset += len;
 		}
 	}
-}
-
-static void stripe_buf_errs_to_text(struct printbuf *out, struct bch_fs *c, struct ec_stripe_buf *buf)
-{
-	struct bch_stripe *v = &bkey_i_to_stripe(&buf->key)->v;
-
-	for (unsigned i = 0; i < v->nr_blocks; i++)
-		if (buf->err[i]) {
-			CLASS(bch2_dev_tryget_noerror, ca)(c, v->ptrs[i].dev);
-			prt_printf(out, "block %u %s: %s",
-				   i,
-				   ca ? ca->name : "(invalid device)",
-				   bch2_err_str(buf->err[i]));
-
-			if (buf->err[i] == -BCH_ERR_stripe_read_csum_err) {
-				prt_str(out, " expected ");
-				bch2_csum_to_text(out, v->csum_type, buf->csum_good[i]);
-				prt_str(out, " got ");
-				bch2_csum_to_text(out, v->csum_type, buf->csum_bad[i]);
-			}
-
-			prt_newline(out);
-		}
-}
-
-int bch2_stripe_buf_validate(struct bch_fs *c, struct ec_stripe_buf *buf)
-{
-	struct bch_stripe *v = &bkey_i_to_stripe(&buf->key)->v;
-
-	closure_sync(&buf->io);
-
-	bch2_ec_validate_checksums(c, buf, false);
-
-	if (!ec_nr_failed(buf))
-		return 0;
-
-	bool offline_stale_only = true;
-	for (unsigned i = 0; i < v->nr_blocks; i++)
-		offline_stale_only &= !buf->err[i] ||
-			buf->err[i] == -BCH_ERR_stripe_read_device_offline ||
-			buf->err[i] == -BCH_ERR_stripe_read_ptr_stale;
-
-	CLASS(bch_log_msg, msg)(c);
-
-	prt_printf(&msg.m, "%ps(): error reading stripe:\n", (void *) _RET_IP_);
-	bch2_bkey_val_to_text(&msg.m, c, bkey_i_to_s_c(&buf->key));
-	prt_newline(&msg.m);
-
-	stripe_buf_errs_to_text(&msg.m, c, buf);
-
-	int ret = bch2_ec_do_recov(c, buf);
-	if (ret) {
-		prt_printf(&msg.m, "error: %s\n", bch2_err_str(ret));
-		/* Separate ratelimit state for hard errors */
-		msg.m.suppress = bch2_ratelimit(c);
-		return ret;
-	}
-
-	memset(buf->err, 0, sizeof(buf->err));
-	bch2_ec_validate_checksums(c, buf, true);
-
-	if (ec_nr_failed(buf)) {
-		prt_printf(&msg.m, "checksum error after reconstruct:\n");
-		stripe_buf_errs_to_text(&msg.m, c, buf);
-		return -BCH_ERR_stripe_read_csum_err;
-	}
-
-	prt_printf(&msg.m, "successful reconstruct\n");
-	msg.m.suppress = offline_stale_only ? true : bch2_ratelimit(c);
-	return 0;
 }
 
 /* IO: */
@@ -318,6 +255,7 @@ static void ec_block_endio(struct bio *bio)
 	struct bch_stripe *v = &bkey_i_to_stripe(&ec_bio->buf->key)->v;
 	struct bch_extent_ptr *ptr = &v->ptrs[ec_bio->idx];
 	struct bch_dev *ca = ec_bio->ca;
+	struct closure *cl = bio->bi_private;
 	int rw = ec_bio->rw;
 	unsigned ref = rw == READ
 		? (unsigned) BCH_DEV_READ_REF_ec_block
@@ -326,18 +264,29 @@ static void ec_block_endio(struct bio *bio)
 	bch2_account_io_completion(ca, bio_data_dir(bio),
 				   ec_bio->submit_time, !bio->bi_status);
 
-	if (bio->bi_status)
-		ec_bio->buf->err[ec_bio->idx] = -blk_status_to_bch_err(bio->bi_status);
-	else if (dev_ptr_stale(ca, ptr))
-		ec_bio->buf->err[ec_bio->idx] = bch_err_throw(ca->fs, stripe_read_ptr_stale);
+	if (bio->bi_status) {
+		bch_err_dev_ratelimited(ca, "erasure coding %s error: %s",
+			       str_write_read(bio_data_dir(bio)),
+			       bch2_blk_status_to_str(bio->bi_status));
+		clear_bit(ec_bio->idx, ec_bio->buf->valid);
+	}
+
+	int stale = dev_ptr_stale(ca, ptr);
+	if (stale) {
+		bch_err_ratelimited(ca->fs,
+				    "error %s stripe: stale/invalid pointer (%i) after io",
+				    bio_data_dir(bio) == READ ? "reading from" : "writing to",
+				    stale);
+		clear_bit(ec_bio->idx, ec_bio->buf->valid);
+	}
 
 	bio_put(&ec_bio->bio);
 	enumerated_ref_put(&ca->io_ref[rw], ref);
-	closure_put(&ec_bio->buf->io);
+	closure_put(cl);
 }
 
 void bch2_ec_block_io(struct bch_fs *c, struct ec_stripe_buf *buf,
-		      blk_opf_t opf, unsigned idx)
+		      blk_opf_t opf, unsigned idx, struct closure *cl)
 {
 	struct bch_stripe *v = &bkey_i_to_stripe(&buf->key)->v;
 	unsigned offset = 0, bytes = buf->size << 9;
@@ -352,16 +301,20 @@ void bch2_ec_block_io(struct bch_fs *c, struct ec_stripe_buf *buf,
 
 	struct bch_dev *ca = bch2_dev_get_ioref(c, ptr->dev, rw, ref);
 	if (!ca) {
-		buf->err[idx] = bch_err_throw(c, stripe_read_device_offline);
+		clear_bit(idx, buf->valid);
 		return;
 	}
 
 	int stale = dev_ptr_stale(ca, ptr);
 	if (stale) {
-		buf->err[idx] = bch_err_throw(c, stripe_read_ptr_stale);
-		enumerated_ref_put(&ca->io_ref[rw], ref);
+		bch_err_ratelimited(c,
+				    "error %s stripe: stale pointer (%i)",
+				    rw == READ ? "reading from" : "writing to",
+				    stale);
+		clear_bit(idx, buf->valid);
 		return;
 	}
+
 
 	this_cpu_add(ca->io_done->sectors[rw][data_type], buf->size);
 
@@ -387,10 +340,11 @@ void bch2_ec_block_io(struct bch_fs *c, struct ec_stripe_buf *buf,
 
 		ec_bio->bio.bi_iter.bi_sector	= ptr->offset + buf->offset + (offset >> 9);
 		ec_bio->bio.bi_end_io		= ec_block_endio;
+		ec_bio->bio.bi_private		= cl;
 
 		bch2_bio_map(&ec_bio->bio, buf->data[idx] + offset, b);
 
-		closure_get(&buf->io);
+		closure_get(cl);
 		enumerated_ref_get(&ca->io_ref[rw], ref);
 
 		submit_bio(&ec_bio->bio);
@@ -400,16 +354,6 @@ void bch2_ec_block_io(struct bch_fs *c, struct ec_stripe_buf *buf,
 
 	enumerated_ref_put(&ca->io_ref[rw], ref);
 }
-
-void bch2_stripe_buf_read(struct bch_fs *c, struct ec_stripe_buf *buf)
-{
-	struct bkey_i_stripe *s = bkey_i_to_stripe(&buf->key);
-
-	for (unsigned i = 0; i < s->v.nr_blocks; i++)
-		bch2_ec_block_io(c, buf, REQ_OP_READ, i);
-}
-
-/* recovery read path: */
 
 static int get_stripe_key_trans(struct btree_trans *trans, u64 idx,
 				struct ec_stripe_buf *stripe)
@@ -430,20 +374,15 @@ static int stripe_reconstruct_err(struct bch_fs *c, struct bkey_s_c orig_k, cons
 	return bch_err_throw(c, stripe_reconstruct);
 }
 
+/* recovery read path: */
 int bch2_ec_read_extent(struct btree_trans *trans, struct bch_read_bio *rbio,
 			struct bkey_s_c orig_k)
 {
-	/*
-	 * We need the original extent to read to still be locked when we check
-	 * for non-spurious stale stripe pointers
-	 */
-	try(bch2_trans_relock(trans));
-
 	struct bch_fs *c = trans->c;
 
 	BUG_ON(!rbio->pick.has_ec);
 
-	struct ec_stripe_buf *buf __free(ec_stripe_buf_free) = kzalloc(sizeof(*buf), GFP_KERNEL);
+	struct ec_stripe_buf *buf __free(ec_stripe_buf_free) = kzalloc(sizeof(*buf), GFP_NOFS);
 	if (!buf)
 		return bch_err_throw(c, ENOMEM_ec_read_extent);
 
@@ -459,45 +398,25 @@ int bch2_ec_read_extent(struct btree_trans *trans, struct bch_read_bio *rbio,
 	if (offset + bio_sectors(&rbio->bio) > le16_to_cpu(v->sectors))
 		return stripe_reconstruct_err(c, orig_k, "read is bigger than stripe");
 
-	/* Check for stale pointers while we still have btree locks held */
-	bool have_stale = false;
-	scoped_guard(rcu) {
-		for (unsigned i = 0; i < v->nr_blocks; i++) {
-			struct bch_dev *ca = bch2_dev_rcu_noerror(c, v->ptrs[i].dev);
-			if (ca && dev_ptr_stale(ca, &v->ptrs[i])) {
-				__set_bit(i, buf->stale);
-				have_stale = true;
-			}
-		}
-	}
-
-	if (have_stale) {
-		CLASS(bch_log_msg_ratelimited, msg)(c);
-		prt_printf(&msg.m, "Stripe with stale pointer(s):\n");
-		bch2_bkey_val_to_text(&msg.m, c, bkey_i_to_s_c(&buf->key));
-
-		bch2_count_fsck_err(c, stale_dirty_ptr, &msg.m);
-		bch2_run_explicit_recovery_pass(c, &msg.m, BCH_RECOVERY_PASS_check_allocations, 0);
-	}
-
-	/* Don't hold btree locks for stripe buffer allocations, or IO */
-	bch2_trans_unlock(trans);
-
 	ret = bch2_ec_stripe_buf_init(c, buf, offset, bio_sectors(&rbio->bio));
 	if (ret)
 		return stripe_reconstruct_err(c, orig_k, "-ENOMEM");
 
-	bch2_stripe_buf_read(c, buf);
+	CLASS(closure_stack, cl)();
 
-	ret = bch2_stripe_buf_validate(c, buf);
-	if (ret) {
-		for (unsigned i = 0; i < v->nr_blocks; i++)
-			if (buf->err[i] == -BCH_ERR_stripe_read_ptr_stale &&
-			    !test_bit(i, buf->stale))
-				ret = bch_err_throw(c, data_read_ptr_stale_race);
-		bch_err_fn(c, ret);
-		return ret;
-	}
+	for (unsigned i = 0; i < v->nr_blocks; i++)
+		bch2_ec_block_io(c, buf, REQ_OP_READ, i, &cl);
+
+	closure_sync(&cl);
+
+	if (ec_nr_failed(buf) > v->nr_redundant)
+		return stripe_reconstruct_err(c, orig_k, "unable to read enough blocks");
+
+	bch2_ec_validate_checksums(c, buf);
+
+	ret = bch2_ec_do_recov(c, buf);
+	if (ret)
+		return stripe_reconstruct_err(c, orig_k, "unable to read enough blocks");
 
 	memcpy_to_bio(&rbio->bio, rbio->bio.bi_iter,
 		      buf->data[rbio->pick.ec.block] + ((offset - buf->offset) << 9));
