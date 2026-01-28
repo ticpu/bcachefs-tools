@@ -110,7 +110,7 @@ bool bch2_sb_is_encrypted(struct bch_sb *sb)
 		bch2_key_is_encrypted(&crypt->key);
 }
 
-void bch2_passphrase_check(struct bch_sb *sb, const char *passphrase,
+bool bch2_passphrase_check(struct bch_sb *sb, const char *passphrase,
 			   struct bch_key *passphrase_key,
 			   struct bch_encrypted_key *sb_key)
 {
@@ -128,10 +128,12 @@ void bch2_passphrase_check(struct bch_sb *sb, const char *passphrase,
 	bch2_chacha20(passphrase_key, __bch2_sb_key_nonce(sb), sb_key, sizeof(*sb_key));
 
 	if (bch2_key_is_encrypted(sb_key))
-		die("incorrect passphrase");
+		return true;
+
+	return false;
 }
 
-void bch2_add_key(struct bch_sb *sb,
+bool bch2_add_key(struct bch_sb *sb,
 		  const char *type,
 		  const char *keyring_str,
 		  const char *passphrase)
@@ -149,9 +151,10 @@ void bch2_add_key(struct bch_sb *sb,
 	else
 		die("unknown keyring %s", keyring_str);
 
-	bch2_passphrase_check(sb, passphrase,
+	if (bch2_passphrase_check(sb, passphrase,
 			      &passphrase_key,
-			      &sb_key);
+			      &sb_key))
+					return true;
 
 	char uuid[40];
 	uuid_unparse_lower(sb->user_uuid.b, uuid);
@@ -168,6 +171,8 @@ void bch2_add_key(struct bch_sb *sb,
 	free(description);
 	memzero_explicit(&passphrase_key, sizeof(passphrase_key));
 	memzero_explicit(&sb_key, sizeof(sb_key));
+
+	return false;
 }
 
 void bch_sb_crypt_init(struct bch_sb *sb,

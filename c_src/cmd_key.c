@@ -90,7 +90,18 @@ int cmd_unlock(int argc, char *argv[])
 		passphrase = read_passphrase("Enter passphrase: ");
 	}
 
-	bch2_add_key(sb.sb, "user", keyring, passphrase);
+	bool res = bch2_add_key(sb.sb, "user", keyring, passphrase);
+	
+	if (res) {
+		int i = 1;
+		while (i <= 2 && res) {
+				passphrase = read_passphrase("incorrect passphrase\nEnter passphrase: ");
+				res = bch2_add_key(sb.sb, "user", keyring, passphrase);
+				i++;
+		};
+		if (res)
+			die("incorrect passphrase limit reached");
+	}
 
 	bch2_free_super(&sb);
 	memzero_explicit(passphrase, strlen(passphrase));
