@@ -186,7 +186,7 @@ void bch2_free_super(struct bch_sb_handle *sb)
 	kfree(sb->holder);
 	kfree(sb->sb_name);
 
-	kfree(sb->sb);
+	kvfree(sb->sb);
 	memset(sb, 0, sizeof(*sb));
 }
 
@@ -224,7 +224,7 @@ int bch2_sb_realloc(struct bch_sb_handle *sb, unsigned u64s)
 	if (dynamic_fault("bcachefs:add:super_realloc"))
 		return -BCH_ERR_ENOMEM_sb_realloc_injected;
 
-	new_sb = krealloc(sb->sb, new_buffer_size, GFP_NOFS|__GFP_ZERO);
+	new_sb = kvrealloc(sb->sb, new_buffer_size, GFP_NOFS|__GFP_ZERO);
 	if (!new_sb)
 		return -BCH_ERR_ENOMEM_sb_buf_realloc;
 
@@ -1189,12 +1189,12 @@ int bch2_write_super(struct bch_fs *c)
 	unsigned nr_members =	bch2_sb_nr_devices(c->disk_sb.sb);
 
 	if (!nr_wrote ||
-	    !bch2_can_read_fs_with_devs(c, sb_written, degraded_flags, NULL)) {
+	    !bch2_can_read_fs_with_devs(c, &sb_written, degraded_flags, NULL)) {
 		prt_printf(&err, "Unable to write superblock to sufficient devices (from %ps)\n",
 			   (void *) _RET_IP_);
 		prt_printf(&err, "Would not be able to mount with written devices\n");
 
-		bch2_can_read_fs_with_devs(c, sb_written, degraded_flags, &err);
+		bch2_can_read_fs_with_devs(c, &sb_written, degraded_flags, &err);
 
 		prt_printf(&err, "Wrote to %u/%u devices:\n", nr_wrote, nr_members);
 		scoped_guard(printbuf_indent, &err)

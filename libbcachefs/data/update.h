@@ -52,7 +52,7 @@ struct data_update {
 	u8			ptrs_held;
 
 	struct rhlist_head	hash;
-	struct bpos		pos;
+	struct bbpos		pos;
 
 	/* associated with @ctxt */
 	struct list_head	read_list;
@@ -82,6 +82,7 @@ void bch2_data_update_opts_to_text(struct printbuf *, struct bch_fs *,
 				   struct bch_inode_opts *, struct data_update_opts *);
 void bch2_data_update_to_text(struct printbuf *, struct data_update *);
 void bch2_data_update_inflight_to_text(struct printbuf *, struct data_update *);
+bool bch2_data_update_in_flight(struct bch_fs *, struct bbpos *);
 
 int bch2_data_update_index_update(struct bch_write_op *);
 

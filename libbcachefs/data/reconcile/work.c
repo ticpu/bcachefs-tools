@@ -188,11 +188,16 @@ static struct bkey_s_c next_reconcile_entry(struct btree_trans *trans,
 					    struct bbpos *work_pos,
 					    struct bpos end)
 {
+	enum btree_iter_update_trigger_flags flags = BTREE_ITER_prefetch;
+
+	if (btree_type_has_snapshots(work_pos->btree))
+		flags |= BTREE_ITER_all_snapshots;
+
 	if (work_pos->btree == BTREE_ID_reconcile_scan) {
 		buf->nr = 0;
 
 		int ret = for_each_btree_key_max(trans, iter, work_pos->btree, work_pos->pos, end,
-				   BTREE_ITER_all_snapshots|BTREE_ITER_prefetch, k, ({
+				   flags, k, ({
 			bkey_reassemble(&darray_top(*buf), k);
 			return bkey_i_to_s_c(&darray_top(*buf));
 			0;
@@ -207,7 +212,7 @@ static struct bkey_s_c next_reconcile_entry(struct btree_trans *trans,
 		BUG_ON(!buf->size);;
 
 		int ret = for_each_btree_key_max(trans, iter, work_pos->btree, work_pos->pos, end,
-				   BTREE_ITER_all_snapshots|BTREE_ITER_prefetch, k, ({
+				   flags, k, ({
 			/* There might be leftover scan cookies from rebalance, pre reconcile upgrade: */
 			if (k.k->type != KEY_TYPE_set)
 				continue;
@@ -624,8 +629,13 @@ static int do_reconcile_extent_phys(struct moving_context *ctxt,
 	if (!bp_k.k || bp_k.k->type != KEY_TYPE_backpointer) /* write buffer race */
 		return 0;
 
-	CLASS(btree_iter_uninit, iter)(trans);
 	struct bkey_s_c_backpointer bp = bkey_s_c_to_backpointer(bp_k);
+
+	struct bbpos pos = BBPOS(bp.v->btree_id, bp.v->pos);
+	if (bch2_data_update_in_flight(c, &pos))
+		return 0;
+
+	CLASS(btree_iter_uninit, iter)(trans);
 	struct bkey_s_c k = bkey_try(bch2_backpointer_get_key(trans, bp, &iter, 0, last_flushed));
 	if (!k.k)
 		return 0;
@@ -1006,7 +1016,8 @@ static CLOSURE_CALLBACK(do_reconcile_phys_thread)
 				      POS(thr->dev, 0));
 
 	while (!bch2_move_ratelimit(&ctxt)) {
-		if (!bch2_reconcile_enabled(c))
+		if (!bch2_reconcile_enabled(c) ||
+		    test_bit(BCH_FS_going_ro, &c->flags))
 			break;
 
 		bch2_trans_begin(trans);
@@ -1018,7 +1029,8 @@ static CLOSURE_CALLBACK(do_reconcile_phys_thread)
 			break;
 
 		int ret = lockrestart_do(trans,
-			do_reconcile_extent_phys(&ctxt, &snapshot_io_opts, work_pos, &last_flushed));
+			do_reconcile_extent_phys(&ctxt, &snapshot_io_opts,
+						 BBPOS(work_pos.btree, k.k->p), &last_flushed));
 		if (ret)
 			break;
 	}
@@ -1091,7 +1103,8 @@ static int do_reconcile(struct moving_context *ctxt)
 	struct wb_maybe_flush last_flushed __cleanup(wb_maybe_flush_exit);
 	wb_maybe_flush_init(&last_flushed);
 
-	while (!bch2_move_ratelimit(ctxt)) {
+	while (!bch2_move_ratelimit(ctxt) &&
+	       !test_bit(BCH_FS_going_ro, &c->flags)) {
 		if (!bch2_reconcile_enabled(c)) {
 			bch2_moving_ctxt_flush_all(ctxt);
 			kthread_wait_freezable(bch2_reconcile_enabled(c) ||
@@ -1176,7 +1189,7 @@ static int do_reconcile(struct moving_context *ctxt)
 		if (ret)
 			break;
 
-		r->work_pos.pos = btree_type_has_snapshots(r->work_pos.btree)
+		r->work_pos.pos = btree_type_has_snapshot_field(r->work_pos.btree)
 			? bpos_successor(r->work_pos.pos)
 			: bpos_nosnap_successor(r->work_pos.pos);
 	}

@@ -318,6 +318,7 @@ static void __bch2_fs_read_only(struct bch_fs *c)
 	bch2_maybe_schedule_btree_bitmap_gc_stop(c);
 	bch2_fs_ec_stop(c);
 	bch2_open_buckets_stop(c, NULL, true);
+	bch2_reconcile_stop(c);
 	bch2_copygc_stop(c);
 	bch2_fs_ec_flush(c);
 	cancel_delayed_work_sync(&c->maybe_schedule_btree_bitmap_gc);
@@ -380,8 +381,6 @@ void bch2_fs_read_only(struct bch_fs *c)
 	BUG_ON(test_bit(BCH_FS_write_disable_complete, &c->flags));
 
 	bch_verbose(c, "going read-only");
-
-	bch2_reconcile_stop(c);
 
 	/*
 	 * Block new foreground-end write operations from starting - any new
@@ -1254,6 +1253,17 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 	return c;
 }
 
+void bch2_missing_devs_to_text(struct printbuf *out, struct bch_fs *c)
+{
+	prt_printf(out, "Missing devices\n");
+	for_each_member_device(c, ca)
+		if (!bch2_dev_is_online(ca) && bch2_dev_has_data(c, ca)) {
+			prt_printf(out, "Device %u\n", ca->dev_idx);
+			guard(printbuf_indent)(out);
+			bch2_member_to_text_short(out, c, ca);
+		}
+}
+
 static int bch2_fs_may_start(struct bch_fs *c, struct printbuf *err)
 {
 	unsigned flags = 0;
@@ -1285,17 +1295,10 @@ static int bch2_fs_may_start(struct bch_fs *c, struct printbuf *err)
 	}
 	}
 
-	if (!bch2_can_read_fs_with_devs(c, c->devs_online, flags, err) ||
+	if (!bch2_can_read_fs_with_devs(c, &c->devs_online, flags, err) ||
 	    (!c->opts.read_only &&
 	     !bch2_can_write_fs_with_devs(c, c->allocator.rw_devs[0], flags, err))) {
-		prt_printf(err, "Missing devices\n");
-		for_each_member_device(c, ca)
-			if (!bch2_dev_is_online(ca) && bch2_dev_has_data(c, ca)) {
-				prt_printf(err, "Device %u\n", ca->dev_idx);
-				guard(printbuf_indent)(err);
-				bch2_member_to_text_short(err, c, ca);
-			}
-
+		bch2_missing_devs_to_text(err, c);
 		return bch_err_throw(c, insufficient_devices_to_start);
 	}
 

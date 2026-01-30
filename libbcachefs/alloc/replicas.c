@@ -13,7 +13,7 @@
 #include <linux/sort.h>
 
 DEFINE_CLASS(bch_replicas_cpu, struct bch_replicas_cpu,
-	     kfree(_T.entries),
+	     kvfree(_T.entries),
 	     (struct bch_replicas_cpu) {}, void)
 
 static inline struct bch_replicas_entry_cpu *
@@ -280,12 +280,20 @@ replicas_entry_search(struct bch_replicas_cpu *r,
 bool bch2_replicas_marked_locked(struct bch_fs *c,
 			  struct bch_replicas_entry_v1 *search)
 {
+	if (search->data_type > BCH_DATA_btree &&
+	    !bch2_request_incompat_feature(c, bcachefs_metadata_version_no_sb_user_data_replicas))
+		return true;
+
 	return !search->nr_devs || replicas_entry_search(&c->replicas, search);
 }
 
 bool bch2_replicas_marked(struct bch_fs *c,
 			  struct bch_replicas_entry_v1 *search)
 {
+	if (search->data_type > BCH_DATA_btree &&
+	    !bch2_request_incompat_feature(c, bcachefs_metadata_version_no_sb_user_data_replicas))
+		return true;
+
 	guard(percpu_read)(&c->capacity.mark_lock);
 	return bch2_replicas_marked_locked(c, search);
 }
@@ -304,7 +312,7 @@ cpu_replicas_add_entry(struct bch_fs *c,
 	/* alignment */
 	new.entry_size = round_up(new.entry_size, sizeof(atomic_t));
 
-	new.entries = kcalloc(new.nr, new.entry_size, GFP_KERNEL);
+	new.entries = kvcalloc(new.nr, new.entry_size, GFP_KERNEL);
 	if (!new.entries)
 		return new;
 
@@ -382,8 +390,13 @@ void bch2_replicas_entry_kill(struct bch_fs *c, struct bch_replicas_entry_v1 *ki
 
 	struct bch_replicas_entry_cpu *e = replicas_entry_search(&c->replicas, kill);
 
-	if (WARN(!e, "replicas entry not found in sb"))
+	if (!e) {
+		CLASS(printbuf, buf)();
+		prt_str(&buf, "replicas entry not found in sb: ");
+		bch2_replicas_entry_to_text(&buf, kill);
+		WARN(true, "%s", buf.buf);
 		return;
+	}
 
 	__replicas_entry_kill(c, e);
 
@@ -499,7 +512,7 @@ int bch2_replicas_gc_accounted(struct bch_fs *c)
 	scoped_guard(percpu_write, &c->capacity.mark_lock) {
 		struct bch_replicas_cpu new = {
 			.entry_size	= c->replicas.entry_size,
-			.entries	= kcalloc(c->replicas.nr, c->replicas.entry_size, GFP_KERNEL),
+			.entries	= kvcalloc(c->replicas.nr, c->replicas.entry_size, GFP_KERNEL),
 		};
 		if (!new.entries) {
 			bch_err(c, "error allocating c->replicas_gc");
@@ -535,7 +548,7 @@ int bch2_replicas_gc_accounted(struct bch_fs *c)
 		if (!ret)
 			swap(c->replicas, new);
 
-		kfree(new.entries);
+		kvfree(new.entries);
 	}
 
 	if (!ret)
@@ -545,13 +558,23 @@ int bch2_replicas_gc_accounted(struct bch_fs *c)
 
 /* Replicas tracking - superblock: */
 
+static bool replicas_entry_obsolete(struct bch_fs *c, enum bch_data_type type)
+{
+	return type > BCH_DATA_btree &&
+		c && c->sb.version_incompat >= bcachefs_metadata_version_no_sb_user_data_replicas;
+}
+
 static int
-__bch2_sb_replicas_to_cpu_replicas(struct bch_sb_field_replicas *sb_r,
+__bch2_sb_replicas_to_cpu_replicas(struct bch_fs *c,
+				   struct bch_sb_field_replicas *sb_r,
 				   struct bch_replicas_cpu *cpu_r)
 {
 	unsigned nr = 0, entry_size = 0, idx = 0;
 
 	for_each_replicas_entry(sb_r, e) {
+		if (replicas_entry_obsolete(c, e->data_type))
+			continue;
+
 		entry_size = max_t(unsigned, entry_size,
 				   replicas_entry_bytes(e));
 		nr++;
@@ -560,7 +583,7 @@ __bch2_sb_replicas_to_cpu_replicas(struct bch_sb_field_replicas *sb_r,
 	entry_size = __cpu_replicas_entry_bytes(entry_size);
 	entry_size = round_up(entry_size, sizeof(atomic_t));
 
-	cpu_r->entries = kcalloc(nr, entry_size, GFP_KERNEL);
+	cpu_r->entries = kvcalloc(nr, entry_size, GFP_KERNEL);
 	if (!cpu_r->entries)
 		return -BCH_ERR_ENOMEM_cpu_replicas;
 
@@ -568,6 +591,9 @@ __bch2_sb_replicas_to_cpu_replicas(struct bch_sb_field_replicas *sb_r,
 	cpu_r->entry_size	= entry_size;
 
 	for_each_replicas_entry(sb_r, src) {
+		if (replicas_entry_obsolete(c, src->data_type))
+			continue;
+
 		struct bch_replicas_entry_cpu *dst = cpu_replicas_entry(cpu_r, idx++);
 		unsafe_memcpy(&dst->e, src, replicas_entry_bytes(src),
 			      "embedded variable length struct");
@@ -578,12 +604,16 @@ __bch2_sb_replicas_to_cpu_replicas(struct bch_sb_field_replicas *sb_r,
 }
 
 static int
-__bch2_sb_replicas_v0_to_cpu_replicas(struct bch_sb_field_replicas_v0 *sb_r,
+__bch2_sb_replicas_v0_to_cpu_replicas(struct bch_fs *c,
+				      struct bch_sb_field_replicas_v0 *sb_r,
 				      struct bch_replicas_cpu *cpu_r)
 {
 	unsigned nr = 0, entry_size = 0, idx = 0;
 
 	for_each_replicas_entry(sb_r, e) {
+		if (replicas_entry_obsolete(c, e->data_type))
+			continue;
+
 		entry_size = max_t(unsigned, entry_size,
 				   replicas_entry_bytes(e));
 		nr++;
@@ -596,7 +626,7 @@ __bch2_sb_replicas_v0_to_cpu_replicas(struct bch_sb_field_replicas_v0 *sb_r,
 
 	entry_size = round_up(entry_size, sizeof(atomic_t));
 
-	cpu_r->entries = kcalloc(nr, entry_size, GFP_KERNEL);
+	cpu_r->entries = kvcalloc(nr, entry_size, GFP_KERNEL);
 	if (!cpu_r->entries)
 		return -BCH_ERR_ENOMEM_cpu_replicas;
 
@@ -604,6 +634,9 @@ __bch2_sb_replicas_v0_to_cpu_replicas(struct bch_sb_field_replicas_v0 *sb_r,
 	cpu_r->entry_size	= entry_size;
 
 	for_each_replicas_entry(sb_r, src) {
+		if (replicas_entry_obsolete(c, src->data_type))
+			continue;
+
 		struct bch_replicas_entry_cpu *dst =
 			cpu_replicas_entry(cpu_r, idx++);
 
@@ -630,9 +663,9 @@ int bch2_sb_replicas_to_cpu_replicas(struct bch_fs *c)
 	CLASS(bch_replicas_cpu, new_r)();
 
 	if ((sb_v1 = bch2_sb_field_get(c->disk_sb.sb, replicas)))
-		try(__bch2_sb_replicas_to_cpu_replicas(sb_v1, &new_r));
+		try(__bch2_sb_replicas_to_cpu_replicas(c, sb_v1, &new_r));
 	else if ((sb_v0 = bch2_sb_field_get(c->disk_sb.sb, replicas_v0)))
-		try(__bch2_sb_replicas_v0_to_cpu_replicas(sb_v0, &new_r));
+		try(__bch2_sb_replicas_v0_to_cpu_replicas(c, sb_v0, &new_r));
 
 	bch2_cpu_replicas_sort(&new_r);
 
@@ -766,7 +799,7 @@ static int bch2_sb_replicas_validate(struct bch_sb *sb, struct bch_sb_field *f,
 	struct bch_sb_field_replicas *sb_r = field_to_type(f, replicas);
 
 	CLASS(bch_replicas_cpu, cpu_r)();
-	try(__bch2_sb_replicas_to_cpu_replicas(sb_r, &cpu_r));
+	try(__bch2_sb_replicas_to_cpu_replicas(NULL, sb_r, &cpu_r));
 	try(bch2_cpu_replicas_validate(&cpu_r, sb, err));
 
 	return 0;
@@ -800,7 +833,7 @@ static int bch2_sb_replicas_v0_validate(struct bch_sb *sb, struct bch_sb_field *
 	struct bch_sb_field_replicas_v0 *sb_r = field_to_type(f, replicas_v0);
 
 	CLASS(bch_replicas_cpu, cpu_r)();
-	try(__bch2_sb_replicas_v0_to_cpu_replicas(sb_r, &cpu_r));
+	try(__bch2_sb_replicas_v0_to_cpu_replicas(NULL, sb_r, &cpu_r));
 	try(bch2_cpu_replicas_validate(&cpu_r, sb, err));
 
 	return 0;
@@ -830,50 +863,61 @@ const struct bch_sb_field_ops bch_sb_field_ops_replicas_v0 = {
 
 /* Query replicas: */
 
-bool bch2_can_read_fs_with_devs(struct bch_fs *c, struct bch_devs_mask devs,
+bool bch2_can_read_replicas_with_devs(struct bch_fs *c, struct bch_devs_mask *devs,
+				      struct bch_replicas_entry_v1 *e,
+				      unsigned flags, struct printbuf *err)
+{
+	unsigned nr_online = 0, nr_invalid = 0, dflags = 0;
+	bool metadata = e->data_type < BCH_DATA_user;
+
+	if (e->data_type == BCH_DATA_cached)
+		return true;
+
+	for (unsigned i = 0; i < e->nr_devs; i++) {
+		if (e->devs[i] == BCH_SB_MEMBER_INVALID) {
+			nr_invalid++;
+			continue;
+		}
+
+		nr_online += test_bit(e->devs[i], devs->d);
+	}
+
+	if (nr_invalid == e->nr_devs)
+		return true;
+
+	if (nr_online < e->nr_required)
+		dflags |= metadata
+			? BCH_FORCE_IF_METADATA_LOST
+			: BCH_FORCE_IF_DATA_LOST;
+
+	if (nr_online + nr_invalid < e->nr_devs)
+		dflags |= metadata
+			? BCH_FORCE_IF_METADATA_DEGRADED
+			: BCH_FORCE_IF_DATA_DEGRADED;
+
+	if (dflags & ~flags) {
+		if (err) {
+			prt_printf(err, "insufficient devices online (%u) for replicas entry ",
+				   nr_online);
+			bch2_replicas_entry_to_text(err, e);
+			prt_newline(err);
+		}
+		return false;
+	}
+
+	return true;
+}
+
+bool bch2_can_read_fs_with_devs(struct bch_fs *c, struct bch_devs_mask *devs,
 				unsigned flags, struct printbuf *err)
 {
 	guard(percpu_read)(&c->capacity.mark_lock);
 	for_each_cpu_replicas_entry(&c->replicas, i) {
-		struct bch_replicas_entry_v1 *e = &i->e;
-
-		unsigned nr_online = 0, nr_invalid = 0, dflags = 0;
-		bool metadata = e->data_type < BCH_DATA_user;
-
-		if (e->data_type == BCH_DATA_cached)
+		if (replicas_entry_obsolete(c, i->e.data_type))
 			continue;
 
-		for (unsigned i = 0; i < e->nr_devs; i++) {
-			if (e->devs[i] == BCH_SB_MEMBER_INVALID) {
-				nr_invalid++;
-				continue;
-			}
-
-			nr_online += test_bit(e->devs[i], devs.d);
-		}
-
-		if (nr_invalid == e->nr_devs)
-			continue;
-
-		if (nr_online < e->nr_required)
-			dflags |= metadata
-				? BCH_FORCE_IF_METADATA_LOST
-				: BCH_FORCE_IF_DATA_LOST;
-
-		if (nr_online + nr_invalid < e->nr_devs)
-			dflags |= metadata
-				? BCH_FORCE_IF_METADATA_DEGRADED
-				: BCH_FORCE_IF_DATA_DEGRADED;
-
-		if (dflags & ~flags) {
-			if (err) {
-				prt_printf(err, "insufficient devices online (%u) for replicas entry ",
-					   nr_online);
-				bch2_replicas_entry_to_text(err, e);
-				prt_newline(err);
-			}
+		if (!bch2_can_read_replicas_with_devs(c, devs, &i->e, flags, err))
 			return false;
-		}
 	}
 
 	return true;
@@ -1017,5 +1061,5 @@ void bch2_verify_replicas_refs_clean(struct bch_fs *c)
 
 void bch2_fs_replicas_exit(struct bch_fs *c)
 {
-	kfree(c->replicas.entries);
+	kvfree(c->replicas.entries);
 }
