@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.36.0 - Sat Jan 31 2026
+
+bcachefs_metadata_version_no_sb_user_data_replicas
+
+This requires an incompatible upgrade to enable, and once enabled we'll no
+longer store replicas entries in the superblock for user data, which are used
+for deciding whether we an do a degraded mount without data loss - instead, we
+defer that and use the accounting btree to check, in early recovery.
+
+This is a performance/scalability fix: on filesystems with large numbers of
+drives (a 50 device filesystem was the original bug report), the superblock
+writes needed to add and delete replicas entries become a bottleneck.
+
+Replicas entries for metadata (btree and journal) can still be an issue, and
+another bug report indicated that these will have to be addressed soon - a
+single slow (or dying) device in a large multidevice will cause all superblock
+writes to slow to a degree that can cause major problems. Metadata replicas
+entries will however require a different approach to solve, so expect that in a
+future update.
+
+- Some fairly involved fixes for the data update path: it turns out, the data
+  update path was dropping replicas to devices being evacuated (which are
+  considered to have durability of 0) before the extent was sufficiently
+  replicated on other devices. This caused data loss for a few users,
+  unfortunately, but the new code is much more rigorous when reconciling the
+  exsiting extent with newly written replicas and deciding which replicas to
+  keep and which can be dropped.
+
+- Fix various codepaths that were (incorrectly) causing the filesystem to go
+  emergency read-only when finding a pointer to an invalid device, instead of
+  continuing so it could be repaired or flagging the filesystem as needing
+  repair. We now should only go emergency read-only on pointer to invalid device
+  when that would indicate a runtime bug, not filesystem corruption.
+
+- Reconcile will now shut down correctly (when the filesystem is going read-only
+  or unmounting) when processing the reconcile_*_phys btrees.
+
+- Multiple other smaller reconcile fixes; various users report that issues where
+  reconcile did not seem to be finding pending work seem to be resolved.
+
+- Degraded btree nodes are no longer un-degraded synchronously; now that we have
+  reconcile this is no longer necessary, and forcing them to be un-degraded
+  synchronously was prone to causing deadlocks on open_bucket allocation.
+
+- The 'allocator stuck' log message now provides improved information, and
+  internally has been re-plumbed to have access to the original 'struct
+  alloc_request', so if necessary for future debugging we can easily provide as
+  much information about how the allocation was attempted as required.
+
 ## v1.35.2 - Tue Jan 20 2026
 
 - Linux v6.19 is now supported
