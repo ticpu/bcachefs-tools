@@ -1219,7 +1219,11 @@ bool bch2_bkey_matches_ptr(struct bch_fs *c, struct bkey_s_c k,
 bool bch2_bkey_ptrs_match(struct bkey_s_c k1, struct extent_ptr_decoded p1,
 			  struct bkey_s_c k2, struct extent_ptr_decoded p2)
 {
-	return (p1.ptr.dev		== p2.ptr.dev &&
+	return ((p1.ptr.dev		== p2.ptr.dev ||
+		 (p1.has_ec && p2.has_ec &&
+		  p1.ec.idx		== p2.ec.idx &&
+		  p1.ec.block		== p2.ec.block)) &&
+
 		p1.ptr.gen		== p2.ptr.gen &&
 
 		/*
@@ -1540,7 +1544,7 @@ int bch2_bkey_drop_extra_ec_durability(struct btree_trans *trans,
 		if (mask & ptr_bit) {
 			int d;
 			if (bch2_dev_idx_is_online(c, p.ptr.dev)) {
-				int d = bch2_extent_ptr_durability(trans, &p);
+				d = bch2_extent_ptr_durability(trans, &p);
 				if (d < 0)
 					return d;
 
@@ -1869,12 +1873,12 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 		 */
 		bkey_fsck_err_on(!have_non_inval_dev_ptrs,
 				 c, extent_ptrs_all_invalid,
-				 "extent ptrs all to BCH_SB_MEMBER_INVALID");
+				 "extent without valid pointers");
 
 		bkey_fsck_err_on(from.from == BKEY_VALIDATE_commit &&
 				 !have_non_inval_dev_ptrs_dirty,
 				 c, extent_ptrs_all_invalid,
-				 "extent ptrs all to BCH_SB_MEMBER_INVALID");
+				 "extent without valid dirty pointers");
 	}
 fsck_err:
 	return ret;
