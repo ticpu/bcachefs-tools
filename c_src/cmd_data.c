@@ -577,6 +577,14 @@ int cmd_reconcile_status(int argc, char *argv[])
 
 	CLASS(printbuf, buf)();
 	reconcile_status(&buf, fs, types);
+
+	prt_newline(&buf);
+
+	char *sysfs_status = read_file_str(fs.sysfs_fd, "reconcile_status");
+	prt_str(&buf, sysfs_status);
+	prt_newline(&buf);
+	free(sysfs_status);
+
 	fputs(buf.buf, stdout);
 
 	return 0;
