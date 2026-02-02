@@ -4,7 +4,15 @@
 
 #include "io.h"
 
-struct ec_stripe_head;
+struct ec_dev_stripe_state {
+	struct list_head	list;
+	struct mutex		lock;
+
+	unsigned		disk_label;
+
+	struct dev_stripe_state	block_stripe;
+	struct dev_stripe_state	parity_stripe;
+};
 
 enum ec_stripe_ref {
 	STRIPE_REF_io,
@@ -24,16 +32,15 @@ struct ec_stripe_handle {
 
 struct ec_stripe_new {
 	struct bch_fs		*c;
-	struct ec_stripe_head	*h;
 	struct mutex		lock;
 	struct list_head	list;
-
-	struct closure		iodone;
 
 	atomic_t		ref[STRIPE_REF_NR];
 
 	int			err;
 
+	struct bch_devs_mask	devs;
+	enum bch_watermark	watermark;
 	u8			nr_data;
 	u8			nr_parity;
 	bool			allocated;
@@ -42,6 +49,7 @@ struct ec_stripe_new {
 
 	unsigned long		blocks_gotten[BITS_TO_LONGS(BCH_BKEY_PTRS_MAX)];
 	unsigned long		blocks_allocated[BITS_TO_LONGS(BCH_BKEY_PTRS_MAX)];
+	unsigned long		blocks_moving[BITS_TO_LONGS(BCH_BKEY_PTRS_MAX)];
 	open_bucket_idx_t	blocks[BCH_BKEY_PTRS_MAX];
 	struct disk_reservation	res;
 
@@ -76,8 +84,7 @@ struct ec_stripe_head {
 
 	unsigned		blocksize;
 
-	struct dev_stripe_state	block_stripe;
-	struct dev_stripe_state	parity_stripe;
+	struct ec_dev_stripe_state *dev_stripe;
 
 	struct ec_stripe_new	*s;
 };

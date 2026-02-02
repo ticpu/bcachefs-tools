@@ -1339,13 +1339,17 @@ int __bch2_read_extent(struct btree_trans *trans,
 
 	if (unlikely(ret < 0))
 		return read_extent_pick_err(trans, orig, read_pos, data_btree, k, flags, ret);
+	ret = 0;
 
 	if (bch2_csum_type_is_encryption(pick.crc.csum_type) &&
 	    unlikely(!c->chacha20_key_set))
 		return read_extent_no_encryption_key(trans, orig, read_pos, k, flags);
 
-	struct bch_dev *ca = bch2_dev_get_ioref(c, pick.ptr.dev, READ,
-					BCH_DEV_READ_REF_io_read);
+	struct bch_dev *ca =
+		likely(!pick.do_ec_reconstruct)
+		? bch2_dev_get_ioref(c, pick.ptr.dev, READ,
+				     BCH_DEV_READ_REF_io_read)
+		: NULL;
 
 	/*
 	 * Stale dirty pointers are treated as IO errors, but @failed isn't
@@ -1446,15 +1450,21 @@ int __bch2_read_extent(struct btree_trans *trans,
 		 */
 		trans->notrace_relock_fail = true;
 	} else {
+		if (!(flags & BCH_READ_in_retry)) {
+			bch2_rbio_punt(rbio, bch2_rbio_retry, RBIO_CONTEXT_UNBOUND, system_unbound_wq);
+			return 0;
+		}
+
 		/* Attempting reconstruct read: */
-		if (bch2_ec_read_extent(trans, rbio, k)) {
-			ret = bch_err_throw(c, data_read_retry_ec_reconstruct_err);
+		ret = bch2_ec_read_extent(trans, rbio, k);
+		if (bch2_err_matches(ret, BCH_ERR_transaction_restart)) {
+			bch2_rbio_free(rbio);
+			return ret;
+		}
+		if (ret) {
 			bch2_rbio_error(rbio, ret);
 			goto out;
 		}
-
-		if (likely(!(flags & BCH_READ_in_retry)))
-			bio_endio(&rbio->bio);
 	}
 out:
 	if (likely(!(flags & BCH_READ_in_retry))) {
@@ -1462,10 +1472,12 @@ out:
 	} else {
 		bch2_trans_unlock(trans);
 
-		rbio->context = RBIO_CONTEXT_UNBOUND;
-		bch2_read_endio(&rbio->bio);
+		if (!ret) {
+			rbio->context = RBIO_CONTEXT_UNBOUND;
+			bch2_read_endio(&rbio->bio);
 
-		ret = rbio->ret;
+			ret = rbio->ret;
+		}
 		rbio = bch2_rbio_free(rbio);
 
 		if (bch2_err_matches(ret, BCH_ERR_data_read_retry_avoid) ||

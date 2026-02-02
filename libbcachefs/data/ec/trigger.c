@@ -226,6 +226,23 @@ static int __mark_stripe_bucket(struct btree_trans *trans,
 	return 0;
 }
 
+static int mark_stripe_bp(struct btree_trans *trans, struct bkey_s_c k,
+			  const struct bch_extent_ptr *ptr, bool insert)
+{
+	if (ptr->dev == BCH_SB_MEMBER_INVALID)
+		return 0;
+
+	struct extent_ptr_decoded p = {
+		.ptr = *ptr,
+		.crc = bch2_extent_crc_unpack(k.k, NULL),
+	};
+	struct bkey_i_backpointer bp;
+	bch2_extent_ptr_to_bp(trans->c, BTREE_ID_stripes, 0, k, p, (const union bch_extent_entry *) ptr, &bp);
+
+	try(bch2_bucket_backpointer_mod(trans, k, &bp, insert));
+	return 0;
+}
+
 static int mark_stripe_bucket(struct btree_trans *trans,
 			      struct bkey_s_c_stripe s,
 			      unsigned ptr_idx, bool deleting,
@@ -245,19 +262,9 @@ static int mark_stripe_bucket(struct btree_trans *trans,
 	struct bpos bucket = PTR_BUCKET_POS(ca, ptr);
 
 	if (flags & BTREE_TRIGGER_transactional) {
-		struct extent_ptr_decoded p = {
-			.ptr = *ptr,
-			.crc = bch2_extent_crc_unpack(s.k, NULL),
-		};
-		struct bkey_i_backpointer bp;
-		bch2_extent_ptr_to_bp(c, BTREE_ID_stripes, 0, s.s_c, p,
-				      (const union bch_extent_entry *) ptr, &bp);
-
 		struct bkey_i_alloc_v4 *a =
 			errptr_try(bch2_trans_start_alloc_update(trans, bucket, 0));
-
 		try(__mark_stripe_bucket(trans, ca, s, ptr_idx, deleting, bucket, &a->v, flags));
-		try(bch2_bucket_backpointer_mod(trans, s.s_c, &bp, !(flags & BTREE_TRIGGER_overwrite)));
 	}
 
 	if (flags & BTREE_TRIGGER_gc) {
@@ -291,22 +298,31 @@ static int mark_stripe_buckets(struct btree_trans *trans,
 	const struct bch_stripe *new_s = new.k->type == KEY_TYPE_stripe
 		? bkey_s_c_to_stripe(new).v : NULL;
 
-	BUG_ON(old_s && new_s && old_s->nr_blocks != new_s->nr_blocks);
-
-	unsigned nr_blocks = new_s ? new_s->nr_blocks : old_s->nr_blocks;
+	unsigned nr_blocks = max(old_s ? old_s->nr_blocks : 0,
+				 new_s ? new_s->nr_blocks : 0);
 
 	for (unsigned i = 0; i < nr_blocks; i++) {
-		if (new_s && old_s &&
-		    !memcmp(&new_s->ptrs[i],
-			    &old_s->ptrs[i],
-			    sizeof(new_s->ptrs[i])))
-			continue;
+		const struct bch_extent_ptr *old_ptr = old_s && i < old_s->nr_blocks ? old_s->ptrs + i : NULL;
+		const struct bch_extent_ptr *new_ptr = new_s && i < new_s->nr_blocks ? new_s->ptrs + i : NULL;
 
-		if (new_s)
-			try(mark_stripe_bucket(trans, bkey_s_c_to_stripe(new), i, false, flags));
+		bool ptr_changing = !old_ptr || !new_ptr || memcmp(old_ptr, new_ptr, sizeof(*old_ptr));
 
-		if (old_s)
-			try(mark_stripe_bucket(trans, bkey_s_c_to_stripe(old), i, true, flags));
+		if (ptr_changing) {
+			if (new_ptr)
+				try(mark_stripe_bucket(trans, bkey_s_c_to_stripe(new), i, false, flags));
+
+			if (old_ptr)
+				try(mark_stripe_bucket(trans, bkey_s_c_to_stripe(old), i, true, flags));
+		}
+
+		if (ptr_changing &&
+		    (flags & BTREE_TRIGGER_transactional)) {
+			if (old_ptr)
+				try(mark_stripe_bp(trans, old, old_ptr, false));
+
+			if (new_ptr)
+				try(mark_stripe_bp(trans, new, new_ptr, true));
+		}
 	}
 
 	return 0;
@@ -495,8 +511,7 @@ void bch2_stripe_new_buckets_del(struct bch_fs *c, struct ec_stripe_new *s)
 {
 	guard(spinlock)(&c->ec.stripes_new_lock);
 
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
-	for (unsigned i = 0; i < v->nr_blocks; i++)
+	for (unsigned i = 0; i < s->new_stripe.key.v.nr_blocks; i++)
 		hlist_del_init(&s->buckets[i].hash);
 }
 

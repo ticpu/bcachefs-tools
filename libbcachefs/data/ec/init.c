@@ -116,7 +116,7 @@ static bool should_cancel_stripe(struct bch_fs *c, struct ec_stripe_new *s, stru
 	if (!ca)
 		return true;
 
-	for (unsigned i = 0; i < bkey_i_to_stripe(&s->new_stripe.key)->v.nr_blocks; i++) {
+	for (unsigned i = 0; i < s->new_stripe.key.v.nr_blocks; i++) {
 		if (!s->blocks[i])
 			continue;
 
@@ -170,7 +170,6 @@ int bch2_stripes_read(struct bch_fs *c)
 
 void bch2_fs_ec_exit(struct bch_fs *c)
 {
-
 	while (1) {
 		struct ec_stripe_head *h;
 
@@ -182,13 +181,19 @@ void bch2_fs_ec_exit(struct bch_fs *c)
 
 		if (h->s) {
 			for (unsigned i = 0;
-			     i < bkey_i_to_stripe(&h->s->new_stripe.key)->v.nr_blocks;
+			     i < h->s->new_stripe.key.v.nr_blocks;
 			     i++)
 				BUG_ON(h->s->blocks[i]);
 
 			kfree(h->s);
 		}
 		kfree(h);
+	}
+
+	while (!list_empty(&c->ec.dev_stripe_state_list)) {
+		struct ec_dev_stripe_state *s =
+			list_pop_entry(&c->ec.dev_stripe_state_list, struct ec_dev_stripe_state, list);
+		kfree(s);
 	}
 
 	BUG_ON(!list_empty(&c->ec.stripe_new_list));
@@ -202,6 +207,9 @@ void bch2_fs_ec_init_early(struct bch_fs *c)
 
 	INIT_LIST_HEAD(&c->ec.stripe_head_list);
 	mutex_init(&c->ec.stripe_head_lock);
+
+	INIT_LIST_HEAD(&c->ec.dev_stripe_state_list);
+	mutex_init(&c->ec.dev_stripe_state_lock);
 
 	INIT_LIST_HEAD(&c->ec.stripe_new_list);
 	mutex_init(&c->ec.stripe_new_lock);

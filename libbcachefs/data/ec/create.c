@@ -16,6 +16,44 @@
 
 #include "init/error.h"
 
+/*
+ * dev stripe state
+ *
+ * block/parity striping, indexed by target:
+ */
+
+static struct ec_dev_stripe_state *ec_dev_stripe_state_get(struct btree_trans *trans, unsigned disk_label)
+{
+	struct bch_fs *c = trans->c;
+	int ret = bch2_trans_mutex_lock(trans, &c->ec.dev_stripe_state_lock);
+	if (ret)
+		return ERR_PTR(ret);
+
+	struct ec_dev_stripe_state *s;
+	list_for_each_entry(s, &c->ec.dev_stripe_state_list, list)
+		if (s->disk_label == disk_label) {
+			int ret = bch2_trans_mutex_lock(trans, &s->lock);
+			if (ret)
+				s = ERR_PTR(ret);
+
+			mutex_unlock(&c->ec.dev_stripe_state_lock);
+			return s;
+		}
+
+	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	if (!s) {
+		s = ERR_PTR(-ENOMEM);
+	} else {
+		mutex_init(&s->lock);
+		BUG_ON(!mutex_trylock(&s->lock));
+		s->disk_label = disk_label;
+		list_add(&s->list, &c->ec.dev_stripe_state_list);
+	}
+
+	mutex_unlock(&c->ec.dev_stripe_state_lock);
+	return s;
+}
+
 /* stripe deletion */
 
 static int ec_stripe_delete(struct btree_trans *trans, u64 idx, bool is_open)
@@ -120,14 +158,16 @@ static void bch2_bkey_drop_stripe_ptr(const struct bch_fs *c, struct bkey_s k, u
 }
 
 static int stripe_update_extent(struct btree_trans *trans,
-				struct ec_stripe_new *s,
-				unsigned block,
+				struct bkey_i_stripe *old_stripe,
+				struct bkey_i_stripe *new_stripe,
+				struct bch_extent_ptr old_block,
+				struct bch_extent_ptr new_block,
+				unsigned new_blocknr,
 				struct bkey_s_c_backpointer bp,
 				struct stripe_update_bucket_stats *stats,
 				struct disk_reservation *res,
 				struct wb_maybe_flush *last_flushed)
 {
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
 	struct bch_fs *c = trans->c;
 
 	if (bp.v->level) {
@@ -159,43 +199,43 @@ static int stripe_update_extent(struct btree_trans *trans,
 			prt_str(&buf, "backpointer race\n");
 			bch2_bkey_val_to_text(&buf, c, bp.s_c);
 			prt_newline(&buf);
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&new_stripe->k_i));
 		}));
 		return 0;
 	}
 
 	struct extent_ptr_decoded p;
-	if (!bch2_bkey_has_device_decode(c, k, v->ptrs[block].dev, &p) ||
-	    !__bch2_ptr_matches_stripe(&v->ptrs[block], &p.ptr, le16_to_cpu(v->sectors))) {
+	if (!bch2_bkey_has_device_decode(c, k, old_block.dev, &p) ||
+	    !__bch2_ptr_matches_stripe(&old_block, &p.ptr, le16_to_cpu(old_stripe->v.sectors))) {
 		stats->nr_no_match++;
 		stats->sectors_no_match += bp.v->bucket_len;
 
 		event_inc_trace(c, stripe_update_extent_fail, buf, ({
-			prt_printf(&buf, "block %u: nomatch\n", block);
+			prt_printf(&buf, "block %u: nomatch\n", new_blocknr);
 			bch2_bkey_val_to_text(&buf, c, bp.s_c);
 			prt_newline(&buf);
 			bch2_bkey_val_to_text(&buf, c, k);
 			prt_newline(&buf);
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&new_stripe->k_i));
 		}));
 		return 0;
 	}
 
 	if (p.has_ec) {
-		if (p.ec.idx == s->new_stripe.key.k.p.offset)
+		if (p.ec.idx == new_stripe->k.p.offset)
 			return 0;
 
-		if (!s->have_old_stripe ||
-		    p.ec.idx != s->old_stripe.key.k.p.offset) {
+		if (old_stripe == new_stripe ||
+		    p.ec.idx != old_stripe->k.p.offset) {
 			CLASS(printbuf, buf)();
 			prt_printf(&buf, "Found unrelated stripe pointer when updating extent\n");
 			bch2_bkey_val_to_text(&buf, c, k);
 			prt_str(&buf, "\nNew: ");
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&new_stripe->k_i));
 
-			if (s->have_old_stripe) {
+			if (old_stripe != new_stripe) {
 				prt_str(&buf, "\nOld: ");
-				bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->old_stripe.key));
+				bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&old_stripe->k_i));
 			}
 
 			bch2_fs_inconsistent(c, "%s", buf.buf);
@@ -209,32 +249,35 @@ static int stripe_update_extent(struct btree_trans *trans,
 		stats->nr_cached++;
 		stats->sectors_cached += bp.v->bucket_len;
 		event_inc_trace(c, stripe_update_extent_fail, buf, ({
-			prt_printf(&buf, "block %u: cached pointer\n", block);
+			prt_printf(&buf, "block %u: cached pointer\n", new_blocknr);
 			bch2_bkey_val_to_text(&buf, c, k);
 			prt_newline(&buf);
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&new_stripe->k_i));
 		}));
 		return 0;
 	}
 
-	unsigned dev = v->ptrs[block].dev;
-
 	struct bch_extent_stripe_ptr stripe_ptr = (struct bch_extent_stripe_ptr) {
 		.type		= 1 << BCH_EXTENT_ENTRY_stripe_ptr,
-		.block		= block,
-		.redundancy	= v->nr_redundant,
-		.idx		= s->new_stripe.key.k.p.offset,
+		.block		= new_blocknr,
+		.redundancy	= new_stripe->v.nr_redundant,
+		.idx		= new_stripe->k.p.offset,
 	};
 
 	struct bkey_i *n = errptr_try(bch2_trans_kmalloc(trans, BKEY_EXTENT_U64s_MAX * sizeof(u64)));
 	bkey_reassemble(n, k);
 
-	if (s->have_old_stripe)
-		bch2_bkey_drop_stripe_ptr(c, bkey_i_to_s(n), s->old_stripe.key.k.p.offset);
+	if (old_stripe != new_stripe)
+		bch2_bkey_drop_stripe_ptr(c, bkey_i_to_s(n), old_stripe->k.p.offset);
 
-	bch2_bkey_drop_ptrs_noerror(bkey_i_to_s(n), p, entry, p.ptr.dev != dev);
+	struct bch_extent_ptr *ec_ptr = bch2_bkey_has_device(c, bkey_i_to_s(n), old_block.dev);
+	ec_ptr->dev	= new_block.dev;
+	ec_ptr->offset	-= old_block.offset;
+	ec_ptr->offset	+= new_block.offset;
 
-	struct bch_extent_ptr *ec_ptr = bch2_bkey_has_device(c, bkey_i_to_s(n), dev);
+	bch2_bkey_drop_ptrs_noerror(bkey_i_to_s(n), p, entry, p.ptr.dev != new_block.dev);
+
+	ec_ptr = bch2_bkey_has_device(c, bkey_i_to_s(n), new_block.dev);
 	__extent_entry_insert(c, n,
 			(union bch_extent_entry *) ec_ptr,
 			(union bch_extent_entry *) &stripe_ptr);
@@ -256,17 +299,26 @@ static int stripe_update_extent(struct btree_trans *trans,
 	return 0;
 }
 
-static int stripe_update_bucket(struct btree_trans *trans, struct ec_stripe_new *s, unsigned block)
+static int stripe_update_bucket(struct btree_trans *trans, struct ec_stripe_new *s, unsigned new_blocknr)
 {
 	struct bch_fs *c = trans->c;
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
-	struct bch_extent_ptr ptr = v->ptrs[block];
+	unsigned old_blocknr = new_blocknr < s->old_blocks_nr
+		? s->old_block_map[new_blocknr]
+		: new_blocknr;
 
-	CLASS(bch2_dev_bkey_tryget, ca)(c, bkey_i_to_s_c(&s->new_stripe.key), ptr.dev);
+	struct bkey_i_stripe *new_stripe = &s->new_stripe.key;
+	struct bkey_i_stripe *old_stripe = new_blocknr < s->old_blocks_nr
+		? &s->old_stripe.key
+		: new_stripe;
+
+	struct bch_extent_ptr old_block = old_stripe->v.ptrs[old_blocknr];
+	struct bch_extent_ptr new_block = new_stripe->v.ptrs[new_blocknr];
+
+	CLASS(bch2_dev_bkey_tryget, ca)(c, bkey_i_to_s_c(&old_stripe->k_i), old_block.dev);
 	if (!ca) /* BCH_SB_MEMBER_INVALID */
 		return 0;
 
-	struct bpos bucket_pos = PTR_BUCKET_POS(ca, &ptr);
+	struct bpos bucket_pos = PTR_BUCKET_POS(ca, &old_block);
 
 	struct wb_maybe_flush last_flushed __cleanup(wb_maybe_flush_exit);
 	wb_maybe_flush_init(&last_flushed);
@@ -289,12 +341,14 @@ static int stripe_update_bucket(struct btree_trans *trans, struct ec_stripe_new 
 			continue;
 
 		wb_maybe_flush_inc(&last_flushed);
-		stripe_update_extent(trans, s, block, bp, &stats, &res.r, &last_flushed);
+		stripe_update_extent(trans, old_stripe, new_stripe,
+				     old_block, new_block, new_blocknr,
+				     bp, &stats, &res.r, &last_flushed);
 	})));
 
 	event_inc_trace(c, stripe_update_bucket, buf, ({
-		prt_printf(&buf, "Updating block %u\n", block);
-		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+		prt_printf(&buf, "Updating block %u\n", new_blocknr);
+		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key.k_i));
 		prt_newline(&buf);
 
 		prt_printf(&buf, "bp_to_deleted:\t%u %u\n",
@@ -313,7 +367,7 @@ static int stripe_update_bucket(struct btree_trans *trans, struct ec_stripe_new 
 static int stripe_update_extents(struct bch_fs *c, struct ec_stripe_new *s)
 {
 	CLASS(btree_trans, trans)(c);
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
+	struct bch_stripe *v = &s->new_stripe.key.v;
 	unsigned nr_data = v->nr_blocks - v->nr_redundant;
 
 	try(bch2_btree_write_buffer_flush_sync(trans));
@@ -363,7 +417,7 @@ void bch2_ec_stripe_new_free(struct bch_fs *c, struct ec_stripe_new *s)
 static int __ec_stripe_create(struct ec_stripe_new *s)
 {
 	struct bch_fs *c = s->c;
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
+	struct bch_stripe *v = &s->new_stripe.key.v;
 	unsigned nr_data = v->nr_blocks - v->nr_redundant;
 
 	if (s->err) {
@@ -372,21 +426,20 @@ static int __ec_stripe_create(struct ec_stripe_new *s)
 		return s->err;
 	}
 
-	for (unsigned i = 0; i < nr_data; i++)
-		if (s->blocks[i]) {
-			struct open_bucket *ob = c->allocator.open_buckets + s->blocks[i];
+	for (unsigned i = s->old_blocks_nr; i < nr_data; i++) {
+		struct open_bucket *ob = c->allocator.open_buckets + s->blocks[i];
 
-			if (ob->sectors_free)
-				zero_out_rest_of_ec_bucket(c, s, i, ob);
+		if (ob->sectors_free) {
+			/* XXX: do this IO asynchronously */
+			zero_out_rest_of_ec_bucket(c, s, i, ob);
 		}
+	}
 
 	if (s->have_old_stripe) {
-		bch2_ec_validate_checksums(c, &s->old_stripe);
+		/* XXX: we might end up blocking here on reading the old stripe,
+		 * do we need to make this async? */
 
-		if (bch2_ec_do_recov(c, &s->old_stripe)) {
-			bch_err(c, "error creating stripe: error reading old stripe");
-			return bch_err_throw(c, ec_block_read);
-		}
+		try(bch2_stripe_buf_validate(c, &s->old_stripe, true));
 
 		for (unsigned i = 0; i < s->old_blocks_nr; i++)
 			swap(s->new_stripe.data[i],
@@ -400,10 +453,15 @@ static int __ec_stripe_create(struct ec_stripe_new *s)
 	bch2_ec_generate_ec(&s->new_stripe);
 	bch2_ec_generate_checksums(&s->new_stripe);
 
+	/* write out data blocks that moved */
+	for (unsigned i = 0; i < s->old_blocks_nr; i++)
+		if (test_bit(i, s->blocks_moving))
+			bch2_ec_block_io(c, &s->new_stripe, REQ_OP_WRITE, i);
+
 	/* write p/q: */
 	for (unsigned i = nr_data; i < v->nr_blocks; i++)
-		bch2_ec_block_io(c, &s->new_stripe, REQ_OP_WRITE, i, &s->iodone);
-	closure_sync(&s->iodone);
+		bch2_ec_block_io(c, &s->new_stripe, REQ_OP_WRITE, i);
+	closure_sync(&s->new_stripe.io);
 
 	if (ec_nr_failed(&s->new_stripe)) {
 		bch_err(c, "error creating stripe: error writing redundancy buckets");
@@ -413,7 +471,7 @@ static int __ec_stripe_create(struct ec_stripe_new *s)
 	try(bch2_trans_commit_do(c, &s->res, NULL,
 				 BCH_TRANS_COMMIT_no_check_rw|
 				 BCH_TRANS_COMMIT_no_enospc,
-		ec_stripe_key_update(trans, bkey_i_to_stripe(&s->new_stripe.key))));
+		ec_stripe_key_update(trans, &s->new_stripe.key)));
 
 	try(stripe_update_extents(c, s));
 
@@ -454,12 +512,8 @@ static int stripe_get_iorefs(struct bch_fs *c, struct bch_stripe *s)
 static void ec_stripe_create(struct ec_stripe_new *s)
 {
 	struct bch_fs *c = s->c;
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
+	struct bch_stripe *v = &s->new_stripe.key.v;
 	unsigned nr_data = v->nr_blocks - v->nr_redundant;
-
-	BUG_ON(s->h->s == s);
-
-	closure_sync(&s->iodone);
 
 	int ret = stripe_get_iorefs(c, v);
 	if (!ret) {
@@ -472,23 +526,23 @@ static void ec_stripe_create(struct ec_stripe_new *s)
 	if (ret)
 		event_inc_trace(c, stripe_create_fail, buf, ({
 			prt_printf(&buf, "error %s\n", bch2_err_str(ret));
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key.k_i));
 		}));
 	else if (s->have_old_stripe)
 		event_inc_trace(c, stripe_reuse, buf, ({
-			struct bch_stripe *ov = &bkey_i_to_stripe(&s->old_stripe.key)->v;
+			struct bch_stripe *ov = &s->old_stripe.key.v;
 
 			prt_printf(&buf, "Reused %u/%u data blocks\n", s->old_blocks_nr,
 				   ov->nr_blocks - ov->nr_redundant);
 			prt_printf(&buf, "\nOld: ");
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key.k_i));
 			prt_printf(&buf, "\nNew: ");
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->old_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->old_stripe.key.k_i));
 		}));
 	else
 		event_inc_trace(c, stripe_create, buf, ({
 			prt_newline(&buf);
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key.k_i));
 		}));
 
 	bch2_disk_reservation_put(c, &s->res);
@@ -511,7 +565,6 @@ static void ec_stripe_create(struct ec_stripe_new *s)
 
 	bch2_ec_stripe_buf_exit(&s->old_stripe);
 	bch2_ec_stripe_buf_exit(&s->new_stripe);
-	closure_debug_destroy(&s->iodone);
 
 	ec_stripe_new_put(c, s, STRIPE_REF_stripe);
 }
@@ -545,29 +598,6 @@ void bch2_ec_do_stripe_creates(struct bch_fs *c)
 
 	if (!queue_work(system_long_wq, &c->ec.stripe_create_work))
 		enumerated_ref_put(&c->writes, BCH_WRITE_REF_stripe_create);
-}
-
-static void ec_stripe_new_set_pending(struct bch_fs *c, struct ec_stripe_head *h)
-{
-	struct ec_stripe_new *s = h->s;
-
-	lockdep_assert_held(&h->lock);
-
-	BUG_ON(!s->allocated && !s->err);
-
-	h->s		= NULL;
-	s->pending	= true;
-
-	scoped_guard(mutex, &c->ec.stripe_new_lock)
-		list_add(&s->list, &c->ec.stripe_new_list);
-
-	ec_stripe_new_put(c, s, STRIPE_REF_io);
-}
-
-void bch2_ec_stripe_new_cancel(struct bch_fs *c, struct ec_stripe_head *h, int err)
-{
-	h->s->err = err;
-	ec_stripe_new_set_pending(c, h);
 }
 
 void bch2_ec_bucket_cancel(struct bch_fs *c, struct open_bucket *ob, int err)
@@ -631,13 +661,32 @@ static unsigned pick_blocksize(struct bch_fs *c,
 	return best.size;
 }
 
-static bool may_create_new_stripe(struct bch_fs *c)
+/* returns blocksize */
+static unsigned disk_label_ec_devs(struct bch_fs *c, unsigned disk_label,
+				   struct bch_devs_mask *devs,
+				   unsigned blocksize)
 {
-	return false;
+	guard(rcu)();
+
+	*devs = target_rw_devs(c, BCH_DATA_user, disk_label
+			       ? group_to_target(disk_label - 1)
+			       : 0);
+	for_each_member_device_rcu(c, ca, devs)
+		if (!ca->mi.durability)
+			__clear_bit(ca->dev_idx, devs->d);
+
+	if (!blocksize)
+		blocksize = pick_blocksize(c, devs);
+
+	for_each_member_device_rcu(c, ca, devs)
+		if (ca->mi.bucket_size != blocksize)
+			__clear_bit(ca->dev_idx, devs->d);
+	return blocksize;
 }
 
 static void ec_stripe_key_init(struct bch_fs *c,
 			       struct bkey_i *k,
+			       unsigned algorithm,
 			       unsigned nr_data,
 			       unsigned nr_parity,
 			       unsigned stripe_size,
@@ -647,7 +696,7 @@ static void ec_stripe_key_init(struct bch_fs *c,
 	unsigned u64s;
 
 	s->v.sectors			= cpu_to_le16(stripe_size);
-	s->v.algorithm			= 0;
+	s->v.algorithm			= algorithm;
 	s->v.nr_blocks			= nr_data + nr_parity;
 	s->v.nr_redundant		= nr_parity;
 	s->v.csum_granularity_bits	= ilog2(c->opts.encoded_extent_max >> 9);
@@ -664,52 +713,469 @@ static void ec_stripe_key_init(struct bch_fs *c,
 	set_bkey_val_u64s(&s->k, u64s);
 }
 
-static struct ec_stripe_new *ec_new_stripe_alloc(struct bch_fs *c, struct ec_stripe_head *h)
+static struct ec_stripe_new *ec_new_stripe_alloc(struct bch_fs *c,
+						 struct bch_devs_mask devs,
+						 enum bch_watermark watermark,
+						 unsigned disk_label,
+						 unsigned algorithm,
+						 unsigned nr_data, unsigned nr_parity,
+						 unsigned blocksize)
 {
-	struct ec_stripe_new *s;
-
-	lockdep_assert_held(&h->lock);
-
-	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	struct ec_stripe_new *s = kzalloc(sizeof(*s), GFP_KERNEL);
 	if (!s)
 		return NULL;
 
 	mutex_init(&s->lock);
-	closure_init(&s->iodone, NULL);
+	closure_init(&s->old_stripe.io, NULL);
+	closure_init(&s->new_stripe.io, NULL);
 	atomic_set(&s->ref[STRIPE_REF_stripe], 1);
 	atomic_set(&s->ref[STRIPE_REF_io], 1);
 	s->c		= c;
-	s->h		= h;
-	s->nr_data	= min_t(unsigned, h->nr_active_devs,
-				BCH_BKEY_PTRS_MAX) - h->redundancy;
-	s->nr_parity	= h->redundancy;
+	s->devs		= devs;
+	s->watermark	= watermark;
+	s->nr_data	= nr_data;
+	s->nr_parity	= nr_parity,
 
-	ec_stripe_key_init(c, &s->new_stripe.key,
+	ec_stripe_key_init(c, &s->new_stripe.key.k_i,
+			   algorithm,
 			   s->nr_data, s->nr_parity,
-			   h->blocksize, h->disk_label);
+			   blocksize, disk_label);
 	return s;
+}
+
+static int __new_stripe_alloc_buckets(struct btree_trans *trans,
+				    struct alloc_request *req,
+				    struct ec_dev_stripe_state *dev_stripe,
+				    struct ec_stripe_new *s)
+{
+	struct bch_fs *c = trans->c;
+	struct open_bucket *ob;
+	struct bch_stripe *v = &s->new_stripe.key.v;
+	unsigned i, j, nr_have_parity = 0, nr_have_data = 0;
+
+	BUG_ON(v->nr_blocks	!= s->nr_data + s->nr_parity);
+	BUG_ON(v->nr_redundant	!= s->nr_parity);
+
+	/* * We bypass the sector allocator which normally does this: */
+	bitmap_and(req->devs_may_alloc.d, req->devs_may_alloc.d,
+		   c->allocator.rw_devs[BCH_DATA_user].d, BCH_SB_MEMBERS_MAX);
+
+	for_each_set_bit(i, s->blocks_gotten, v->nr_blocks) {
+		/*
+		 * Note: we don't yet repair invalid blocks (failed/removed
+		 * devices) when reusing stripes - we still need a codepath to
+		 * walk backpointers and update all extents that point to that
+		 * block when updating the stripe
+		 */
+		if (v->ptrs[i].dev != BCH_SB_MEMBER_INVALID)
+			__clear_bit(v->ptrs[i].dev, req->devs_may_alloc.d);
+
+		if (i < s->nr_data)
+			nr_have_data++;
+		else
+			nr_have_parity++;
+	}
+
+	BUG_ON(nr_have_data	> s->nr_data);
+	BUG_ON(nr_have_parity	> s->nr_parity);
+
+	req->ptrs.nr = 0;
+	if (nr_have_parity < s->nr_parity) {
+		req->nr_replicas	= s->nr_parity;
+		req->nr_effective	= nr_have_parity;
+		req->data_type		= BCH_DATA_parity;
+
+		int ret = bch2_bucket_alloc_set_trans(trans, req, &dev_stripe->parity_stripe);
+
+		open_bucket_for_each(c, &req->ptrs, ob, i) {
+			j = find_next_zero_bit(s->blocks_gotten,
+					       s->nr_data + s->nr_parity,
+					       s->nr_data);
+			BUG_ON(j >= s->nr_data + s->nr_parity);
+
+			s->blocks[j] = req->ptrs.v[i];
+			v->ptrs[j] = bch2_ob_ptr(c, ob);
+			__set_bit(j, s->blocks_gotten);
+		}
+
+		if (ret)
+			return ret;
+	}
+
+	req->ptrs.nr = 0;
+	if (nr_have_data < s->nr_data) {
+		req->nr_replicas	= s->nr_data;
+		req->nr_effective	= nr_have_data;
+		req->data_type		= BCH_DATA_user;
+
+		int ret = bch2_bucket_alloc_set_trans(trans, req, &dev_stripe->block_stripe);
+
+		open_bucket_for_each(c, &req->ptrs, ob, i) {
+			j = find_next_zero_bit(s->blocks_gotten,
+					       s->nr_data, 0);
+			BUG_ON(j >= s->nr_data);
+
+			s->blocks[j] = req->ptrs.v[i];
+			v->ptrs[j] = bch2_ob_ptr(c, ob);
+			__set_bit(j, s->blocks_gotten);
+		}
+
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int new_stripe_alloc_buckets(struct btree_trans *trans,
+				    struct alloc_request *req,
+				    struct ec_dev_stripe_state *dev_stripe,
+				    struct ec_stripe_new *s)
+{
+	struct bch_stripe *v = &s->new_stripe.key.v;
+
+	if (bitmap_weight(s->blocks_gotten, v->nr_blocks) == v->nr_blocks)
+		return 0;
+
+	req->scratch_data_type		= req->data_type;
+	req->scratch_ptrs		= req->ptrs;
+	req->scratch_nr_replicas	= req->nr_replicas;
+	req->scratch_nr_effective	= req->nr_effective;
+	req->scratch_have_cache		= req->have_cache;
+	req->scratch_devs_may_alloc	= req->devs_may_alloc;
+
+	req->devs_may_alloc	= s->devs;
+	req->have_cache		= true;
+
+	int ret = __new_stripe_alloc_buckets(trans, req, dev_stripe, s);
+
+	req->data_type		= req->scratch_data_type;
+	req->ptrs		= req->scratch_ptrs;
+	req->nr_replicas	= req->scratch_nr_replicas;
+	req->nr_effective	= req->scratch_nr_effective;
+	req->have_cache		= req->scratch_have_cache;
+	req->devs_may_alloc	= req->scratch_devs_may_alloc;
+	return ret;
+}
+
+static bool may_reuse_stripe(struct bch_fs *c,
+			     struct ec_stripe_new *new, const struct bch_stripe *old)
+{
+	if (old->disk_label		!= new->new_stripe.key.v.disk_label ||
+	    old->algorithm		!= new->new_stripe.key.v.algorithm ||
+	    old->nr_redundant		!= new->new_stripe.key.v.nr_redundant)
+		return false;
+
+	struct bch_devs_mask devs_may_alloc = new->devs;
+	unsigned nr_data = old->nr_blocks - old->nr_redundant;
+
+	for (unsigned i = 0; i < nr_data; i++)
+		if (!bch2_dev_bad_or_evacuating(c, old->ptrs[i].dev) &&
+		    stripe_blockcount_get(old, i))
+			__clear_bit(old->ptrs[i].dev, devs_may_alloc.d);
+
+	return dev_mask_nr(&devs_may_alloc) > new->nr_parity;
+}
+
+static int get_old_stripe(struct btree_trans *trans,
+			  struct ec_stripe_new *new,
+			  u64 idx)
+{
+	struct bch_fs *c = trans->c;
+
+	/*
+	 * We require an intent lock here until we have the stripe open, for
+	 * exclusion with bch2_trigger_stripe() - which will delete empty
+	 * stripes if they're not open, but it can't actually open them:
+	 */
+	CLASS(btree_iter, iter)(trans, BTREE_ID_stripes, POS(0, idx),
+				BTREE_ITER_intent|
+				BTREE_ITER_nopreserve);
+	struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_slot(&iter));
+
+	/* We expect write buffer races here */
+	if (k.k->type != KEY_TYPE_stripe)
+		return 0;
+
+	struct bkey_s_c_stripe old = bkey_s_c_to_stripe(k);
+
+	if (stripe_lru_pos(old.v) == STRIPE_LRU_POS_EMPTY) {
+		/*
+		 * We can't guarantee that the trigger will always delete
+		 * stripes - the stripe might still be open when the last data
+		 * in it was deleted
+		 */
+		return !bch2_stripe_is_open(c, idx)
+			? bch2_btree_delete_at(trans, &iter, 0) ?:
+			  bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc) ?:
+			  bch_err_throw(c, transaction_restart_commit)
+			: 0;
+	}
+
+	bool ret = may_reuse_stripe(c, new, old.v) &&
+		bch2_stripe_handle_tryget(c, &new->old_stripe_handle, idx);
+	if (ret)
+		bkey_reassemble(&new->old_stripe.key.k_i, k);
+	return ret;
+}
+
+static void init_new_stripe_from_old(struct bch_fs *c, struct ec_stripe_new *s)
+{
+	struct bch_stripe *new_v = &s->new_stripe.key.v;
+	struct bch_stripe *old_v = &s->old_stripe.key.v;
+	unsigned i;
+
+	BUG_ON(old_v->nr_redundant != s->nr_parity);
+
+	/*
+	 * Free buckets we initially allocated - they might conflict with
+	 * blocks from the stripe we're reusing:
+	 */
+	for_each_set_bit(i, s->blocks_gotten, new_v->nr_blocks) {
+		bch2_open_bucket_put(c, c->allocator.open_buckets + s->blocks[i]);
+		s->blocks[i] = 0;
+	}
+	memset(s->blocks_gotten, 0, sizeof(s->blocks_gotten));
+	memset(s->blocks_allocated, 0, sizeof(s->blocks_allocated));
+
+	for (unsigned i = 0; i < old_v->nr_blocks; i++) {
+		if (stripe_blockcount_get(old_v, i)) {
+			if (!bch2_dev_bad_or_evacuating(c, old_v->ptrs[i].dev))
+				__set_bit(s->old_blocks_nr, s->blocks_gotten);
+			else
+				__set_bit(s->old_blocks_nr, s->blocks_moving);
+			__set_bit(s->old_blocks_nr, s->blocks_allocated);
+
+			new_v->ptrs[s->old_blocks_nr] = old_v->ptrs[i];
+
+			s->old_block_map[s->old_blocks_nr++] = i;
+		}
+	}
+
+	s->have_old_stripe = true;
+}
+
+static int stripe_reuse(struct btree_trans *trans, struct ec_stripe_new *s)
+{
+	struct bch_fs *c = trans->c;
+	struct bkey_s_c lru_k;
+	int ret = 0;
+
+	for_each_btree_key_max_norestart(trans, lru_iter, BTREE_ID_lru,
+			lru_pos(BCH_LRU_STRIPE_FRAGMENTATION, 2, 0),
+			lru_pos(BCH_LRU_STRIPE_FRAGMENTATION, 2, LRU_TIME_MAX),
+			0, lru_k, ret) {
+		ret = get_old_stripe(trans, s, lru_k.k->p.offset);
+		if (ret)
+			break;
+	}
+	if (ret <= 0)
+		return ret ?: bch_err_throw(c, stripe_alloc_blocked);
+
+	ret = __bch2_ec_stripe_buf_init(c, &s->old_stripe, 0, le16_to_cpu(s->old_stripe.key.v.sectors));
+	if (ret)
+		bch2_stripe_handle_put(c, &s->old_stripe_handle);
+
+	init_new_stripe_from_old(c, s);
+	bch2_stripe_buf_read(c, &s->old_stripe);
+	return ret;
+
+}
+
+static int stripe_idx_alloc(struct btree_trans *trans, struct ec_stripe_new *s)
+{
+	/*
+	 * Allocate stripe slot
+	 * XXX: we're going to need a bitrange btree of free stripes
+	 */
+	struct bch_fs *c = trans->c;
+	struct bkey_s_c k;
+	struct bpos min_pos = POS(0, 1);
+	struct bpos start_pos = bpos_max(min_pos, POS(0, c->ec.stripe_hint));
+	int ret;
+
+	for_each_btree_key_norestart(trans, iter, BTREE_ID_stripes, start_pos,
+			   BTREE_ITER_slots|BTREE_ITER_intent, k, ret) {
+		c->ec.stripe_hint = iter.pos.offset;
+
+		if (bkey_gt(k.k->p, POS(0, U32_MAX))) {
+			if (start_pos.offset) {
+				start_pos = min_pos;
+				bch2_btree_iter_set_pos(&iter, start_pos);
+				continue;
+			}
+
+			ret = bch_err_throw(c, ENOSPC_stripe_create);
+			break;
+		}
+
+		if (bkey_deleted(k.k) &&
+		    bch2_stripe_handle_tryget(c, &s->new_stripe_handle, k.k->p.offset)) {
+			ret = bch2_ec_stripe_mem_alloc(trans, &iter);
+			if (ret)
+				bch2_stripe_handle_put(c, &s->new_stripe_handle);
+			s->new_stripe.key.k.p = iter.pos;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+static int stripe_alloc_or_reuse(struct btree_trans *trans,
+				 struct alloc_request *req,
+				 struct ec_dev_stripe_state *dev_stripe,
+				 struct ec_stripe_new *s,
+				 bool *waiting)
+{
+	struct bch_fs *c = trans->c;
+
+	if (!s->new_stripe.key.k.p.offset)
+		try(stripe_idx_alloc(trans, s));
+
+	if (!s->have_old_stripe) {
+		/* First, try to allocate a full stripe: */
+		enum bch_watermark saved_watermark = BCH_WATERMARK_stripe;
+		unsigned saved_flags = req->flags | BCH_WRITE_alloc_nowait;
+		swap(req->watermark,	saved_watermark);
+		swap(req->flags,	saved_flags);
+
+		int ret = new_stripe_alloc_buckets(trans, req, dev_stripe, s);
+
+		swap(req->watermark,	saved_watermark);
+		swap(req->flags,	saved_flags);
+
+		if (ret) {
+			if (bch2_err_matches(ret, BCH_ERR_transaction_restart) ||
+			    bch2_err_matches(ret, ENOMEM))
+				return ret;
+
+			/*
+			 * Not enough buckets available for a full stripe: we must reuse an
+			 * oldstripe:
+			 */
+			while (1) {
+				ret = stripe_reuse(trans, s);
+				if (!ret)
+					break;
+				if (*waiting ||
+				    (req->flags & BCH_WRITE_alloc_nowait) ||
+				    ret != -BCH_ERR_stripe_alloc_blocked)
+					return ret;
+
+				if (req->watermark == BCH_WATERMARK_copygc) {
+					/* Don't self-deadlock copygc */
+					swap(req->flags, saved_flags);
+					ret = new_stripe_alloc_buckets(trans, req, dev_stripe, s);
+					swap(req->flags, saved_flags);
+
+					try(ret);
+					break;
+				}
+
+				/* XXX freelist_wait? */
+				closure_wait(&c->allocator.freelist_wait, req->cl);
+				*waiting = true;
+			}
+		}
+	}
+
+	/*
+	 * Retry allocating buckets, with the watermark for this
+	 * particular write:
+	 */
+	try(new_stripe_alloc_buckets(trans, req, dev_stripe, s));
+	try(__bch2_ec_stripe_buf_init(c, &s->new_stripe, 0, le16_to_cpu(s->new_stripe.key.v.sectors)));
+
+	if (!s->res.sectors)
+		bch2_disk_reservation_get(c, &s->res,
+					  le16_to_cpu(s->new_stripe.key.v.sectors),
+					  s->nr_parity,
+					  BCH_DISK_RESERVATION_NOFAIL);
+
+	bch2_stripe_new_buckets_add(c, s);
+	s->allocated = true;
+	return 0;
+}
+
+static void bch2_new_stripe_to_text(struct printbuf *out, struct bch_fs *c,
+				    struct ec_stripe_new *s)
+{
+	prt_printf(out, "\tidx %llu blocks %u+%u allocated %u ref %u %u %s obs",
+		   s->new_stripe.key.k.p.offset, s->nr_data, s->nr_parity,
+		   bitmap_weight(s->blocks_allocated, s->nr_data),
+		   atomic_read(&s->ref[STRIPE_REF_io]),
+		   atomic_read(&s->ref[STRIPE_REF_stripe]),
+		   bch2_watermarks[s->watermark]);
+
+	struct bch_stripe *v = &s->new_stripe.key.v;
+	unsigned i;
+	for_each_set_bit(i, s->blocks_gotten, v->nr_blocks)
+		prt_printf(out, " %u", s->blocks[i]);
+	prt_newline(out);
+	bch2_bkey_val_to_text(out, c, bkey_i_to_s_c(&s->new_stripe.key.k_i));
+	prt_newline(out);
+}
+
+void bch2_new_stripes_to_text(struct printbuf *out, struct bch_fs *c)
+{
+	struct ec_stripe_head *h;
+	struct ec_stripe_new *s;
+
+	scoped_guard(mutex, &c->ec.stripe_head_lock)
+		list_for_each_entry(h, &c->ec.stripe_head_list, list) {
+			prt_printf(out, "disk label %u algo %u redundancy %u %s nr created %llu:\n",
+			       h->disk_label, h->algo, h->redundancy,
+			       bch2_watermarks[h->watermark],
+			       h->nr_created);
+
+			if (h->s)
+				bch2_new_stripe_to_text(out, c, h->s);
+		}
+
+	prt_printf(out, "in flight:\n");
+
+	scoped_guard(mutex, &c->ec.stripe_new_lock)
+		list_for_each_entry(s, &c->ec.stripe_new_list, list)
+			bch2_new_stripe_to_text(out, c, s);
+}
+
+/*
+ * ec_stripe_head: interface from the sector allocator to erasure coding
+ * We have one ec_stripe_head for every combination of replication, target and
+ * watermark options, which are used for the staging of stripe creation via
+ * struct ec_stripe_new
+ */
+
+static void ec_stripe_new_set_pending(struct bch_fs *c, struct ec_stripe_head *h)
+{
+	struct ec_stripe_new *s = h->s;
+
+	lockdep_assert_held(&h->lock);
+
+	BUG_ON(!s->allocated && !s->err);
+
+	h->s		= NULL;
+	s->pending	= true;
+
+	scoped_guard(mutex, &c->ec.stripe_new_lock)
+		list_add(&s->list, &c->ec.stripe_new_list);
+
+	ec_stripe_new_put(c, s, STRIPE_REF_io);
+}
+
+void bch2_ec_stripe_new_cancel(struct bch_fs *c, struct ec_stripe_head *h, int err)
+{
+	h->s->err = err;
+	ec_stripe_new_set_pending(c, h);
 }
 
 static void ec_stripe_head_devs_update(struct bch_fs *c, struct ec_stripe_head *h)
 {
 	struct bch_devs_mask old_devs = h->devs;
 
-	scoped_guard(rcu) {
-		h->devs = target_rw_devs(c, BCH_DATA_user, h->disk_label
-					 ? group_to_target(h->disk_label - 1)
-					 : 0);
-		for_each_member_device_rcu(c, ca, &h->devs)
-			if (!ca->mi.durability)
-				__clear_bit(ca->dev_idx, h->devs.d);
-
-		h->blocksize = pick_blocksize(c, &h->devs);
-
-		for_each_member_device_rcu(c, ca, &h->devs)
-			if (ca->mi.bucket_size != h->blocksize)
-				__clear_bit(ca->dev_idx, h->devs.d);
-
-		h->nr_active_devs = dev_mask_nr(&h->devs);
-	}
+	h->blocksize		= disk_label_ec_devs(c, h->disk_label, &h->devs, 0);
+	h->nr_active_devs	= dev_mask_nr(&h->devs);
 
 	/*
 	 * If we only have redundancy + 1 devices, we're better off with just
@@ -720,7 +1186,6 @@ static void ec_stripe_head_devs_update(struct bch_fs *c, struct ec_stripe_head *
 	struct bch_devs_mask devs_leaving;
 	bitmap_andnot(devs_leaving.d, old_devs.d, h->devs.d, BCH_SB_MEMBERS_MAX);
 
-
 	if (h->s && !h->s->allocated && dev_mask_nr(&devs_leaving))
 		bch2_ec_stripe_new_cancel(c, h, -EINTR);
 }
@@ -730,9 +1195,7 @@ ec_new_stripe_head_alloc(struct bch_fs *c, unsigned disk_label,
 			 unsigned algo, unsigned redundancy,
 			 enum bch_watermark watermark)
 {
-	struct ec_stripe_head *h;
-
-	h = kzalloc(sizeof(*h), GFP_KERNEL);
+	struct ec_stripe_head *h = kzalloc(sizeof(*h), GFP_KERNEL);
 	if (!h)
 		return NULL;
 
@@ -817,372 +1280,6 @@ err:
 	return h;
 }
 
-static int __new_stripe_alloc_buckets(struct btree_trans *trans,
-				    struct alloc_request *req,
-				    struct ec_stripe_head *h, struct ec_stripe_new *s)
-{
-	struct bch_fs *c = trans->c;
-	struct open_bucket *ob;
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
-	unsigned i, j, nr_have_parity = 0, nr_have_data = 0;
-
-	BUG_ON(v->nr_blocks	!= s->nr_data + s->nr_parity);
-	BUG_ON(v->nr_redundant	!= s->nr_parity);
-
-	/* * We bypass the sector allocator which normally does this: */
-	bitmap_and(req->devs_may_alloc.d, req->devs_may_alloc.d,
-		   c->allocator.rw_devs[BCH_DATA_user].d, BCH_SB_MEMBERS_MAX);
-
-	for_each_set_bit(i, s->blocks_gotten, v->nr_blocks) {
-		/*
-		 * Note: we don't yet repair invalid blocks (failed/removed
-		 * devices) when reusing stripes - we still need a codepath to
-		 * walk backpointers and update all extents that point to that
-		 * block when updating the stripe
-		 */
-		if (v->ptrs[i].dev != BCH_SB_MEMBER_INVALID)
-			__clear_bit(v->ptrs[i].dev, req->devs_may_alloc.d);
-
-		if (i < s->nr_data)
-			nr_have_data++;
-		else
-			nr_have_parity++;
-	}
-
-	BUG_ON(nr_have_data	> s->nr_data);
-	BUG_ON(nr_have_parity	> s->nr_parity);
-
-	req->ptrs.nr = 0;
-	if (nr_have_parity < s->nr_parity) {
-		req->nr_replicas	= s->nr_parity;
-		req->nr_effective	= nr_have_parity;
-		req->data_type		= BCH_DATA_parity;
-
-		int ret = bch2_bucket_alloc_set_trans(trans, req, &h->parity_stripe);
-
-		open_bucket_for_each(c, &req->ptrs, ob, i) {
-			j = find_next_zero_bit(s->blocks_gotten,
-					       s->nr_data + s->nr_parity,
-					       s->nr_data);
-			BUG_ON(j >= s->nr_data + s->nr_parity);
-
-			s->blocks[j] = req->ptrs.v[i];
-			v->ptrs[j] = bch2_ob_ptr(c, ob);
-			__set_bit(j, s->blocks_gotten);
-		}
-
-		if (ret)
-			return ret;
-	}
-
-	req->ptrs.nr = 0;
-	if (nr_have_data < s->nr_data) {
-		req->nr_replicas	= s->nr_data;
-		req->nr_effective	= nr_have_data;
-		req->data_type		= BCH_DATA_user;
-
-		int ret = bch2_bucket_alloc_set_trans(trans, req, &h->block_stripe);
-
-		open_bucket_for_each(c, &req->ptrs, ob, i) {
-			j = find_next_zero_bit(s->blocks_gotten,
-					       s->nr_data, 0);
-			BUG_ON(j >= s->nr_data);
-
-			s->blocks[j] = req->ptrs.v[i];
-			v->ptrs[j] = bch2_ob_ptr(c, ob);
-			__set_bit(j, s->blocks_gotten);
-		}
-
-		if (ret)
-			return ret;
-	}
-
-	return 0;
-}
-
-static int new_stripe_alloc_buckets(struct btree_trans *trans,
-				    struct alloc_request *req,
-				    struct ec_stripe_head *h, struct ec_stripe_new *s)
-{
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
-
-	if (bitmap_weight(s->blocks_gotten, v->nr_blocks) == v->nr_blocks)
-		return 0;
-
-	req->scratch_data_type		= req->data_type;
-	req->scratch_ptrs		= req->ptrs;
-	req->scratch_nr_replicas	= req->nr_replicas;
-	req->scratch_nr_effective	= req->nr_effective;
-	req->scratch_have_cache		= req->have_cache;
-	req->scratch_devs_may_alloc	= req->devs_may_alloc;
-
-	req->devs_may_alloc	= h->devs;
-	req->have_cache		= true;
-
-	int ret = __new_stripe_alloc_buckets(trans, req, h, s);
-
-	req->data_type		= req->scratch_data_type;
-	req->ptrs		= req->scratch_ptrs;
-	req->nr_replicas	= req->scratch_nr_replicas;
-	req->nr_effective	= req->scratch_nr_effective;
-	req->have_cache		= req->scratch_have_cache;
-	req->devs_may_alloc	= req->scratch_devs_may_alloc;
-	return ret;
-}
-
-static bool may_reuse_stripe(struct ec_stripe_head *h, const struct bch_stripe *s)
-{
-	if (s->disk_label		!= h->disk_label ||
-	    s->algorithm		!= h->algo ||
-	    s->nr_redundant		!= h->redundancy)
-		return false;
-
-	struct bch_devs_mask devs_may_alloc = h->devs;
-	unsigned nr_data = s->nr_blocks - s->nr_redundant;
-
-	for (unsigned i = 0; i < nr_data; i++)
-		if (stripe_blockcount_get(s, i)) {
-			if (s->ptrs[i].dev == BCH_SB_MEMBER_INVALID)
-				return false;
-
-			__clear_bit(s->ptrs[i].dev, devs_may_alloc.d);
-		}
-
-	return dev_mask_nr(&devs_may_alloc) > h->redundancy;
-}
-
-static int get_old_stripe(struct btree_trans *trans,
-			  struct ec_stripe_head *head,
-			  struct ec_stripe_buf *stripe,
-			  u64 idx)
-{
-	struct bch_fs *c = trans->c;
-
-	/*
-	 * We require an intent lock here until we have the stripe open, for
-	 * exclusion with bch2_trigger_stripe() - which will delete empty
-	 * stripes if they're not open, but it can't actually open them:
-	 */
-	CLASS(btree_iter, iter)(trans, BTREE_ID_stripes, POS(0, idx),
-				BTREE_ITER_intent|
-				BTREE_ITER_nopreserve);
-	struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_slot(&iter));
-
-	/* We expect write buffer races here */
-	if (k.k->type != KEY_TYPE_stripe)
-		return 0;
-
-	struct bkey_s_c_stripe s = bkey_s_c_to_stripe(k);
-
-	if (stripe_lru_pos(s.v) == STRIPE_LRU_POS_EMPTY) {
-		/*
-		 * We can't guarantee that the trigger will always delete
-		 * stripes - the stripe might still be open when the last data
-		 * in it was deleted
-		 */
-		return !bch2_stripe_is_open(c, idx)
-			? bch2_btree_delete_at(trans, &iter, 0) ?:
-			  bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc) ?:
-			  bch_err_throw(c, transaction_restart_commit)
-			: 0;
-	}
-
-	bool ret = may_reuse_stripe(head, s.v) &&
-		bch2_stripe_handle_tryget(c, &head->s->old_stripe_handle, idx);
-	if (ret)
-		bkey_reassemble(&stripe->key, k);
-	return ret;
-}
-
-static int init_new_stripe_from_old(struct bch_fs *c, struct ec_stripe_new *s)
-{
-	struct bch_stripe *new_v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
-	struct bch_stripe *old_v = &bkey_i_to_stripe(&s->old_stripe.key)->v;
-	unsigned i;
-
-	BUG_ON(old_v->nr_redundant != s->nr_parity);
-
-	int ret = bch2_ec_stripe_buf_init(c, &s->old_stripe, 0, le16_to_cpu(old_v->sectors));
-	if (ret) {
-		bch2_stripe_handle_put(c, &s->old_stripe_handle);
-		return ret;
-	}
-
-	BUG_ON(s->old_stripe.size != le16_to_cpu(old_v->sectors));
-
-	/*
-	 * Free buckets we initially allocated - they might conflict with
-	 * blocks from the stripe we're reusing:
-	 */
-	for_each_set_bit(i, s->blocks_gotten, new_v->nr_blocks) {
-		bch2_open_bucket_put(c, c->allocator.open_buckets + s->blocks[i]);
-		s->blocks[i] = 0;
-	}
-	memset(s->blocks_gotten, 0, sizeof(s->blocks_gotten));
-	memset(s->blocks_allocated, 0, sizeof(s->blocks_allocated));
-
-	for (unsigned i = 0; i < old_v->nr_blocks; i++) {
-		if (stripe_blockcount_get(old_v, i)) {
-			__set_bit(s->old_blocks_nr, s->blocks_gotten);
-			__set_bit(s->old_blocks_nr, s->blocks_allocated);
-
-			new_v->ptrs[s->old_blocks_nr] = old_v->ptrs[i];
-
-			s->old_block_map[s->old_blocks_nr++] = i;
-		}
-
-		bch2_ec_block_io(c, &s->old_stripe, READ, i, &s->iodone);
-	}
-
-	s->have_old_stripe = true;
-
-	return 0;
-}
-
-static int stripe_reuse(struct btree_trans *trans, struct ec_stripe_head *h,
-			struct ec_stripe_new *s)
-{
-	struct bch_fs *c = trans->c;
-
-	/*
-	 * If we can't allocate a new stripe, and there's no stripes with empty
-	 * blocks for us to reuse, that means we have to wait on copygc:
-	 */
-	if (may_create_new_stripe(c))
-		return -1;
-
-	struct bkey_s_c lru_k;
-	int ret = 0;
-
-	for_each_btree_key_max_norestart(trans, lru_iter, BTREE_ID_lru,
-			lru_pos(BCH_LRU_STRIPE_FRAGMENTATION, 2, 0),
-			lru_pos(BCH_LRU_STRIPE_FRAGMENTATION, 2, LRU_TIME_MAX),
-			0, lru_k, ret) {
-		ret = get_old_stripe(trans, h, &s->old_stripe, lru_k.k->p.offset);
-		if (ret)
-			break;
-	}
-	if (ret <= 0)
-		return ret ?: bch_err_throw(c, stripe_alloc_blocked);
-
-	return init_new_stripe_from_old(c, s);
-}
-
-static int stripe_idx_alloc(struct btree_trans *trans, struct ec_stripe_new *s)
-{
-	/*
-	 * Allocate stripe slot
-	 * XXX: we're going to need a bitrange btree of free stripes
-	 */
-	struct bch_fs *c = trans->c;
-	struct bkey_s_c k;
-	struct bpos min_pos = POS(0, 1);
-	struct bpos start_pos = bpos_max(min_pos, POS(0, c->ec.stripe_hint));
-	int ret;
-
-	for_each_btree_key_norestart(trans, iter, BTREE_ID_stripes, start_pos,
-			   BTREE_ITER_slots|BTREE_ITER_intent, k, ret) {
-		c->ec.stripe_hint = iter.pos.offset;
-
-		if (bkey_gt(k.k->p, POS(0, U32_MAX))) {
-			if (start_pos.offset) {
-				start_pos = min_pos;
-				bch2_btree_iter_set_pos(&iter, start_pos);
-				continue;
-			}
-
-			ret = bch_err_throw(c, ENOSPC_stripe_create);
-			break;
-		}
-
-		if (bkey_deleted(k.k) &&
-		    bch2_stripe_handle_tryget(c, &s->new_stripe_handle, k.k->p.offset)) {
-			ret = bch2_ec_stripe_mem_alloc(trans, &iter);
-			if (ret)
-				bch2_stripe_handle_put(c, &s->new_stripe_handle);
-			s->new_stripe.key.k.p = iter.pos;
-			break;
-		}
-	}
-
-	return ret;
-}
-
-static int stripe_alloc_or_reuse(struct btree_trans *trans,
-				 struct alloc_request *req,
-				 struct ec_stripe_head *h,
-				 struct ec_stripe_new *s,
-				 bool *waiting)
-{
-	struct bch_fs *c = trans->c;
-
-	if (!s->new_stripe.key.k.p.offset)
-		try(stripe_idx_alloc(trans, s));
-
-	if (!s->have_old_stripe) {
-		/* First, try to allocate a full stripe: */
-		enum bch_watermark saved_watermark = BCH_WATERMARK_stripe;
-		unsigned saved_flags = req->flags | BCH_WRITE_alloc_nowait;
-		swap(req->watermark,	saved_watermark);
-		swap(req->flags,	saved_flags);
-
-		int ret = new_stripe_alloc_buckets(trans, req, h, s);
-
-		swap(req->watermark,	saved_watermark);
-		swap(req->flags,	saved_flags);
-
-		if (ret) {
-			if (bch2_err_matches(ret, BCH_ERR_transaction_restart) ||
-			    bch2_err_matches(ret, ENOMEM))
-				return ret;
-
-			/*
-			 * Not enough buckets available for a full stripe: we must reuse an
-			 * oldstripe:
-			 */
-			while (1) {
-				ret = stripe_reuse(trans, h, s);
-				if (!ret)
-					break;
-				if (*waiting ||
-				    (req->flags & BCH_WRITE_alloc_nowait) ||
-				    ret != -BCH_ERR_stripe_alloc_blocked)
-					return ret;
-
-				if (req->watermark == BCH_WATERMARK_copygc) {
-					/* Don't self-deadlock copygc */
-					swap(req->flags, saved_flags);
-					ret =   new_stripe_alloc_buckets(trans, req, h, s);
-					swap(req->flags, saved_flags);
-
-					try(ret);
-					break;
-				}
-
-				/* XXX freelist_wait? */
-				closure_wait(&c->allocator.freelist_wait, req->cl);
-				*waiting = true;
-			}
-		}
-	}
-
-	/*
-	 * Retry allocating buckets, with the watermark for this
-	 * particular write:
-	 */
-	try(new_stripe_alloc_buckets(trans, req, h, s));
-	try(bch2_ec_stripe_buf_init(c, &s->new_stripe, 0, h->blocksize));
-
-	if (!s->res.sectors)
-		bch2_disk_reservation_get(c, &s->res,
-					  h->blocksize,
-					  s->nr_parity,
-					  BCH_DISK_RESERVATION_NOFAIL);
-
-	bch2_stripe_new_buckets_add(c, s);
-	return 0;
-}
-
 struct ec_stripe_head *bch2_ec_stripe_head_get(struct btree_trans *trans,
 					       struct alloc_request *req,
 					       unsigned algo)
@@ -1208,7 +1305,15 @@ struct ec_stripe_head *bch2_ec_stripe_head_get(struct btree_trans *trans,
 		return h;
 
 	if (!h->s) {
-		h->s = ec_new_stripe_alloc(c, h);
+		h->s = ec_new_stripe_alloc(c,
+					   h->devs,
+					   h->watermark,
+					   h->disk_label,
+					   h->algo,
+					   min_t(unsigned, h->nr_active_devs,
+						 BCH_BKEY_PTRS_MAX) - h->redundancy,
+					   h->redundancy,
+					   h->blocksize);
 		if (!h->s) {
 			ret = bch_err_throw(c, ENOMEM_ec_new_stripe_alloc);
 			bch_err(c, "failed to allocate new stripe");
@@ -1220,23 +1325,35 @@ struct ec_stripe_head *bch2_ec_stripe_head_get(struct btree_trans *trans,
 
 	struct ec_stripe_new *s = h->s;
 	if (!s->allocated) {
+		if (!h->dev_stripe) {
+			struct ec_dev_stripe_state *d = ec_dev_stripe_state_get(trans, h->disk_label);
+			ret = PTR_ERR_OR_ZERO(d);
+			if (ret)
+				goto err;
+			h->dev_stripe = d;
+		} else {
+			ret = bch2_trans_mutex_lock(trans, &h->dev_stripe->lock);
+			if (ret)
+				goto err;
+		}
+
 		bool waiting = false;
-		ret = stripe_alloc_or_reuse(trans, req, h, s, &waiting);
+		ret = stripe_alloc_or_reuse(trans, req, h->dev_stripe, s, &waiting);
 		if (waiting &&
 		    !bch2_err_matches(ret, BCH_ERR_operation_blocked))
 			closure_wake_up(&c->allocator.freelist_wait);
 
+		mutex_unlock(&h->dev_stripe->lock);
+
 		if (ret)
 			goto err;
 
-		s->allocated = true;
-
 		event_inc_trace(c, stripe_alloc, buf, ({
 			prt_printf(&buf, "\nnew: ");
-			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key));
+			bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->new_stripe.key.k_i));
 			if (s->have_old_stripe) {
 				prt_printf(&buf, "\nold: ");
-				bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->old_stripe.key));
+				bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(&s->old_stripe.key.k_i));
 			}
 		}));
 	}
@@ -1246,46 +1363,4 @@ struct ec_stripe_head *bch2_ec_stripe_head_get(struct btree_trans *trans,
 err:
 	bch2_ec_stripe_head_put(c, h);
 	return ERR_PTR(ret);
-}
-
-static void bch2_new_stripe_to_text(struct printbuf *out, struct bch_fs *c,
-				    struct ec_stripe_new *s)
-{
-	prt_printf(out, "\tidx %llu blocks %u+%u allocated %u ref %u %u %s obs",
-		   s->new_stripe.key.k.p.offset, s->nr_data, s->nr_parity,
-		   bitmap_weight(s->blocks_allocated, s->nr_data),
-		   atomic_read(&s->ref[STRIPE_REF_io]),
-		   atomic_read(&s->ref[STRIPE_REF_stripe]),
-		   bch2_watermarks[s->h->watermark]);
-
-	struct bch_stripe *v = &bkey_i_to_stripe(&s->new_stripe.key)->v;
-	unsigned i;
-	for_each_set_bit(i, s->blocks_gotten, v->nr_blocks)
-		prt_printf(out, " %u", s->blocks[i]);
-	prt_newline(out);
-	bch2_bkey_val_to_text(out, c, bkey_i_to_s_c(&s->new_stripe.key));
-	prt_newline(out);
-}
-
-void bch2_new_stripes_to_text(struct printbuf *out, struct bch_fs *c)
-{
-	struct ec_stripe_head *h;
-	struct ec_stripe_new *s;
-
-	scoped_guard(mutex, &c->ec.stripe_head_lock)
-		list_for_each_entry(h, &c->ec.stripe_head_list, list) {
-			prt_printf(out, "disk label %u algo %u redundancy %u %s nr created %llu:\n",
-			       h->disk_label, h->algo, h->redundancy,
-			       bch2_watermarks[h->watermark],
-			       h->nr_created);
-
-			if (h->s)
-				bch2_new_stripe_to_text(out, c, h->s);
-		}
-
-	prt_printf(out, "in flight:\n");
-
-	scoped_guard(mutex, &c->ec.stripe_new_lock)
-		list_for_each_entry(s, &c->ec.stripe_new_list, list)
-			bch2_new_stripe_to_text(out, c, s);
 }
