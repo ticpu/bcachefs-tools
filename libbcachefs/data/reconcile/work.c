@@ -167,17 +167,28 @@ int bch2_set_fs_needs_reconcile(struct bch_fs *c)
 
 static int bch2_clear_reconcile_needs_scan(struct btree_trans *trans, struct bpos pos, u64 cookie)
 {
-	return commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+	struct bch_fs *c = trans->c;
+	u64 v;
+
+	try(commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
 		CLASS(btree_iter, iter)(trans, BTREE_ID_reconcile_scan, pos, BTREE_ITER_intent);
 		struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_slot(&iter));
 
-		u64 v = k.k->type == KEY_TYPE_cookie
+		v = k.k->type == KEY_TYPE_cookie
 			? le64_to_cpu(bkey_s_c_to_cookie(k).v->cookie)
 			: 0;
 		v == cookie
 			? bch2_btree_delete_at(trans, &iter, 0)
 			: 0;
+	})));
+
+	event_inc_trace(c, reconcile_clear_scan, buf, ({
+		reconcile_scan_to_text(&buf, c, reconcile_scan_decode(c, pos.offset));
+		prt_newline(&buf);
+		prt_printf(&buf, "scan started with cookie %llu now have %llu", cookie, v);
+		prt_printf(&buf, "%sdeleting scan cookie\n", v == cookie ? "" : "not ");
 	}));
+	return 0;
 }
 
 #define RECONCILE_WORK_BUF_NR		1024
@@ -720,6 +731,14 @@ static int update_reconcile_opts_scan(struct btree_trans *trans,
 					  SET_NEEDS_RECONCILE_opt_change);
 }
 
+static bool bch2_reconcile_enabled(struct bch_fs *c)
+{
+	return !c->opts.read_only &&
+		c->opts.reconcile_enabled &&
+		!(c->opts.reconcile_on_ac_only &&
+		  c->reconcile.on_battery);
+}
+
 static int do_reconcile_scan_bp(struct btree_trans *trans,
 				struct reconcile_scan s,
 				struct bkey_s_c_backpointer bp,
@@ -759,6 +778,9 @@ static int do_reconcile_scan_bps(struct moving_context *ctxt,
 	return backpointer_scan_for_each(trans, iter, POS(s.dev, 0), POS(s.dev, U64_MAX),
 				  last_flushed, NULL, bp, ({
 		ctxt->stats->pos = BBPOS(BTREE_ID_backpointers, iter.pos);
+
+		if (kthread_should_stop() || !bch2_reconcile_enabled(c))
+			break;
 
 		CLASS(disk_reservation, res)(c);
 		do_reconcile_scan_bp(trans, s, bp, last_flushed) ?:
@@ -821,6 +843,9 @@ static int do_reconcile_scan_btree(struct moving_context *ctxt,
 
 	return for_each_btree_key_max_continue(trans, iter, end, 0, k, ({
 		ctxt->stats->pos = BBPOS(iter.btree_id, iter.pos);
+
+		if (kthread_should_stop() || !bch2_reconcile_enabled(c))
+			break;
 
 		atomic64_add(!level ? k.k->size : c->opts.btree_node_size >> 9,
 			     &r->scan_stats.sectors_seen);
@@ -927,14 +952,6 @@ static void reconcile_wait(struct bch_fs *c)
 	}
 
 	bch2_kthread_io_clock_wait_once(clock, r->wait_iotime_end, MAX_SCHEDULE_TIMEOUT);
-}
-
-static bool bch2_reconcile_enabled(struct bch_fs *c)
-{
-	return !c->opts.read_only &&
-		c->opts.reconcile_enabled &&
-		!(c->opts.reconcile_on_ac_only &&
-		  c->reconcile.on_battery);
 }
 
 struct reconcile_scan_phase {
@@ -1158,12 +1175,15 @@ static int do_reconcile(struct moving_context *ctxt)
 						k.k->p,
 						le64_to_cpu(bkey_s_c_to_cookie(k).v->cookie),
 						&sectors_scanned, &last_flushed);
+
+			BUG_ON(bch2_err_matches(ret, BCH_ERR_transaction_restart));
 		} else if (k.k->type == KEY_TYPE_backpointer) {
 			ret = do_reconcile_btree(ctxt, &snapshot_io_opts,
 						 r->work_pos, bkey_s_c_to_backpointer(k));
 		} else if (btree_is_reconcile_phys(r->work_pos.btree)) {
 			bch2_trans_unlock_long(trans);
 			ret = do_reconcile_phys(c, i);
+			BUG_ON(bch2_err_matches(ret, BCH_ERR_transaction_restart));
 			r->work_pos = reconcile_phase_start(++i);
 		} else {
 			ret = lockrestart_do(trans,

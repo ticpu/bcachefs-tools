@@ -44,6 +44,7 @@ enum bch_counters_flags {
 	x(reconcile_scan_pending,			115,	TYPE_SECTORS)	\
 	x(reconcile_scan_device,			116,	TYPE_SECTORS)	\
 	x(reconcile_scan_inum,				117,	TYPE_SECTORS)	\
+	x(reconcile_clear_scan,				129,	TYPE_COUNTER)	\
 	x(reconcile_btree,				118,	TYPE_SECTORS)	\
 	x(reconcile_data,				119,	TYPE_SECTORS)	\
 	x(reconcile_phys,				120,	TYPE_SECTORS)	\
@@ -91,7 +92,7 @@ enum bch_counters_flags {
 	x(btree_path_relock_fail,			22,	TYPE_COUNTER)	\
 	x(btree_path_upgrade_fail,			23,	TYPE_COUNTER)	\
 	x(btree_reserve_get_fail,			24,	TYPE_COUNTER)	\
-	x(journal_entry_full,				25,	TYPE_COUNTER)	\
+	x(journal_res_get_blocked,			25,	TYPE_COUNTER)	\
 	x(journal_full,					26,	TYPE_COUNTER)	\
 	x(journal_reclaim_finish,			27,	TYPE_COUNTER)	\
 	x(journal_reclaim_start,			28,	TYPE_COUNTER)	\
