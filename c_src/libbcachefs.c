@@ -264,6 +264,8 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	SET_BCH_SB_META_REPLICAS_REQ(sb.sb, 1);
 	SET_BCH_SB_DATA_REPLICAS_REQ(sb.sb, 1);
 
+	SET_BCH_SB_EXTENT_BP_SHIFT(sb.sb, 16);
+
 	if (opts.version > bcachefs_metadata_version_disk_accounting_big_endian)
 		sb.sb->features[0] |= cpu_to_le64(BCH_SB_FEATURES_ALL);
 
