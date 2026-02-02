@@ -20,7 +20,6 @@ use log::debug;
 fn read_super_silent(path: impl AsRef<Path>, mut opts: bch_opts) -> anyhow::Result<bch_sb_handle> {
     opt_set!(opts, noexcl, 1);
     opt_set!(opts, nochanges, 1);
-    opt_set!(opts, direct_io, 0);
     opt_set!(opts, no_version_check, 1);
 
     bch_bindgen::sb_io::read_super_silent(path.as_ref(), opts)
@@ -130,7 +129,6 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
         let mut opts = *opts;
         opt_set!(opts, noexcl, 1);
         opt_set!(opts, nochanges, 1);
-        opt_set!(opts, direct_io, 0);
         opt_set!(opts, no_version_check, 1);
 
         // If the device string contains ":" we will assume the user knows the
