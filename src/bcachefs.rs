@@ -1,12 +1,13 @@
 mod commands;
 mod copy_fs;
+mod device_multipath;
+mod device_scan;
 mod key;
 mod dump_stack;
 mod logging;
 mod qcow2;
 mod util;
 mod wrappers;
-mod device_scan;
 mod http;
 
 use std::process::{ExitCode, Termination};
