@@ -424,6 +424,22 @@ assume 32-bit inode numbers internally. When combined with
 \texttt{shard\_inode\_numbers} (which uses the CPU ID for the high bits of new
 inodes to reduce allocator contention on large systems), the inode space is
 partitioned so that each CPU gets a range within the 32-bit space.
+
+\subsection{Casefolding}
+
+bcachefs supports case-insensitive filenames via the Linux kernel's Unicode
+subsystem (\texttt{CONFIG\_UNICODE}). The \texttt{casefold} option is a
+per-directory property that is inherited by newly created subdirectories.
+
+\textbf{Important}: Casefolding can only be enabled on an empty directory.
+Existing entries cannot be converted because they would need to be rehashed
+with case-folded names. On disk, casefolded directories store both the original
+filename and its case-folded form; the case-folded form is used for lookups
+while the original is preserved for display.
+
+The Unicode version used for case folding is hardcoded to Unicode 12.1.0. The
+kernel will fail to mount (or use an older version correctly) if built with
+different Unicode tables.
 \section{Management}
 
 \subsection{Formatting}
