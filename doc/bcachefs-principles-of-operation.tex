@@ -53,6 +53,121 @@ greatly improves our write efficiency on random update workloads, as it means
 btree writes are only done when we have a large block of updates, or when
 required by memory reclaim or journal reclaim.
 
+\subsection{Transactions}
+
+All btree operations go through a transaction layer (\texttt{btree\_trans}) that
+provides atomic multi-key updates with optimistic concurrency control.
+Transactions collect updates in memory, then commit them atomically: first
+acquiring a journal reservation, then taking write locks on affected btree nodes
+in sorted order, applying updates, and releasing locks after the journal has
+accepted the change (but before the journal write is persisted to disk). This
+means btree locks are held only for in-memory operations, never across IO.
+
+Btree nodes use six-locks (shared/intent/exclusive): the intent state allows an
+operation that modifies multiple nodes to hold intent locks for its duration,
+upgrading to write only for each individual in-memory update, avoiding the need
+to hold write locks across entire split or merge operations.
+
+Rather than blocking on lock contention, when a transaction encounters a
+potential deadlock it drops all locks and restarts from the beginning. Deadlock
+detection is integrated into the lock acquisition path: before sleeping on a
+contended lock, the transaction checks for lock cycles and aborts if one is
+found. This restart-based approach avoids
+deadlocks entirely and keeps worst-case latency bounded, at the cost of
+requiring all transaction code to be idempotent and prepared for restarts at any
+point. This idempotency requirement has a profound consequence for reliability:
+since every operation can be safely interrupted and restarted, the filesystem is
+inherently resilient to interruption at any point - including during recovery
+itself. A crash during journal replay or an on-disk format upgrade simply
+results in the operation continuing from a safe point on the next mount.
+Recovery passes generally restart from the beginning and re-check everything;
+only passes that maintain persistent work queues can resume mid-pass.
+
+Sequence numbers on btree nodes enable efficient relocking after a restart: if a
+node's sequence number hasn't changed, the lock can be reacquired without
+re-traversing the btree.
+
+Transactions also support triggers: callbacks that fire on key insertion or
+deletion. Transactional triggers run before commit and may generate additional
+updates (e.g. updating backpointers when an extent changes). Atomic triggers
+run with the journal lock held and are used for accounting updates that must be
+exactly synchronized with the commit.
+
+For operations that cannot be made atomic within a single transaction (such as
+truncate or file insert/collapse, which may need to modify an unbounded number
+of extents), bcachefs uses logged operations: the intent is written to the
+\texttt{logged\_ops} btree before starting, and on recovery any incomplete
+logged operations are replayed to completion.
+
+\subsection{Recovery}
+
+On unclean shutdown, the journal is replayed to bring the btrees up to date.
+Journal entries record btree updates in commit order; replay applies them
+sequentially to reconstruct the state at the last completed commit.
+
+To guarantee ordering of btree updates after a crash, we need to detect when a
+btree node was flushed to disk but its corresponding journal entry was not;
+otherwise, recovery could see later updates without the earlier updates they
+depended on.
+
+During btree node reads, bcachefs detects this situation: bsets (sorted key
+arrays within a node) whose journal sequence number is newer than the last
+successfully written journal entry indicate the btree node was written to disk
+but the corresponding journal entry was not. These sequences are blacklisted: recorded in the
+superblock so that they are never replayed, and the bsets referencing them are
+ignored until the btree node is next rewritten.
+
+\subsubsection{Recovery passes}
+
+Beyond journal replay, bcachefs has approximately 48 recovery passes with an
+explicit dependency graph. Not all passes run on every mount - which passes run
+depends on context:
+
+\begin{description}
+	\item[Every mount] A default set of passes is scheduled: reading
+		accounting, bucket generations, and snapshots first, checking
+		snapshot consistency, then resuming logged operations and
+		cleaning up dead inodes.
+
+	\item[Unclean shutdown] Adds journal replay. No extra repair passes
+		are needed because the filesystem is always consistent after
+		journal replay (absent bugs or data corruption).
+
+	\item[Version upgrade/downgrade] Each version transition defines
+		specific passes to run for format migration.
+
+	\item[Fsck] A defined subset of validation passes runs: checking inodes,
+		extents, dirents, xattrs, link counts, and directory structure.
+		Note that \texttt{check\_backpointers\_to\_extents} (the reverse
+		direction check) is too expensive to run during normal fsck.
+\end{description}
+
+Recovery is split into two phases around the transition to read-write mode.
+Early passes run in-memory only, accumulating delayed metadata writes: reading
+btrees into memory, verifying btree topology, and reconstructing allocation
+state. Once the allocator and journal
+are initialized, the filesystem transitions to read-write and journal replay
+runs - followed by the heavier validation and repair passes that need to write.
+
+The filesystem can schedule new recovery passes at any time, including during
+other recovery passes or normal operation, as soon as it notices something needs
+repair. In early recovery, this can rewind the recovery sequence to run earlier
+passes again. Most validation passes (those marked \texttt{PASS\_ONLINE}) can
+also run after the filesystem is fully mounted, either triggered explicitly or
+scheduled automatically when an inconsistency is detected at runtime.
+
+For catastrophic damage, heavier passes exist that reconstruct entire btrees
+from scratch. These are triggered automatically when normal recovery detects
+structural damage: \texttt{scan\_for\_btree\_nodes} is scheduled when
+\texttt{check\_topology} finds missing or unreachable btree nodes - it
+physically scans the raw device for valid btree node headers and recovers what
+it can. \texttt{reconstruct\_snapshots} is scheduled when the snapshots btree
+itself is lost, or when references to missing snapshots cannot be resolved
+by deletion alone and recovering those snapshots is feasible.
+\texttt{check\_allocations} rebuilds all allocation accounting from the extents
+and backpointers btrees. These passes are not part of normal recovery and may
+take considerable time on large filesystems.
+
 \subsection{Bucket based allocation}
 
 As mentioned bcachefs is descended from bcache, where the ability to efficiently
@@ -394,7 +509,7 @@ of just one.
 
 bcachefs supports inline data extents, controlled by the \texttt{inline\_data}
 option (on by default). When the end of a file is being written and is smaller
-than half of the filesystem blocksize, it will be written as an inline data
+than \texttt{min(blocksize/2, 1024)} bytes, it will be written as an inline data
 extent. Inline data extents can also be reflinked (moved to the reflink btree
 with a refcount added): as a todo item we also intend to support compressed
 inline data extents.
@@ -403,8 +518,9 @@ inline data extents.
 
 bcachefs supports subvolumes and snapshots with a similar userspace interface as
 btrfs. A new subvolume may be created empty, or it may be created as a snapshot
-of another subvolume. Snapshots are writeable and may be snapshotted again,
-creating a tree of snapshots.
+of another subvolume. Snapshots are writeable by default and may be snapshotted
+again, creating a tree of snapshots; they can also be created as read-only with
+the \texttt{--read-only} (or \texttt{-r}) flag.
 
 Snapshots are very cheap to create: they're not based on cloning of COW btrees
 as with btrfs, but instead are based on versioning of individual keys in the
@@ -421,9 +537,8 @@ The following subcommands exist for managing subvolumes and snapshots:
 \end{itemize}
 
 A subvolume can also be deleted with a normal rmdir after deleting all the
-contents, as with \texttt{rm -rf}. Snapshots can be created as read-only with
-the \texttt{--read-only} (or \texttt{-r}) flag. Still to be implemented:
-recursive snapshot creation and a method for recursively listing subvolumes.
+contents, as with \texttt{rm -rf}. Still to be implemented: recursive snapshot
+creation and a method for recursively listing subvolumes.
 
 \subsection{Quotas}
 
@@ -579,8 +694,32 @@ larger btree writes. The \texttt{bcachefs device resize-journal} can be used for
 resizing the journal on disk on a particular device - it can be used on a
 mounted or unmounted filesystem.
 
-In the future, we should implement a method to see how much space is currently
-utilized in the journal.
+\subsubsection{Journal rewind}
+
+The \texttt{journal\_rewind} mount option accepts a journal sequence number and
+rolls back the most important filesystem metadata to that point, discarding
+subsequent updates and fixing up inconsistencies afterwards. This is a tool
+specifically for reverting changes from a bug in recovery that irreversibly
+corrupted or deleted metadata, or (combined with \texttt{-o nochanges}) for
+attempting to recover recently deleted files. It drops all leaf-level btree
+updates to non-allocator btrees at or above the specified sequence number, then
+automatically triggers a full fsck to rebuild allocation metadata.
+
+Journal rewind is used in conjunction with \texttt{bcachefs list\_journal} to
+identify the sequence number to rewind to. The
+\texttt{journal\_transaction\_names} option (on by default) is required for
+journal rewind: it controls whether \texttt{BCH\_JSET\_ENTRY\_overwrite}
+entries (the old values being replaced) are stored in the journal, which is
+what rewind replays to undo changes. It also records which function created
+each journal entry, making it easier to identify which transactions caused a
+problem. Since rewind operates on metadata only, data in
+buckets that have been reused (generation incremented and overwritten with new
+data) is unrecoverable, and \texttt{nocow} data cannot be rolled back at all.
+The journal records allocator updates, so \texttt{list\_journal -b alloc} can
+identify when specific buckets were recycled. The rewind window is bounded by
+the journal size: only sequences between \texttt{last\_seq} (oldest entry still
+on disk) and the current sequence are available, so a larger journal provides a
+deeper rewind history.
 
 \subsection{Device management}
 
@@ -711,13 +850,14 @@ Inode allocation cursors are persisted in the \texttt{logged\_ops} btree
 after a crash.
 
 \subsection{Error actions}
-The \texttt{errors} option is used for inconsistencies that indicate some sort
-of a bug. Valid error actions are:
+The \texttt{errors} option controls how the filesystem responds to metadata
+inconsistencies. Valid error actions are:
 \begin{description}
 	\item[{\tt fix\_safe}] (default) Automatically repair errors that are
 		safe to fix without user confirmation. Unsafe errors cause
 		emergency read-only with a message to run fsck and report to devs.
 	\item[{\tt continue}] Log the error but continue normal operation
+		without attempting repair
 	\item[{\tt ro}] Emergency read only, immediately halting any changes
 		to the filesystem on disk
 	\item[{\tt panic}] Immediately halt the entire machine, printing a
@@ -895,7 +1035,7 @@ quantiles for latency/duration in the
 
 	\item \texttt{btree\_key\_cache} \\
 		Prints information on the btree key cache: number of freed keys
-		(which must wait for a sRCU barrier to complete before being
+		(which must wait for an SRCU barrier to complete before being
 		freed), number of cached keys, and number of dirty keys.
 
 	\item \texttt{btree\_transactions} \\
@@ -1084,7 +1224,7 @@ This section documents bcachefs-specific ioctls:
 	\item \texttt{BCH\_IOCTL\_DISK\_RESIZE\_JOURNAL} \\
 	\item \texttt{BCH\_IOCTL\_DATA} \\
 		Starts a data job, which walks all data and/or metadata in a
-		filesystem performing, performing some operations on each btree
+		filesystem, performing some operations on each btree
 		node and extent. Returns a file descriptor which can be read
 		from to get the current status of the job, and closing the file
 		descriptor (i.e. on process exit stops the data job.
