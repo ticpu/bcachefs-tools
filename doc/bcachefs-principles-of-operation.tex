@@ -527,6 +527,54 @@ as with btrfs, but instead are based on versioning of individual keys in the
 btrees. Many thousands or millions of snapshots can be created, with the only
 limitation being disk space.
 
+\subsubsection{Subvolume and snapshot architecture}
+
+A subvolume is a named entry point into the filesystem: it holds a root inode
+number and a snapshot ID. The snapshot ID links the subvolume to a leaf node in
+the snapshots btree, which records the snapshot tree structure: parent, children
+(up to two), depth, and a skiplist for fast ancestor queries. Only leaf snapshot
+nodes are associated with subvolumes; interior nodes exist purely for tree
+structure. Snapshot trees are grouped under \texttt{snapshot\_tree} entries,
+each recording the root snapshot and a master subvolume. Each subvolume carries
+a \texttt{BCH\_SUBVOLUME\_SNAP} flag that records whether it was created as a
+snapshot of another subvolume; exactly one subvolume per snapshot tree (the
+master) does not have this flag set.
+
+Four btrees are snapshot-aware: extents, inodes, dirents, and xattrs. Every key
+in these btrees includes a snapshot ID in its position
+(\texttt{bpos.snapshot}), so keys from different snapshots coexist in the same
+btree ordered by (inode, offset, snapshot). When reading from a snapshot, the
+iterator walks up the snapshot tree: a key is visible if its snapshot ID is an
+ancestor of (or equal to) the requested snapshot, and no closer ancestor has
+overwritten it. Deletion within a snapshot inserts a whiteout key that blocks
+visibility of the ancestor's version without affecting other snapshots. To
+avoid a linear parent-pointer walk on every lookup, each snapshot node stores a
+128-bit ancestor bitmap for O(1) checks within 128 snapshot IDs, plus a
+randomized skiplist of three ancestor IDs for O(log $n$) convergence on
+deeper trees. During early
+recovery, before this data is validated, queries fall back to a simple parent
+walk.
+
+When a snapshot is created, two new snapshot nodes are allocated as children of
+the source subvolume's current snapshot node. One child becomes the new
+snapshot's ID; the other replaces the source subvolume's snapshot ID. No keys
+are copied: both children inherit visibility of all ancestor keys through the
+snapshot tree. Subsequent writes to either subvolume create new keys tagged with
+that subvolume's snapshot ID, diverging only where modifications occur.
+
+Deleting a snapshot marks it for asynchronous cleanup by a background thread
+that must walk every snapshot-aware btree to remove or relocate affected keys.
+For leaf snapshots, keys are deleted or converted to whiteouts where ancestor
+visibility must be preserved. For interior nodes that have lost all but one
+child, keys are moved to the surviving child before the node is removed. The
+eytzinger-layout search trees within each btree node make this scan efficient:
+they allow cache-friendly binary search over the packed keys, so the deletion
+thread can seek through large btree nodes without excessive cache misses even
+when processing millions of keys. Interior node removal is deferred to the next
+mount because it requires updating depth and skiplist fields across the
+subtree. Progress can be monitored via
+\texttt{/sys/fs/bcachefs/<uuid>/snapshot\_delete\_status}.
+
 The following subcommands exist for managing subvolumes and snapshots:
 \begin{itemize}
 	\item \texttt{bcachefs subvolume create}: Create a new, empty subvolume
@@ -556,13 +604,15 @@ quotas can be used as subdirectory quotas.
 \subsection{32-bit inodes}
 
 The \texttt{inodes\_32bit} option restricts new inode numbers to 32 bits. This
-is needed for NFS compatibility (NFSv2 and some NFSv3 implementations use
-32-bit inode numbers), for 32-bit userspace that may truncate 64-bit inode
-numbers, and for Wine/Proton/Steam, which run Windows applications that
-assume 32-bit inode numbers internally. When combined with
-\texttt{shard\_inode\_numbers} (which uses the CPU ID for the high bits of new
-inodes to reduce allocator contention on large systems), the inode space is
-partitioned so that each CPU gets a range within the 32-bit space.
+is needed for legacy NFS compatibility (NFSv2 and some older NFSv3
+implementations use 32-bit inode numbers), for 32-bit userspace that may
+truncate 64-bit inode numbers, and for Wine/Proton/Steam which run 32-bit
+Windows applications. This option can be set per-directory, affecting only
+files created within that directory tree.
+
+Note that \texttt{inodes\_32bit} silently disables
+\texttt{shard\_inode\_numbers\_bits}: there are too few bits in the 32-bit
+space to make CPU-based sharding practical.
 
 \subsection{Casefolding}
 
@@ -815,7 +865,14 @@ some of the filesystem wide options can be set via \texttt{bcachefs set-fs-optio
 
 \subsection{File and directory options}
 
-<say something here about how attrs must be set via bcachefs attr command>
+A subset of filesystem options can be set on individual files and directories,
+overriding the filesystem-wide defaults. The per-inode options are:
+\texttt{data\_checksum}, \texttt{compression}, \texttt{background\_compression},
+\texttt{data\_replicas}, \texttt{foreground\_target},
+\texttt{background\_target}, \texttt{promote\_target}, \texttt{metadata\_target},
+\texttt{erasure\_code}, \texttt{nocow}, \texttt{casefold}, and
+\texttt{inodes\_32bit}. Note that \texttt{casefold} and \texttt{inodes\_32bit}
+can only be toggled on empty directories.
 
 Options set on inodes (files and directories) are automatically inherited by
 their descendants, and inodes also record whether a given option was explicitly
@@ -842,12 +899,11 @@ recursively.
 
 On systems with many CPUs, inode number allocation can become a contention
 point: every file creation needs a new inode number, and a single global cursor
-serializes all CPUs. The \texttt{shard\_inode\_numbers} option partitions the
-inode number space by CPU ID, giving each CPU its own allocation range. This
-eliminates cross-CPU contention at the cost of non-sequential inode numbers.
-Inode allocation cursors are persisted in the \texttt{logged\_ops} btree
-(\texttt{KEY\_TYPE\_inode\_alloc\_cursor}) so that inode numbers are not reused
-after a crash.
+serializes all CPUs. The \texttt{shard\_inode\_numbers\_bits} option (0-8,
+set at format time to the log2 of the number of online CPUs if not
+specified) partitions the inode number
+space by CPU ID, giving each CPU its own allocation range. This eliminates
+cross-CPU contention at the cost of non-sequential inode numbers.
 
 \subsection{Error actions}
 The \texttt{errors} option controls how the filesystem responds to metadata
