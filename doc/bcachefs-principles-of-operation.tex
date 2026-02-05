@@ -742,7 +742,14 @@ The journal should be sized sufficiently that bursts of activity do not fill up
 the journal too quickly; also, a larger journal means that we can queue up
 larger btree writes. The \texttt{bcachefs device resize-journal} can be used for
 resizing the journal on disk on a particular device - it can be used on a
-mounted or unmounted filesystem.
+mounted or unmounted filesystem. Note that post-format journal resizing
+inherently fragments the journal (allocating new buckets that may not be
+contiguous), so it is best done on a relatively empty device and as few times
+as possible; reducing journal size is not currently implemented. Current journal
+utilization can be inspected via
+\texttt{/sys/fs/bcachefs/<uuid>/internal/journal\_debug}, which reports dirty
+entries out of total capacity, sequence numbers, watermark level, and reclaim
+statistics.
 
 \subsubsection{Journal rewind}
 
@@ -1213,8 +1220,14 @@ listing btree nodes and contents, but for offline filesystems.
 
 \subsubsection{bcachefs list\_journal}
 
-This subcommand lists the contents of the journal, which primarily records btree
-updates ordered by when they occurred.
+This subcommand lists the contents of the journal for offline filesystems. The
+journal is a complete record of every btree update, accounting delta, log
+message, and timestamp, ordered by sequence number. Each entry can be traced
+back to the transaction function that created it (when
+\texttt{journal\_transaction\_names} is enabled). Filtering by btree, sequence
+range, or transaction name makes it possible to reconstruct the exact sequence
+of events leading to a problem - and to identify the right sequence number for
+journal rewind.
 
 \subsubsection{bcachefs dump}
 
