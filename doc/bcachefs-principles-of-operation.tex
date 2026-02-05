@@ -100,6 +100,30 @@ able to support cached data:
 		zoned device support is not yet implemented.
 \end{itemize}
 
+\subsection{Backpointers}
+
+Every sector range on disk that contains data or metadata has a corresponding
+backpointer: a reverse reference from the physical location back to the logical
+btree entry that owns it. Backpointers are stored in a dedicated write-buffered
+btree (ID 13), keyed by (device, starting offset, discriminator), with the value
+recording the btree ID, level, and position of the owning key.
+
+The discriminator field exists because compressed extents complicate ownership:
+a single highly-compressed block can map to a large extent, and if that extent
+is partially overwritten, multiple smaller extents may share ownership of the
+same physical block. Erasure code stripes also get backpointers because they
+co-own data with the extents they protect --- even after an extent is deleted,
+the stripe may still need the data for EC reconstruction until the stripe itself
+is reclaimed.
+
+Backpointers enable efficient answers to the question ``what data lives in this
+bucket?'' without scanning the entire extents btree. This is essential for device
+evacuation (moving all data off a device), scrub (verifying data integrity in
+physical order), and the reconcile subsystem (tracking what needs to be moved on
+rotational devices in LBA order). Three recovery passes validate backpointers:
+\texttt{check\_extents\_to\_backpointers}, \texttt{check\_backpointers\_to\_extents},
+and \texttt{check\_btree\_backpointers}.
+
 \section{Feature overview}
 
 \subsection{IO path options}
