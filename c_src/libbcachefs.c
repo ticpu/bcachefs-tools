@@ -298,7 +298,12 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 		uuid_generate(m->uuid.b);
 		m->nbuckets	= cpu_to_le64(i->nbuckets);
 		m->first_bucket	= 0;
+
+		if (!opt_defined(i->opts, rotational))
+			opt_set(i->opts, rotational, !bdev_nonrot(i->bdev));
+
 		bch2_opt_set_sb_all(sb.sb, idx, &i->opts);
+		SET_BCH_MEMBER_ROTATIONAL_SET(m, true);
 	}
 
 	/* Disk labels*/
