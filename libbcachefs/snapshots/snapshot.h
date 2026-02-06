@@ -193,16 +193,16 @@ static inline u32 bch2_snapshot_live_descendent(struct bch_fs *c, u32 id)
 	}
 }
 
-bool __bch2_snapshot_is_ancestor(struct bch_fs *, u32, u32);
+bool __bch2_snapshot_is_ancestor(struct btree_trans *, u32, u32);
 
-static inline bool bch2_snapshot_is_ancestor(struct bch_fs *c, u32 id, u32 ancestor)
+static inline bool bch2_snapshot_is_ancestor(struct btree_trans *trans, u32 id, u32 ancestor)
 {
 	EBUG_ON(!id);
 	EBUG_ON(!ancestor);
 
 	return id == ancestor
 		? true
-		: __bch2_snapshot_is_ancestor(c, id, ancestor);
+		: __bch2_snapshot_is_ancestor(trans, id, ancestor);
 }
 
 bool bch2_snapshot_is_ancestor_early(struct bch_fs *, u32, u32);
@@ -219,12 +219,9 @@ static inline bool snapshot_list_has_id(snapshot_id_list *s, u32 id)
 	return darray_find(*s, id) != NULL;
 }
 
-static inline bool snapshot_list_has_ancestor(struct bch_fs *c, snapshot_id_list *s, u32 id)
+static inline bool snapshot_list_has_ancestor(struct btree_trans *trans, snapshot_id_list *s, u32 id)
 {
-	darray_for_each(*s, i)
-		if (bch2_snapshot_is_ancestor(c, id, *i))
-			return true;
-	return false;
+	return darray_find_p(*s, i, bch2_snapshot_is_ancestor(trans, id, *i)) != NULL;
 }
 
 static inline int snapshot_list_add(struct bch_fs *c, snapshot_id_list *s, u32 id)
@@ -256,6 +253,8 @@ static inline int snapshot_list_merge(struct bch_fs *c, snapshot_id_list *dst, s
 
 	return 0;
 }
+
+void bch2_snapshot_id_list_to_text(struct printbuf *, snapshot_id_list *);
 
 u32 __bch2_snapshot_tree_next(struct bch_fs *, struct snapshot_table *, u32, unsigned *);
 u32 bch2_snapshot_tree_next(struct bch_fs *, u32, unsigned *);
@@ -306,8 +305,6 @@ static inline int bch2_get_snapshot_overwrites(struct btree_trans *trans,
 					       enum btree_id btree, struct bpos pos,
 					       snapshot_id_list *s)
 {
-	darray_init(s);
-
 	return bch2_snapshot_has_children(trans->c, pos.snapshot)
 		? __bch2_get_snapshot_overwrites(trans, btree, pos, s)
 		: 0;

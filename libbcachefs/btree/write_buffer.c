@@ -22,8 +22,16 @@
 
 #include "util/enumerated_ref.h"
 
+#include <linux/kthread.h>
 #include <linux/prefetch.h>
 #include <linux/sort.h>
+
+static const char * const wb_flush_caller_names[] = {
+#define x(n)	#n,
+	WB_FLUSH_CALLERS()
+#undef x
+	NULL,
+};
 
 static int bch2_btree_write_buffer_journal_flush(struct journal *,
 				struct journal_entry_pin *, u64);
@@ -312,7 +320,8 @@ int bch2_btree_write_buffer_insert_err(struct bch_fs *c,
 	return -EROFS;
 }
 
-static int bch2_btree_write_buffer_flush_locked(struct btree_trans *trans)
+static int bch2_btree_write_buffer_flush_locked(struct btree_trans *trans,
+						enum wb_flush_caller caller)
 {
 	struct bch_fs *c = trans->c;
 	struct journal *j = &c->journal;
@@ -548,6 +557,14 @@ err:
 	bch2_fs_fatal_err_on(ret, c, "%s", bch2_err_str(ret));
 
 	bch2_time_stats_update(&c->times[BCH_TIME_btree_write_buffer_flush], start_time);
+
+	wb->nr_flushes++;
+	wb->nr_flushes_caller[caller]++;
+	wb->nr_keys_flushed		+= nr_flushing;
+	wb->nr_keys_skipped_overwritten	+= overwritten;
+	wb->nr_keys_fast		+= fast;
+	wb->nr_keys_slowpath		+= slowpath;
+
 	event_inc_trace(c, write_buffer_flush, buf,
 		prt_printf(&buf, "flushed %llu skipped %zu fast %zu noop %zu",
 			   nr_flushing, overwritten, fast, noop));
@@ -603,7 +620,7 @@ static int fetch_wb_keys_from_journal(struct bch_fs *c, u64 max_seq)
 }
 
 static int btree_write_buffer_flush_seq(struct btree_trans *trans, u64 max_seq,
-					bool *did_work)
+					bool *did_work, enum wb_flush_caller caller)
 {
 	struct bch_fs *c = trans->c;
 	struct bch_fs_btree_write_buffer *wb = &c->btree.write_buffer;
@@ -622,7 +639,7 @@ static int btree_write_buffer_flush_seq(struct btree_trans *trans, u64 max_seq,
 		 */
 		scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
 			guard(mutex)(&wb->flushing.lock);
-			ret = bch2_btree_write_buffer_flush_locked(trans);
+			ret = bch2_btree_write_buffer_flush_locked(trans, caller);
 		}
 	} while (!ret &&
 		 (fetch_from_journal_err ||
@@ -639,7 +656,7 @@ static int bch2_btree_write_buffer_journal_flush(struct journal *j,
 	CLASS(btree_trans, trans)(c);
 	bool did_work = false;
 
-	return btree_write_buffer_flush_seq(trans, seq, &did_work);
+	return btree_write_buffer_flush_seq(trans, seq, &did_work, WB_FLUSH_journal_pin);
 }
 
 int bch2_btree_write_buffer_flush_sync(struct btree_trans *trans)
@@ -649,7 +666,8 @@ int bch2_btree_write_buffer_flush_sync(struct btree_trans *trans)
 
 	event_inc_trace(c, write_buffer_flush_sync, buf, prt_str(&buf, trans->fn));
 
-	return btree_write_buffer_flush_seq(trans, journal_cur_seq(&c->journal), &did_work);
+	return btree_write_buffer_flush_seq(trans, journal_cur_seq(&c->journal), &did_work,
+					    WB_FLUSH_sync);
 }
 
 /*
@@ -663,7 +681,8 @@ bool bch2_btree_write_buffer_flush_going_ro(struct bch_fs *c)
 
 	CLASS(btree_trans, trans)(c);
 	bool did_work = false;
-	btree_write_buffer_flush_seq(trans, journal_cur_seq(&c->journal), &did_work);
+	btree_write_buffer_flush_seq(trans, journal_cur_seq(&c->journal), &did_work,
+				     WB_FLUSH_sync);
 	return did_work;
 }
 
@@ -675,7 +694,7 @@ static int bch2_btree_write_buffer_flush_nocheck_rw(struct btree_trans *trans)
 
 	if (mutex_trylock(&wb->flushing.lock)) {
 		bch2_trans_unlock_long(trans);
-		ret = bch2_btree_write_buffer_flush_locked(trans);
+		ret = bch2_btree_write_buffer_flush_locked(trans, WB_FLUSH_tryflush);
 		mutex_unlock(&wb->flushing.lock);
 	}
 
@@ -732,7 +751,8 @@ int bch2_btree_write_buffer_maybe_flush(struct btree_trans *trans,
 		}
 
 		bool did_work = false;
-		try(btree_write_buffer_flush_seq(trans, journal_cur_seq(&c->journal), &did_work));
+		try(btree_write_buffer_flush_seq(trans, journal_cur_seq(&c->journal), &did_work,
+						 WB_FLUSH_maybe));
 
 		bch2_bkey_buf_copy(&f->last_flushed, tmp.k);
 		f->nr_flushes++;
@@ -746,23 +766,33 @@ int bch2_btree_write_buffer_maybe_flush(struct btree_trans *trans,
 	return 0;
 }
 
-static void bch2_btree_write_buffer_flush_work(struct work_struct *work)
+static int bch2_btree_write_buffer_flush_thread(void *arg)
 {
-	struct bch_fs *c = container_of(work, struct bch_fs, btree.write_buffer.flush_work);
+	struct bch_fs *c = arg;
 	struct bch_fs_btree_write_buffer *wb = &c->btree.write_buffer;
-	int ret;
 
-	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
-		guard(mutex)(&wb->flushing.lock);
-		CLASS(btree_trans, trans)(c);
-		do {
-			bch2_trans_unlock_long(trans);
+	set_freezable();
 
-			ret = bch2_btree_write_buffer_flush_locked(trans);
-		} while (!ret && bch2_btree_write_buffer_should_flush(c));
+	while (!kthread_should_stop()) {
+		kthread_wait_freezable(kthread_should_stop() ||
+				       (bch2_btree_write_buffer_should_flush(c) &&
+					!bch2_journal_error(&c->journal)));
+		if (kthread_should_stop())
+			break;
+
+		scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+			guard(mutex)(&wb->flushing.lock);
+			CLASS(btree_trans, trans)(c);
+			do {
+				bch2_trans_unlock_long(trans);
+				bch2_btree_write_buffer_flush_locked(trans, WB_FLUSH_thread);
+			} while (!kthread_should_stop() &&
+				 !bch2_journal_error(&c->journal) &&
+				 bch2_btree_write_buffer_should_flush(c));
+		}
 	}
 
-	enumerated_ref_put(&c->writes, BCH_WRITE_REF_btree_write_buffer);
+	return 0;
 }
 
 static void wb_accounting_sort(struct bch_fs_btree_write_buffer *wb)
@@ -891,10 +921,8 @@ int bch2_journal_keys_to_write_buffer_end(struct bch_fs *c, struct journal_keys_
 	if (!dst->wb->keys.nr)
 		bch2_journal_pin_drop(&c->journal, &dst->wb->pin);
 
-	if (bch2_btree_write_buffer_should_flush(c) &&
-	    __enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_btree_write_buffer) &&
-	    !queue_work(system_unbound_wq, &c->btree.write_buffer.flush_work))
-		enumerated_ref_put(&c->writes, BCH_WRITE_REF_btree_write_buffer);
+	if (bch2_btree_write_buffer_should_flush(c))
+		bch2_btree_write_buffer_wakeup(c);
 
 	if (dst->wb == &wb->flushing)
 		mutex_unlock(&wb->flushing.lock);
@@ -924,6 +952,51 @@ int bch2_btree_write_buffer_resize(struct bch_fs *c, size_t new_size)
 		wb_keys_resize(&wb->inc, new_size);
 }
 
+void bch2_btree_write_buffer_to_text(struct printbuf *out, struct bch_fs *c)
+{
+	struct bch_fs_btree_write_buffer *wb = &c->btree.write_buffer;
+
+	if (!out->nr_tabstops)
+		printbuf_tabstop_push(out, 24);
+
+	prt_printf(out, "inc keys:\t%zu/%zu\n",		wb->inc.keys.nr, wb->inc.keys.size);
+	prt_printf(out, "inc seq pinned:\t%llu\n",	wb->inc.pin.seq);
+
+	prt_printf(out, "flushing keys:\t%zu/%zu\n",	wb->flushing.keys.nr, wb->flushing.keys.size);
+	prt_printf(out, "flushing seq pinned:\t%llu\n",	wb->flushing.pin.seq);
+
+	prt_printf(out, "nr flushes:\t%llu\n",		wb->nr_flushes);
+	for (unsigned i = 0; i < WB_FLUSH_NR; i++)
+		prt_printf(out, "  %s:\t%llu\n",	wb_flush_caller_names[i], wb->nr_flushes_caller[i]);
+	prt_printf(out, "keys flushed:\t%llu\n",	wb->nr_keys_flushed);
+	prt_printf(out, "keys skipped:\t%llu\n",	wb->nr_keys_skipped_overwritten);
+	prt_printf(out, "keys fast:\t%llu\n",		wb->nr_keys_fast);
+	prt_printf(out, "keys slowpath:\t%llu\n",	wb->nr_keys_slowpath);
+
+	prt_newline(out);
+	prt_printf(out, "Time stats:\n");
+	scoped_guard(printbuf_indent, out)
+		bch2_time_stats_to_text(out, &c->times[BCH_TIME_btree_write_buffer_flush]);
+
+	struct task_struct *t;
+	scoped_guard(rcu) {
+		t = rcu_dereference(wb->thread);
+		if (t)
+			get_task_struct(t);
+	}
+
+	prt_newline(out);
+
+	if (t) {
+		prt_str(out, "Write buffer flush thread:\n");
+		scoped_guard(printbuf_indent, out)
+			bch2_prt_task_backtrace(out, t, 0, GFP_KERNEL);
+		put_task_struct(t);
+	} else {
+		prt_str(out, "Write buffer flush thread not running\n");
+	}
+}
+
 void bch2_fs_btree_write_buffer_exit(struct bch_fs *c)
 {
 	struct bch_fs_btree_write_buffer *wb = &c->btree.write_buffer;
@@ -937,13 +1010,46 @@ void bch2_fs_btree_write_buffer_exit(struct bch_fs *c)
 	darray_exit(&wb->inc.keys);
 }
 
+void bch2_btree_write_buffer_stop(struct bch_fs *c)
+{
+	struct bch_fs_btree_write_buffer *wb = &c->btree.write_buffer;
+	struct task_struct *p = rcu_dereference_protected(wb->thread, 1);
+
+	if (p) {
+		rcu_assign_pointer(wb->thread, NULL);
+		synchronize_rcu();
+		kthread_stop(p);
+		put_task_struct(p);
+	}
+}
+
+int bch2_btree_write_buffer_start(struct bch_fs *c)
+{
+	struct bch_fs_btree_write_buffer *wb = &c->btree.write_buffer;
+
+	if (wb->thread)
+		return 0;
+
+	struct task_struct *p =
+		kthread_create(bch2_btree_write_buffer_flush_thread, c,
+			       "bch-wb-flush/%s", c->name);
+	int ret = PTR_ERR_OR_ZERO(p);
+	bch_err_msg(c, ret, "creating write buffer flush thread");
+	if (ret)
+		return ret;
+
+	get_task_struct(p);
+	rcu_assign_pointer(wb->thread, p);
+	wake_up_process(p);
+	return 0;
+}
+
 void bch2_fs_btree_write_buffer_init_early(struct bch_fs *c)
 {
 	struct bch_fs_btree_write_buffer *wb = &c->btree.write_buffer;
 
 	mutex_init(&wb->inc.lock);
 	mutex_init(&wb->flushing.lock);
-	INIT_WORK(&wb->flush_work, bch2_btree_write_buffer_flush_work);
 }
 
 int bch2_fs_btree_write_buffer_init(struct bch_fs *c)
