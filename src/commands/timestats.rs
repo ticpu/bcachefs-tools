@@ -1,9 +1,19 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, IsTerminal, Write as IoWrite};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyModifiers},
+    execute,
+    terminal::{self, ClearType},
+};
+use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
 use crate::wrappers::handle::BcachefsHandle;
@@ -43,50 +53,114 @@ struct StatEntry {
     stats:  TimeStats,
 }
 
-// Duration formatting
+// Cell: typed column value — single source of truth for formatting and sorting
 
-struct TimeUnit {
-    name:   &'static str,
-    nsecs:  u64,
-}
+const NAME_WIDTH: usize = 40;
+const COL_WIDTH: usize = 13;
 
-const TIME_UNITS: &[TimeUnit] = &[
-    TimeUnit { name: "ns", nsecs: 1 },
-    TimeUnit { name: "us", nsecs: 1_000 },
-    TimeUnit { name: "ms", nsecs: 1_000_000 },
-    TimeUnit { name: "s",  nsecs: 1_000_000_000 },
+const TIME_UNITS: &[(&str, u64)] = &[
+    ("ns", 1), ("us", 1_000), ("ms", 1_000_000), ("s", 1_000_000_000),
 ];
 
-fn pick_time_unit(ns: u64) -> &'static TimeUnit {
-    let mut best = &TIME_UNITS[0];
-    for u in TIME_UNITS {
-        if ns >= u.nsecs * 10 {
-            best = u;
+fn fmt_duration(ns: u64) -> String {
+    if ns == 0 { return "0".to_string() }
+    let (name, scale) = TIME_UNITS.iter()
+        .filter(|(_, s)| ns >= s * 10)
+        .last()
+        .unwrap_or(&TIME_UNITS[0]);
+    format!("{}{}", ns / scale, name)
+}
+
+enum Cell<'a> {
+    Name(&'a str),
+    Count(u64),
+    Duration(u64),
+}
+
+impl Cell<'_> {
+    fn format(&self) -> String {
+        match self {
+            Cell::Name(s)     => format!("{:<NAME_WIDTH$}", s),
+            Cell::Count(n)    => format!("{:>COL_WIDTH$}", n),
+            Cell::Duration(ns) => format!("{:>COL_WIDTH$}", fmt_duration(*ns)),
         }
     }
-    best
-}
 
-fn fmt_duration(ns: u64) -> String {
-    if ns == 0 {
-        return "0".to_string();
+    fn cmp_val(&self, other: &Cell) -> Ordering {
+        match (self, other) {
+            (Cell::Name(a), Cell::Name(b))         => a.cmp(b),
+            (Cell::Count(a), Cell::Count(b))       => b.cmp(a),
+            (Cell::Duration(a), Cell::Duration(b)) => b.cmp(a),
+            _ => Ordering::Equal,
+        }
     }
-    let u = pick_time_unit(ns);
-    format!("{}{}", ns / u.nsecs, u.name)
 }
 
-fn fmt_duration_padded(ns: u64, width: usize) -> String {
-    format!("{:>width$}", fmt_duration(ns), width = width)
+// Column definitions
+
+const NUM_COLS: usize = 9;
+
+const COLUMNS: &[&str; NUM_COLS] = &[
+    "NAME", "COUNT",
+    "DUR_MIN", "DUR_MAX", "DUR_TOTAL",
+    "MEAN", "MEAN_RECENT",
+    "STDDEV", "STDDEV_RECENT",
+];
+
+impl StatEntry {
+    fn cell(&self, col: usize) -> Cell<'_> {
+        let s = &self.stats;
+        match col {
+            0 => Cell::Name(&self.name),
+            1 => Cell::Count(s.count),
+            2 => Cell::Duration(s.duration_ns.min),
+            3 => Cell::Duration(s.duration_ns.max),
+            4 => Cell::Duration(s.duration_ns.total),
+            5 => Cell::Duration(s.duration_ns.mean),
+            6 => Cell::Duration(s.duration_ewma_ns.mean),
+            7 => Cell::Duration(s.duration_ns.stddev),
+            8 => Cell::Duration(s.duration_ewma_ns.stddev),
+            _ => Cell::Count(0),
+        }
+    }
 }
 
-// Sysfs path from fd: resolve /proc/self/fd/<N> to get the real path
+fn sort_entries(entries: &mut [StatEntry], sort_col: usize, reverse: bool) {
+    entries.sort_by(|a, b| {
+        let ord = a.cell(sort_col).cmp_val(&b.cell(sort_col));
+        if reverse { ord.reverse() } else { ord }
+    });
+}
+
+fn header_columns() -> Vec<String> {
+    COLUMNS.iter().enumerate().map(|(i, name)| {
+        if i == 0 { format!("{:<NAME_WIDTH$}", name) }
+        else { format!("{:>COL_WIDTH$}", name) }
+    }).collect()
+}
+
+fn stat_columns(entry: &StatEntry) -> Vec<String> {
+    (0..NUM_COLS).map(|i| entry.cell(i).format()).collect()
+}
+
+// Structured data: sections within a filesystem snapshot
+
+struct Section {
+    label:   &'static str,
+    entries: Vec<StatEntry>,
+}
+
+struct FsSnapshot {
+    label:    String,
+    sections: Vec<Section>,
+}
+
+// Sysfs reading
 
 fn sysfs_path_from_fd(fd: i32) -> Result<PathBuf> {
     let link = format!("/proc/self/fd/{}", fd);
     fs::read_link(&link).with_context(|| format!("resolving sysfs fd {}", fd))
 }
-
-// Filesystem discovery
 
 fn find_all_sysfs_dirs() -> Result<Vec<PathBuf>> {
     let base = Path::new(SYSFS_BASE);
@@ -94,50 +168,42 @@ fn find_all_sysfs_dirs() -> Result<Vec<PathBuf>> {
         return Err(anyhow!("No bcachefs filesystems found ({}/ does not exist)", SYSFS_BASE));
     }
 
-    let mut results = Vec::new();
-    for entry in fs::read_dir(base).context("reading sysfs bcachefs directory")? {
-        let entry = entry?;
-        results.push(entry.path());
-    }
+    let mut results: Vec<PathBuf> = fs::read_dir(base)
+        .context("reading sysfs bcachefs directory")?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
 
     if results.is_empty() {
         return Err(anyhow!("No mounted bcachefs filesystems found"));
     }
-
     results.sort();
     Ok(results)
 }
 
-// Reading stats from sysfs
-
 fn read_time_stats(sysfs_path: &Path) -> Result<Vec<StatEntry>> {
     let json_dir = sysfs_path.join("time_stats_json");
-    let mut entries = Vec::new();
-
     if !json_dir.exists() {
         return Err(anyhow!("time_stats_json not found in {} - kernel may need to be updated",
                            sysfs_path.display()));
     }
 
+    let mut entries = Vec::new();
     for file in fs::read_dir(&json_dir).context("reading time_stats_json directory")? {
         let file = file?;
         let name = file.file_name().to_string_lossy().to_string();
         let content = fs::read_to_string(file.path())
             .with_context(|| format!("reading {}", file.path().display()))?;
-
         match serde_json::from_str::<TimeStats>(&content) {
             Ok(stats) => entries.push(StatEntry { name, stats }),
             Err(e) => eprintln!("warning: failed to parse {}: {}", file.path().display(), e),
         }
     }
-
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
 }
 
 fn read_device_latency_stats(sysfs_path: &Path) -> Result<Vec<StatEntry>> {
     let mut entries = Vec::new();
-
     let Ok(dir) = fs::read_dir(sysfs_path) else { return Ok(entries) };
 
     for entry in dir {
@@ -150,10 +216,8 @@ fn read_device_latency_stats(sysfs_path: &Path) -> Result<Vec<StatEntry>> {
                                  ("io_latency_stats_write_json", "write")] {
             let stat_path = dev_path.join(suffix);
             if !stat_path.exists() { continue }
-
             let content = fs::read_to_string(&stat_path)
                 .with_context(|| format!("reading {}", stat_path.display()))?;
-
             match serde_json::from_str::<TimeStats>(&content) {
                 Ok(stats) => entries.push(StatEntry {
                     name: format!("{}/{}", name, label),
@@ -163,117 +227,82 @@ fn read_device_latency_stats(sysfs_path: &Path) -> Result<Vec<StatEntry>> {
             }
         }
     }
-
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
 }
 
-// Table formatting
+// Data collection
 
-const COL_WIDTH: usize = 10;
+fn collect_stats(sysfs_paths: &[PathBuf], show_devices: bool) -> Result<Vec<FsSnapshot>> {
+    let mut snaps = Vec::new();
+    for path in sysfs_paths {
+        let stats = read_time_stats(path)?;
+        let (ops, blocked) = stats.into_iter()
+            .partition(|e: &StatEntry| !e.name.starts_with("blocked_"));
 
-fn print_header() {
-    println!("{:<40} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$}",
-        "NAME", "COUNT",
-        "DUR_MIN", "DUR_MAX", "DUR_TOTAL",
-        "MEAN_SINCE", "MEAN_RECENT",
-        "STDDEV_SINCE", "STDDEV_RECENT",
-    );
-}
+        let mut sections = vec![
+            Section { label: "Operations",  entries: ops },
+            Section { label: "Slowpath",    entries: blocked },
+        ];
+        if show_devices {
+            sections.push(Section {
+                label:   "Per-device IO latency",
+                entries: read_device_latency_stats(path)?,
+            });
+        }
 
-fn print_stat(entry: &StatEntry) {
-    let s = &entry.stats;
-    println!("{:<40} {:>COL_WIDTH$} {} {} {} {} {} {} {}",
-        entry.name,
-        s.count,
-        fmt_duration_padded(s.duration_ns.min,      COL_WIDTH),
-        fmt_duration_padded(s.duration_ns.max,      COL_WIDTH),
-        fmt_duration_padded(s.duration_ns.total,    COL_WIDTH),
-        fmt_duration_padded(s.duration_ns.mean,     COL_WIDTH),
-        fmt_duration_padded(s.duration_ewma_ns.mean, COL_WIDTH),
-        fmt_duration_padded(s.duration_ns.stddev,   COL_WIDTH),
-        fmt_duration_padded(s.duration_ewma_ns.stddev, COL_WIDTH),
-    );
-}
-
-fn sort_entries(entries: &mut [StatEntry], sort_by: &SortBy) {
-    match sort_by {
-        SortBy::Name    => entries.sort_by(|a, b| a.name.cmp(&b.name)),
-        SortBy::Count   => entries.sort_by(|a, b| b.stats.count.cmp(&a.stats.count)),
-        SortBy::Mean    => entries.sort_by(|a, b| b.stats.duration_ns.mean.cmp(&a.stats.duration_ns.mean)),
-        SortBy::Total   => entries.sort_by(|a, b| b.stats.duration_ns.total.cmp(&a.stats.duration_ns.total)),
-    }
-}
-
-fn print_json(all_stats: &[(PathBuf, Vec<StatEntry>, Vec<StatEntry>)]) -> Result<()> {
-    let mut out: BTreeMap<String, BTreeMap<&str, &TimeStats>> = BTreeMap::new();
-
-    for (sysfs_path, fs_stats, dev_stats) in all_stats {
-        let label = sysfs_path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let mut fs_map = BTreeMap::new();
-        for e in fs_stats { fs_map.insert(e.name.as_str(), &e.stats); }
-        for e in dev_stats { fs_map.insert(e.name.as_str(), &e.stats); }
-        out.insert(label, fs_map);
-    }
-
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
-}
-
-fn display_stats(all_stats: Vec<(PathBuf, Vec<StatEntry>, Vec<StatEntry>)>, cli: &Cli) -> Result<()> {
-    if cli.json {
-        return print_json(&all_stats);
-    }
-
-    let multi = all_stats.len() > 1;
-
-    for (sysfs_path, mut fs_stats, mut dev_stats) in all_stats {
-        if multi {
-            let label = sysfs_path.file_name()
+        snaps.push(FsSnapshot {
+            label: path.file_name()
                 .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            println!("{}:", label);
-        }
-
-        if !cli.all {
-            fs_stats.retain(|e| e.stats.count > 0);
-            dev_stats.retain(|e| e.stats.count > 0);
-        }
-
-        sort_entries(&mut fs_stats, &cli.sort);
-
-        print_header();
-        for entry in &fs_stats {
-            print_stat(entry);
-        }
-
-        if !dev_stats.is_empty() {
-            println!();
-            println!("Per-device IO latency:");
-            print_header();
-            sort_entries(&mut dev_stats, &cli.sort);
-            for entry in &dev_stats {
-                print_stat(entry);
-            }
-        }
-
-        println!();
+                .unwrap_or_default(),
+            sections,
+        });
     }
+    Ok(snaps)
+}
 
+// JSON output
+
+fn print_json(snaps: &[FsSnapshot]) -> Result<()> {
+    let mut out: BTreeMap<&str, BTreeMap<&str, &TimeStats>> = BTreeMap::new();
+    for snap in snaps {
+        let mut map = BTreeMap::new();
+        for sec in &snap.sections {
+            for e in &sec.entries { map.insert(e.name.as_str(), &e.stats); }
+        }
+        out.insert(&snap.label, map);
+    }
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 
 // CLI
 
-#[derive(ValueEnum, Clone, Debug, Default)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
 enum SortBy {
     #[default]
     Name,
     Count,
-    Mean,
-    Total,
+    DurMin,
+    DurMax,
+    #[value(alias = "total")]
+    DurTotal,
+    #[value(alias = "mean")]
+    MeanSince,
+    MeanRecent,
+    StddevSince,
+    StddevRecent,
+}
+
+impl SortBy {
+    fn col_index(self) -> usize {
+        match self {
+            SortBy::Name => 0, SortBy::Count => 1,
+            SortBy::DurMin => 2, SortBy::DurMax => 3, SortBy::DurTotal => 4,
+            SortBy::MeanSince => 5, SortBy::MeanRecent => 6,
+            SortBy::StddevSince => 7, SortBy::StddevRecent => 8,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -295,35 +324,241 @@ pub struct Cli {
     #[arg(long)]
     no_device_stats: bool,
 
+    /// One-shot output (no interactive TUI)
+    #[arg(long)]
+    once: bool,
+
+    /// Refresh interval in seconds (interactive mode)
+    #[arg(short = 'i', long, default_value = "1")]
+    interval: f64,
+
     /// Filesystem UUID, device, or mount point (default: all)
     filesystem: Option<String>,
 }
+
+// One-shot display
+
+fn display_stats(snaps: Vec<FsSnapshot>, cli: &Cli) -> Result<()> {
+    let multi = snaps.len() > 1;
+    let sort_col = cli.sort.col_index();
+
+    for mut snap in snaps {
+        if multi { println!("{}:", snap.label); }
+
+        let mut first = true;
+        for section in &mut snap.sections {
+            if !cli.all { section.entries.retain(|e| e.stats.count > 0); }
+            if section.entries.is_empty() { continue }
+            sort_entries(&mut section.entries, sort_col, false);
+
+            if !first { println!(); }
+            first = false;
+            println!("{}:", section.label);
+            println!("{}", header_columns().join(" "));
+            for e in &section.entries {
+                println!("{}", stat_columns(e).join(" "));
+            }
+        }
+        println!();
+    }
+    Ok(())
+}
+
+// Interactive TUI
+
+struct TuiState {
+    sort_col:       usize,
+    reverse:        bool,
+    show_all:       bool,
+    show_devices:   bool,
+    paused:         bool,
+    interval:       Duration,
+    cursor:         usize,
+    scroll_offset:  usize,
+}
+
+fn format_tui_header(sort_col: usize, reverse: bool) -> String {
+    let arrow = if reverse { "\u{25b2}" } else { "\u{25bc}" };
+    let mut out = String::from("  ");
+    for (i, col) in header_columns().iter().enumerate() {
+        if i > 0 { out.push(' '); }
+        if i == sort_col {
+            out.push_str(&format!("{}{}", col.reversed(), arrow.reversed()));
+        } else {
+            out.push_str(col);
+        }
+    }
+    out
+}
+
+fn prepare_snaps(snaps: &mut [FsSnapshot], state: &TuiState) {
+    for snap in snaps.iter_mut() {
+        for section in &mut snap.sections {
+            if !state.show_all {
+                section.entries.retain(|e| e.stats.count > 0);
+            }
+            sort_entries(&mut section.entries, state.sort_col, state.reverse);
+        }
+    }
+}
+
+fn build_frame(snaps: &[FsSnapshot], state: &TuiState, multi: bool) -> (Vec<String>, Option<usize>) {
+    let mut lines = Vec::new();
+    let mut cursor_line = None;
+    let mut row = 0usize;
+
+    let pause = if state.paused { " PAUSED" } else { "" };
+    lines.push(format!(
+        "bcachefs timestats ({}s{})  q:quit  \u{2190}\u{2192}:sort column  r:reverse  a:show all  d:devices  p:pause  1-9:interval",
+        state.interval.as_secs(), pause,
+    ));
+    lines.push(String::new());
+
+    let header = format_tui_header(state.sort_col, state.reverse);
+
+    for snap in snaps {
+        if multi { lines.push(format!("{}:", snap.label)); }
+
+        let mut first = true;
+        for section in &snap.sections {
+            if section.entries.is_empty() { continue }
+
+            if !first { lines.push(String::new()); }
+            first = false;
+            lines.push(format!("{}:", section.label));
+            lines.push(header.clone());
+            for entry in &section.entries {
+                let cols = stat_columns(entry).join(" ");
+                if row == state.cursor {
+                    cursor_line = Some(lines.len());
+                    lines.push(format!("{}{}", "\u{25ba} ".bold(), cols.bold()));
+                } else {
+                    lines.push(format!("  {}", cols));
+                }
+                row += 1;
+            }
+        }
+        lines.push(String::new());
+    }
+
+    (lines, cursor_line)
+}
+
+fn render_frame(
+    stdout: &mut io::Stdout,
+    snaps: &[FsSnapshot],
+    state: &mut TuiState,
+    multi: bool,
+) -> io::Result<()> {
+    let (_, term_h) = terminal::size().unwrap_or((120, 40));
+    let visible = (term_h as usize).saturating_sub(1).max(1);
+
+    let (lines, cursor_line) = build_frame(snaps, state, multi);
+
+    if let Some(cl) = cursor_line {
+        if cl < state.scroll_offset {
+            state.scroll_offset = cl;
+        } else if cl >= state.scroll_offset + visible {
+            state.scroll_offset = cl - visible + 1;
+        }
+    }
+
+    execute!(stdout, cursor::MoveTo(0, 0), terminal::Clear(ClearType::All))?;
+    for line in lines.iter().skip(state.scroll_offset).take(visible) {
+        write!(stdout, "{}\r\n", line)?;
+    }
+    stdout.flush()
+}
+
+fn count_total_rows(snaps: &[FsSnapshot]) -> usize {
+    snaps.iter().flat_map(|s| &s.sections).map(|sec| sec.entries.len()).sum()
+}
+
+fn handle_key(state: &mut TuiState, key: KeyCode, modifiers: KeyModifiers, total_rows: usize) -> bool {
+    match key {
+        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Left   => state.sort_col = state.sort_col.saturating_sub(1),
+        KeyCode::Right  => state.sort_col = (state.sort_col + 1).min(NUM_COLS - 1),
+        KeyCode::Up     => state.cursor = state.cursor.saturating_sub(1),
+        KeyCode::Down   => if total_rows > 0 { state.cursor = (state.cursor + 1).min(total_rows - 1) },
+        KeyCode::Char('r') => state.reverse = !state.reverse,
+        KeyCode::Char('a') => state.show_all = !state.show_all,
+        KeyCode::Char('d') => state.show_devices = !state.show_devices,
+        KeyCode::Char('p') => state.paused = !state.paused,
+        KeyCode::Char(c @ '1'..='9') => state.interval = Duration::from_secs((c as u64) - ('0' as u64)),
+        _ => {}
+    }
+    false
+}
+
+fn run_interactive(cli: Cli, sysfs_paths: Vec<PathBuf>) -> Result<()> {
+    let mut stdout = io::stdout();
+    let mut state = TuiState {
+        sort_col:      cli.sort.col_index(),
+        reverse:       false,
+        show_all:      cli.all,
+        show_devices:  !cli.no_device_stats,
+        paused:        false,
+        interval:      Duration::from_secs_f64(cli.interval),
+        cursor:        0,
+        scroll_offset: 0,
+    };
+
+    terminal::enable_raw_mode()?;
+    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
+
+    let result = (|| -> Result<()> {
+        loop {
+            let mut snaps = collect_stats(&sysfs_paths, state.show_devices)
+                .unwrap_or_default();
+            prepare_snaps(&mut snaps, &state);
+            let total_rows = count_total_rows(&snaps);
+            if total_rows > 0 && state.cursor >= total_rows {
+                state.cursor = total_rows - 1;
+            }
+
+            render_frame(&mut stdout, &snaps, &mut state, sysfs_paths.len() > 1)?;
+
+            if event::poll(state.interval)? {
+                if let Event::Key(key) = event::read()? {
+                    if handle_key(&mut state, key.code, key.modifiers, total_rows) { break }
+                }
+                while event::poll(Duration::ZERO)? { let _ = event::read()?; }
+            }
+
+            if state.paused {
+                if let Event::Key(key) = event::read()? {
+                    if handle_key(&mut state, key.code, key.modifiers, total_rows) { break }
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    let _ = execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen);
+    let _ = terminal::disable_raw_mode();
+    result
+}
+
+// Entry point
 
 pub fn timestats(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
 
     let sysfs_paths: Vec<PathBuf> = if let Some(ref fs_arg) = cli.filesystem {
-        // Use BcachefsHandle to resolve the filesystem
         let handle = BcachefsHandle::open(fs_arg)
             .map_err(|e| anyhow!("Failed to open filesystem '{}': {:?}", fs_arg, e))?;
-        let path = sysfs_path_from_fd(handle.sysfs_fd())?;
-        vec![path]
+        vec![sysfs_path_from_fd(handle.sysfs_fd())?]
     } else {
         find_all_sysfs_dirs()?
     };
 
-    let mut all_stats = Vec::new();
-    for sysfs_path in sysfs_paths {
-        let fs_stats = read_time_stats(&sysfs_path)?;
-
-        let dev_stats = if cli.no_device_stats {
-            Vec::new()
-        } else {
-            read_device_latency_stats(&sysfs_path)?
-        };
-
-        all_stats.push((sysfs_path, fs_stats, dev_stats));
+    if cli.json {
+        print_json(&collect_stats(&sysfs_paths, !cli.no_device_stats)?)
+    } else if cli.once || !io::stdout().is_terminal() {
+        display_stats(collect_stats(&sysfs_paths, !cli.no_device_stats)?, &cli)
+    } else {
+        run_interactive(cli, sysfs_paths)
     }
-
-    display_stats(all_stats, &cli)
 }
