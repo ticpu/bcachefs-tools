@@ -18,6 +18,10 @@ pub(crate) struct BcachefsHandle {
 }
 
 impl BcachefsHandle {
+    pub(crate) fn sysfs_fd(&self) -> i32 {
+        self.inner.sysfs_fd
+    }
+
     /// Opens a bcachefs filesystem and returns its handle
     pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self, bch_errcode> {
         let path = path_to_cstr(path);
