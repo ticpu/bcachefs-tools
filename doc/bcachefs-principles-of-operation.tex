@@ -187,7 +187,8 @@ fragmentation, when patterns of random writes leave us with many buckets that
 are partially empty (because the data they contained was overwritten) - copy GC
 evacuates buckets that are mostly empty by writing the data they contain to new
 buckets. This also means that we need to reserve space on the device for the
-copy GC reserve when formatting - typically 8\% or 12\%.
+copy GC reserve when formatting - 8\% by default (configurable from 5\% to
+21\%).
 
 There are some advantages to structuring the allocator this way, besides being
 able to support cached data:
@@ -245,7 +246,8 @@ and \texttt{check\_btree\_backpointers}.
 
 Most options that control the IO path can be set at either the filesystem level
 or on individual inodes (files and directories). When set on a directory via the
-\texttt{bcachefs attr} command, they will be automatically applied recursively.
+\texttt{bcachefs set-file-option} command, they will be automatically applied
+recursively.
 
 \subsubsection{Checksumming}
 
@@ -385,7 +387,7 @@ compression ratios than other filesystems, at the cost of reduced small random
 read performance.
 
 Data can also be compressed or recompressed with a different algorithm in the
-background by the rebalance thread, if the \texttt{background\_compression}
+background by the reconcile subsystem, if the \texttt{background\_compression}
 option is set.
 
 \subsection{Multiple devices}
@@ -441,10 +443,9 @@ the effect is similar to full data journalling, and it means that after erasure
 coding is done the layout of our data on disk is ideal.
 
 Since disks have write caches that are only flushed when we issue a cache flush
-command - which we only do on journal commit - if we can tweak the allocator so
-that the buckets used for the extra replicas are reused (and then overwritten
-again) immediately, this full data journalling should have negligible overhead -
-this optimization is not implemented yet, however.
+command - which we only do on journal commit - the allocator immediately returns
+the extra-replica buckets to the write point for reuse, so the overhead of this
+full data journalling approach is negligible in practice.
 
 \subsubsection{Device labels and targets}
 
