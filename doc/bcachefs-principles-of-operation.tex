@@ -1357,8 +1357,36 @@ This section documents bcachefs-specific ioctls:
 
 	\item \texttt{BCH\_IOCTL\_SUBVOLUME\_CREATE} \\
 	\item \texttt{BCH\_IOCTL\_SUBVOLUME\_DESTROY} \\
+
+	\item \texttt{BCH\_IOCTL\_FSCK\_OFFLINE} \\
+		Runs offline fsck on an unmounted filesystem via ioctl,
+		reporting progress and results through a file descriptor.
+
+	\item \texttt{BCH\_IOCTL\_FSCK\_ONLINE} \\
+		Runs online fsck on a mounted filesystem, executing the
+		same recovery passes that \texttt{-o fsck} would run at
+		mount time.
+
+	\item \texttt{BCH\_IOCTL\_QUERY\_ACCOUNTING} \\
+		Queries disk accounting data from the accounting btree:
+		per-replica-set usage, per-device usage, compression
+		ratios, and other counters. Replaces the obsolete
+		\texttt{FS\_USAGE} and \texttt{DEV\_USAGE} ioctls.
+
+	\item \texttt{BCH\_IOCTL\_SUBVOLUME\_LIST} \\
+		Lists subvolumes in a filesystem.
+
+	\item \texttt{BCH\_IOCTL\_SNAPSHOT\_TREE} \\
+		Queries the full snapshot tree with per-node disk accounting.
+
 	\item \texttt{BCHFS\_IOC\_REINHERIT\_ATTRS} \\
 \end{description}
+
+Most disk management ioctls (\texttt{DISK\_ADD}, \texttt{DISK\_REMOVE},
+\texttt{DISK\_ONLINE}, \texttt{DISK\_OFFLINE}, \texttt{DISK\_SET\_STATE},
+\texttt{DISK\_RESIZE}, \texttt{DISK\_RESIZE\_JOURNAL},
+\texttt{SUBVOLUME\_CREATE}, \texttt{SUBVOLUME\_DESTROY}) have v2 variants that
+add structured error reporting via an embedded error message buffer.
 
 \section{On disk format}
 
