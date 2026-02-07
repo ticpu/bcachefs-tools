@@ -740,11 +740,12 @@ int cmd_fs_usage(int argc, char *argv[])
 int fs_usage(void)
 {
 	puts("bcachefs fs - manage a running filesystem\n"
-	     "Usage: bcachefs fs <usage|top> [OPTION]...\n"
+	     "Usage: bcachefs fs <usage|top|timestats> [OPTION]...\n"
 	     "\n"
 	     "Commands:\n"
 	     "  usage                        Display detailed filesystem usage\n"
 	     "  top                          Show runtime performance information\n"
+	     "  timestats                    Show filesystem time statistics\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 	exit(EXIT_SUCCESS);

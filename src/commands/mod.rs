@@ -26,5 +26,4 @@ enum Subcommands {
     Completions(completions::Cli),
     #[command(visible_aliases = ["subvol"])]
     Subvolume(subvolume::Cli),
-    Timestats(timestats::Cli),
 }

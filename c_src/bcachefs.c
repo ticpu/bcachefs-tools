@@ -60,6 +60,7 @@ void bcachefs_usage(void)
 	     "Commands for managing a running filesystem:\n"
 	     "  fs usage                 Show disk usage\n"
 	     "  fs top                   Show runtime performance information\n"
+	     "  fs timestats             Show filesystem time statistics\n"
 	     "\n"
 	     "Commands for managing devices within a running filesystem:\n"
 	     "  device add               Add a new device to an existing filesystem\n"
