@@ -53,6 +53,15 @@ struct StatEntry {
     stats:  TimeStats,
 }
 
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+struct BtreeTransFnStats {
+    max_mem:            u64,
+    duration:           TimeStats,
+    #[serde(default)]
+    lock_hold_times:    Option<TimeStats>,
+}
+
 // Cell: typed column value — single source of truth for formatting and sorting
 
 const NAME_WIDTH: usize = 40;
@@ -231,6 +240,20 @@ fn read_device_latency_stats(sysfs_path: &Path) -> Result<Vec<StatEntry>> {
     Ok(entries)
 }
 
+fn read_btree_trans_stats(sysfs_path: &Path) -> Result<Vec<StatEntry>> {
+    let path = sysfs_path.join("internal/btree_trans_stats_json");
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let map: BTreeMap<String, BtreeTransFnStats> = serde_json::from_str(&content)
+        .with_context(|| format!("parsing {}", path.display()))?;
+
+    let mut entries: Vec<StatEntry> = map.into_iter()
+        .map(|(name, s)| StatEntry { name, stats: s.duration })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
+}
+
 // Data collection
 
 fn collect_stats(sysfs_paths: &[PathBuf], show_devices: bool) -> Result<Vec<FsSnapshot>> {
@@ -248,6 +271,12 @@ fn collect_stats(sysfs_paths: &[PathBuf], show_devices: bool) -> Result<Vec<FsSn
             sections.push(Section {
                 label:   "Per-device IO latency",
                 entries: read_device_latency_stats(path)?,
+            });
+        }
+        if let Ok(entries) = read_btree_trans_stats(path) {
+            sections.push(Section {
+                label:   "Btree transactions",
+                entries,
             });
         }
 
