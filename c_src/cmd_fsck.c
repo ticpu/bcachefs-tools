@@ -225,6 +225,8 @@ static void fsck_usage(void)
 
 int cmd_fsck(int argc, char *argv[])
 {
+	setlinebuf(stdout);
+
 	static const struct option longopts[] = {
 		{ "ratelimit_errors",	no_argument,		NULL, 'r' },
 		{ "kernel",		no_argument,		NULL, 'k' },
