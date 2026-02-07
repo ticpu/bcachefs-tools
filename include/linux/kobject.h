@@ -59,6 +59,7 @@ struct kobject {
 
 	DARRAY(struct kobject *) subdirs;
 	DARRAY(const struct attribute *) files;
+	DARRAY(const struct bin_attribute *) bin_files;
 };
 
 enum kobject_action {
