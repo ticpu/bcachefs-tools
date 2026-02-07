@@ -17,6 +17,7 @@ use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
 use crate::wrappers::handle::BcachefsHandle;
+use crate::wrappers::sysfs::dev_name_from_sysfs;
 
 const SYSFS_BASE: &str = "/sys/fs/bcachefs";
 
@@ -217,10 +218,12 @@ fn read_device_latency_stats(sysfs_path: &Path) -> Result<Vec<StatEntry>> {
 
     for entry in dir {
         let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("dev-") { continue }
+        let dirname = entry.file_name().to_string_lossy().to_string();
+        if !dirname.starts_with("dev-") { continue }
 
         let dev_path = entry.path();
+        let dev_name = dev_name_from_sysfs(&dev_path);
+
         for (suffix, label) in [("io_latency_stats_read_json", "read"),
                                  ("io_latency_stats_write_json", "write")] {
             let stat_path = dev_path.join(suffix);
@@ -229,7 +232,7 @@ fn read_device_latency_stats(sysfs_path: &Path) -> Result<Vec<StatEntry>> {
                 .with_context(|| format!("reading {}", stat_path.display()))?;
             match serde_json::from_str::<TimeStats>(&content) {
                 Ok(stats) => entries.push(StatEntry {
-                    name: format!("{}/{}", name, label),
+                    name: format!("{}/{}", dev_name, label),
                     stats,
                 }),
                 Err(e) => eprintln!("warning: failed to parse {}: {}", stat_path.display(), e),
