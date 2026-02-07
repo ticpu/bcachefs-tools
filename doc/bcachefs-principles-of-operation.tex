@@ -1145,26 +1145,8 @@ quantiles for latency/duration in the
 		(which must wait for an SRCU barrier to complete before being
 		freed), number of cached keys, and number of dirty keys.
 
-	\item \texttt{btree\_transactions} \\
-		Lists each running btree transactions that has locks held,
-		listing which nodes they have locked and what type of lock, what
-		node (if any) the process is blocked attempting to lock, and
-		where the btree transaction was invoked from.
-
-	\item \texttt{btree\_updates} \\
-		Lists outstanding interior btree updates: the mode (nothing
-		updated yet, or updated a btree node, or wrote a new btree root,
-		or was reparented by another btree update), whether its new
-		btree nodes have finished writing, its embedded closure's
-		refcount (while nonzero, the btree update is still waiting), and
-		the pinned journal sequence number.
-
 	\item \texttt{journal\_debug} \\
 		Prints a variety of internal journal state.
-
-	\item \texttt{journal\_pins}
-		Lists items pinning journal entries, preventing them from being
-		reclaimed.
 
 	\item \texttt{new\_stripes} \\
 		Lists new erasure-coded stripes being created.
@@ -1220,27 +1202,73 @@ of tests that can be run can be found near the bottom of
 
 \subsection{Debugfs interface}
 
-The contents of every btree, as well as various internal per-btree-node
-information, are available under \texttt{/sys/kernel/debug/bcachefs/<uuid>/}.
+Various internal debugging files are available under
+\texttt{/sys/kernel/debug/bcachefs/<uuid>/}.
 
-For every btree, we have the following files:
+The \texttt{btrees/} subdirectory contains one directory per btree (e.g.
+\texttt{btrees/extents/}, \texttt{btrees/inodes/}), each with three files:
 
 \begin{description}
-	\item \textit{btree\_name} \\
-		Entire btree contents, one key per line
+	\item \texttt{keys} \\
+		Entire btree contents, one key per line.
 
-	\item \textit{btree\_name}\texttt{-formats} \\
+	\item \texttt{formats} \\
 		Information about each btree node: the size of the packed bkey
 		format, how full each btree node is, number of packed and
 		unpacked keys, and number of nodes and failed nodes in the
 		in-memory search trees.
 
-	\item \textit{btree\_name}\texttt{-bfloat-failed} \\
+	\item \texttt{bfloat-failed} \\
 		For each sorted set of keys in a btree node, we construct a
 		binary search tree in eytzinger layout with compressed keys.
 		Sometimes we aren't able to construct a correct compressed
 		search key, which results in slower lookups; this file lists the
 		keys that resulted in these failed nodes.
+\end{description}
+
+The remaining files in the debugfs root are:
+
+\begin{description}
+	\item \texttt{btree\_transactions} \\
+		Lists each running btree transaction that has locks held,
+		listing which nodes they have locked and what type of lock, what
+		node (if any) the process is blocked attempting to lock, and
+		where the btree transaction was invoked from.
+
+	\item \texttt{btree\_updates} \\
+		Lists outstanding interior btree updates: the mode (nothing
+		updated yet, or updated a btree node, or wrote a new btree root,
+		or was reparented by another btree update), whether its new
+		btree nodes have finished writing, its embedded closure's
+		refcount (while nonzero, the btree update is still waiting), and
+		the pinned journal sequence number.
+
+	\item \texttt{journal\_pins} \\
+		Lists what is preventing each journal entry from being
+		reclaimed: dirty btree nodes that still reference that
+		sequence number, key cache entries waiting to be flushed,
+		or in-progress operations that need the entry to remain
+		available for crash recovery. Useful for diagnosing journal
+		space exhaustion.
+
+	\item \texttt{btree\_deadlock} \\
+		Checks for and reports btree lock deadlock cycles among
+		transactions.
+
+	\item \texttt{cached\_btree\_nodes} \\
+		Lists btree nodes currently in the btree node cache.
+
+	\item \texttt{btree\_transaction\_stats} \\
+		Per-transaction-function statistics: lock hold times, restart
+		counts, and maximum memory usage.
+
+	\item \texttt{btree\_node\_scan} \\
+		Results from the last scan for btree nodes on raw devices,
+		used during catastrophic recovery.
+
+	\item \texttt{write\_points} \\
+		Lists active write points and the buckets they are currently
+		writing to.
 \end{description}
 
 \subsection{Listing and dumping filesystem metadata}
