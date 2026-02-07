@@ -26,6 +26,17 @@ bcachefs is architected more like a filesystem on top of a relational database,
 with tables for the different filesystem data types - extents, inodes, dirents,
 xattrs, et cetera.
 
+The entire filesystem is built on two primitives: btrees and buckets. All
+filesystem state is a key-value pair in a btree. A handful of btrees store core
+filesystem data (extents, inodes, dirents, xattrs, subvolumes), while others
+handle allocation tracking, reverse mappings, background maintenance, and crash
+recovery. There are no separate inode tables, bitmap allocators, or per-inode
+extent trees. On the storage side, all disk space is divided into buckets with
+generation numbers, described in the allocation section below. The btrees map
+logical filesystem objects to physical bucket locations, and backpointers
+provide the reverse mapping. Everything else in bcachefs is built on this
+transactional key-value store over generational bucket storage.
+
 bcachefs supports almost all of the same features as other modern COW
 filesystems, such as ZFS and btrfs, but in general with a cleaner, simpler,
 higher performance design.
