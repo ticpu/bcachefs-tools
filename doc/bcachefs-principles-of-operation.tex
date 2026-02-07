@@ -1304,12 +1304,12 @@ This section documents bcachefs-specific ioctls:
 		directory given a path to a mounted filesystem.
 
 	\item \texttt{BCH\_IOCTL\_FS\_USAGE} \\
-		Queries filesystem usage, returning global counters and a list
-		of counters by \texttt{bch\_replicas} entry.
+		Obsolete. Formerly queried filesystem usage; replaced by
+		\texttt{BCH\_IOCTL\_QUERY\_ACCOUNTING}.
 
 	\item \texttt{BCH\_IOCTL\_DEV\_USAGE} \\
-		Queries usage for a particular device, as bucket and sector
-		counts broken out by data type.
+		Obsolete. Formerly queried per-device usage; replaced by
+		\texttt{BCH\_IOCTL\_QUERY\_ACCOUNTING}.
 
 	\item \texttt{BCH\_IOCTL\_READ\_SUPER} \\
 		Returns the filesystem superblock, and optionally the superblock
