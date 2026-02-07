@@ -5,55 +5,67 @@ use std::fmt;
 
 pub use crate::c::bch_errcode;
 
-impl fmt::Display for bch_errcode {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let s = unsafe { CStr::from_ptr(bcachefs::bch2_err_str(*self as i32)) };
-        write!(f, "{:?}", s)
+/// Safe wrapper for bcachefs/errno error codes.
+/// Stores the positive error code — either a standard errno (1..2047)
+/// or a bcachefs-specific code (BCH_ERR_START=2048..).
+///
+/// Unlike `bch_errcode` (a repr(u32) enum), this never creates an invalid
+/// enum discriminant from a raw errno value.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct BchError(i32);
+
+impl BchError {
+    pub fn from_raw(code: i32) -> Self { Self(code) }
+    pub fn raw(&self) -> i32 { self.0 }
+
+    pub fn matches(&self, class: bch_errcode) -> bool {
+        if self.0 != 0 {
+            unsafe { c::__bch2_err_matches(self.0, class as i32) }
+        } else {
+            false
+        }
     }
 }
 
-pub fn ret_to_result(ret: c_int) -> Result<c_int, bch_errcode> {
-    let max_err: c_int = -4096;
-    if ret < 0 && ret > max_err {
-        let err: bch_errcode = unsafe { std::mem::transmute(-ret) };
-        Err(err)
+impl fmt::Display for BchError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = unsafe { CStr::from_ptr(bcachefs::bch2_err_str(self.0)) };
+        write!(f, "{}", s.to_str().unwrap_or("unknown error"))
+    }
+}
+
+impl fmt::Debug for BchError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "BchError({}, {})", self.0, self)
+    }
+}
+
+impl std::error::Error for BchError {}
+
+pub fn ret_to_result(ret: c_int) -> Result<c_int, BchError> {
+    if ret < 0 && ret > -4096 {
+        Err(BchError(-ret))
     } else {
         Ok(ret)
     }
 }
 
-/* Can we make a function generic over ptr constness? */
-
-pub fn errptr_to_result<T>(p: *mut T) -> Result<*mut T, bch_errcode> {
+pub fn errptr_to_result<T>(p: *mut T) -> Result<*mut T, BchError> {
     let addr = p as usize;
     let max_err: isize = -4096;
     if addr > max_err as usize {
-        let addr = addr as i32;
-        let err: bch_errcode = unsafe { std::mem::transmute(-addr) };
-        Err(err)
+        Err(BchError(-(addr as i32)))
     } else {
         Ok(p)
     }
 }
 
-pub fn errptr_to_result_c<T>(p: *const T) -> Result<*const T, bch_errcode> {
+pub fn errptr_to_result_c<T>(p: *const T) -> Result<*const T, BchError> {
     let addr = p as usize;
     let max_err: isize = -4096;
     if addr > max_err as usize {
-        let addr = addr as i32;
-        let err: bch_errcode = unsafe { std::mem::transmute(-addr) };
-        Err(err)
+        Err(BchError(-(addr as i32)))
     } else {
         Ok(p)
-    }
-}
-
-impl std::error::Error for bch_errcode {}
-
-pub fn bch2_err_matches(err: bch_errcode, class: bch_errcode) -> bool {
-    if err as i32 != 0 {
-        unsafe { c::__bch2_err_matches(err as i32, class as i32) }
-    } else {
-        false
     }
 }

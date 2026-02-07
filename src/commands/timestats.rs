@@ -577,7 +577,7 @@ pub fn timestats(argv: Vec<String>) -> Result<()> {
 
     let sysfs_paths: Vec<PathBuf> = if let Some(ref fs_arg) = cli.filesystem {
         let handle = BcachefsHandle::open(fs_arg)
-            .map_err(|e| anyhow!("Failed to open filesystem '{}': {:?}", fs_arg, e))?;
+            .map_err(|e| anyhow!("Failed to open filesystem '{}': {}", fs_arg, e))?;
         vec![sysfs_path_from_fd(handle.sysfs_fd())?]
     } else {
         find_all_sysfs_dirs()?

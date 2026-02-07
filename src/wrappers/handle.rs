@@ -2,12 +2,12 @@ use std::mem::MaybeUninit;
 use std::path::Path;
 
 use bch_bindgen::c::{
-    bcache_fs_close, bcache_fs_open_fallible, bch_errcode, bch_ioctl_err_msg, bch_ioctl_subvolume,
+    bcache_fs_close, bcache_fs_open_fallible, bch_ioctl_err_msg, bch_ioctl_subvolume,
     bch_ioctl_subvolume_v2, bchfs_handle, BCH_IOCTL_SUBVOLUME_CREATE_v2,
     BCH_IOCTL_SUBVOLUME_DESTROY_v2, BCH_IOCTL_SUBVOLUME_CREATE, BCH_IOCTL_SUBVOLUME_DESTROY,
     BCH_SUBVOL_SNAPSHOT_CREATE,
 };
-use bch_bindgen::errcode::ret_to_result;
+use bch_bindgen::errcode::{BchError, ret_to_result};
 use bch_bindgen::path_to_cstr;
 use errno::Errno;
 
@@ -23,7 +23,7 @@ impl BcachefsHandle {
     }
 
     /// Opens a bcachefs filesystem and returns its handle
-    pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self, bch_errcode> {
+    pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self, BchError> {
         let path = path_to_cstr(path);
         let mut handle: MaybeUninit<bchfs_handle> = MaybeUninit::uninit();
         ret_to_result(unsafe { bcache_fs_open_fallible(path.as_ptr(), handle.as_mut_ptr()) })?;

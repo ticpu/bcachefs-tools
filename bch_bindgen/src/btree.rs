@@ -1,6 +1,6 @@
 use crate::bkey::*;
 use crate::c;
-use crate::errcode::{bch_errcode, errptr_to_result_c, bch2_err_matches};
+use crate::errcode::{BchError, bch_errcode, errptr_to_result_c};
 use crate::fs::Fs;
 use crate::printbuf_to_formatter;
 use crate::SPOS_MAX;
@@ -64,16 +64,16 @@ bitflags! {
     }
 }
 
-pub fn lockrestart_do<T, F>(trans: &mut BtreeTrans, f: F) -> Result<T, bch_errcode>
+pub fn lockrestart_do<T, F>(trans: &mut BtreeTrans, f: F) -> Result<T, BchError>
 where
-    F: Fn() -> Result<T, bch_errcode>
+    F: Fn() -> Result<T, BchError>
 {
     loop {
         let restart_count = trans.begin();
         let r = f();
 
         if let Err(e) = r {
-            if bch2_err_matches(e, bch_errcode::BCH_ERR_transaction_restart) {
+            if e.matches(bch_errcode::BCH_ERR_transaction_restart) {
                 continue;
             }
 
@@ -90,7 +90,7 @@ pub struct BtreeIter<'t> {
     trans: PhantomData<&'t BtreeTrans<'t>>,
 }
 
-fn bkey_s_c_to_result<'i>(k: c::bkey_s_c) -> Result<Option<BkeySC<'i>>, bch_errcode> {
+fn bkey_s_c_to_result<'i>(k: c::bkey_s_c) -> Result<Option<BkeySC<'i>>, BchError> {
     errptr_to_result_c(k.k).map(|_| {
         if !k.k.is_null() {
             unsafe {
@@ -159,14 +159,14 @@ impl<'t> BtreeIter<'t> {
         }
     }
 
-    pub fn peek_max<'i>(&'i mut self, end: bpos) -> Result<Option<BkeySC<'i>>, bch_errcode> {
+    pub fn peek_max<'i>(&'i mut self, end: bpos) -> Result<Option<BkeySC<'i>>, BchError> {
         unsafe {
             bkey_s_c_to_result(c::bch2_btree_iter_peek_max(&mut self.raw, end))
         }
     }
 
     pub fn peek_max_flags<'i>(&'i mut self, end: bpos, flags: BtreeIterFlags) ->
-            Result<Option<BkeySC<'i>>, bch_errcode> {
+            Result<Option<BkeySC<'i>>, BchError> {
         unsafe {
             if flags.contains(BtreeIterFlags::SLOTS) {
                 bkey_s_c_to_result(c::bch2_btree_iter_peek_max(&mut self.raw, end))
@@ -178,11 +178,11 @@ impl<'t> BtreeIter<'t> {
         }
     }
 
-    pub fn peek(&mut self) -> Result<Option<BkeySC<'_>>, bch_errcode> {
+    pub fn peek(&mut self) -> Result<Option<BkeySC<'_>>, BchError> {
         self.peek_max(SPOS_MAX)
     }
 
-    pub fn peek_and_restart(&mut self) -> Result<Option<BkeySC<'_>>, bch_errcode> {
+    pub fn peek_and_restart(&mut self) -> Result<Option<BkeySC<'_>>, BchError> {
         unsafe {
             bkey_s_c_to_result(c::bch2_btree_iter_peek_and_restart_outlined(&mut self.raw))
         }
@@ -234,14 +234,14 @@ impl<'t> BtreeNodeIter<'t> {
         }
     }
 
-    pub fn peek<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
+    pub fn peek<'i>(&'i mut self) -> Result<Option<&'i c::btree>, BchError> {
         unsafe {
             let b = c::bch2_btree_iter_peek_node(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
         }
     }
 
-    pub fn peek_and_restart<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
+    pub fn peek_and_restart<'i>(&'i mut self) -> Result<Option<&'i c::btree>, BchError> {
         unsafe {
             let b = c::bch2_btree_iter_peek_node_and_restart(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
@@ -254,7 +254,7 @@ impl<'t> BtreeNodeIter<'t> {
         }
     }
 
-    pub fn next<'i>(&'i mut self) -> Result<Option<&'i c::btree>, bch_errcode> {
+    pub fn next<'i>(&'i mut self) -> Result<Option<&'i c::btree>, BchError> {
         unsafe {
             let b = c::bch2_btree_iter_next_node(&mut self.raw);
             errptr_to_result_c(b).map(|b| if !b.is_null() { Some(&*b) } else { None })
