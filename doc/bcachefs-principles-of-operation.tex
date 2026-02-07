@@ -1445,7 +1445,36 @@ variable length sections:
 		usage and read/write counters (total amount of data read/written
 		to this filesystem). This allows reading the journal to be
 		skipped after clean shutdowns.
+
+	\item \texttt{BCH\_SB\_FIELD\_errors} \\
+		Persistent error log: records errors detected during operation
+		or fsck so they survive across mounts and can trigger repair
+		passes on the next mount.
+
+	\item \texttt{BCH\_SB\_FIELD\_ext} \\
+		Extended superblock data: tracks which recovery passes are
+		required on the next mount, accumulated errors that have been
+		silenced, and other flags that do not fit in the fixed
+		superblock fields.
+
+	\item \texttt{BCH\_SB\_FIELD\_downgrade} \\
+		Records the minimum on-disk format version that this filesystem
+		can be safely downgraded to, along with which recovery passes
+		and errors must be handled during downgrade.
+
+	\item \texttt{BCH\_SB\_FIELD\_counters} \\
+		Persistent counters: IO statistics, error counts, and other
+		cumulative metrics that survive across mounts.
+
+	\item \texttt{BCH\_SB\_FIELD\_recovery\_passes} \\
+		Tracks which recovery passes have been run successfully, so
+		that only new or failed passes need to run on the next mount.
 \end{description}
+
+Several field types have versioned variants (e.g. \texttt{members\_v1}/\texttt{v2},
+\texttt{replicas\_v0}/\texttt{replicas}, \texttt{journal}/\texttt{journal\_v2})
+for backward compatibility; the kernel reads both old and new formats but writes
+only the current version.
 
 \subsection{Journal}
 
