@@ -44,7 +44,7 @@ latency, which does not show up in most benchmarks but has a huge impact on real
 world performance, as well as how fast the system "feels" in normal interactive
 usage. Latency has been a major focus throughout the codebase - notably, we have
 assertions that we never hold b+ tree locks while doing IO, and the btree
-transaction layer makes it easily to aggressively drop and retake locks as
+transaction layer makes it easy to aggressively drop and retake locks as
 needed - one major goal of bcachefs is to be the first general purpose soft
 realtime filesystem.
 
@@ -261,7 +261,8 @@ bounced.
 Checksum granularity in bcachefs is at the level of individual extents, which
 results in smaller metadata but means we have to read entire extents in order to
 verify the checksum. By default, checksummed and compressed extents are capped
-at 256 KB (controlled by \texttt{encoded\_extent\_max}). For most applications and usage scenarios this is an ideal trade off, but
+at 256 KB (controlled by \texttt{encoded\_extent\_max}).
+For most applications and usage scenarios this is an ideal trade off, but
 small random \texttt{O\_DIRECT} reads will incur significant overhead. In the
 future, checksum granularity will be a per-inode option.
 
@@ -410,7 +411,7 @@ within a filesystem.
 \subsubsection{Erasure coding}
 
 bcachefs also supports Reed-Solomon erasure coding - the same algorithm used by
-most RAID5/6 implementations) When enabled with the \texttt{ec} option, the
+most RAID5/6 implementations. When enabled with the \texttt{ec} option, the
 desired redundancy is taken from the \texttt{data\_replicas} option - erasure
 coding of metadata is not supported.
 
@@ -674,6 +675,7 @@ while the original is preserved for display.
 The Unicode version used for case folding is hardcoded to Unicode 12.1.0. The
 kernel will fail to mount (or use an older version correctly) if built with
 different Unicode tables.
+
 \section{Management}
 
 \subsection{Formatting}
