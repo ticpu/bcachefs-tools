@@ -1056,12 +1056,6 @@ quantiles for latency/duration in the
 		for recalculating the oldest outstanding generation number of
 		every bucket in the btree.
 
-	\item \texttt{btree\_lock\_contended\_read}
-	\item \texttt{btree\_lock\_contended\_intent}
-	\item \texttt{btree\_lock\_contended\_write} \\
-		Track when taking a read, intent or write lock on a btree node
-		must block.
-
 	\item \texttt{btree\_node\_mem\_alloc} \\
 		Tracks the total time to allocate memory in the btree node cache
 		for a new btree node.
@@ -1141,22 +1135,6 @@ quantiles for latency/duration in the
 		nodes, number of dirty nodes, and whether the cannibalize lock
 		(for reclaiming cached nodes to allocate new nodes) is held.
 
-	\item \texttt{dirty\_btree\_nodes} \\
-		Prints information related to the interior btree node update
-		machinery, which is responsible for ensuring dependent btree
-		node writes are ordered correctly.
-
-		For each dirty btree node, prints:
-		\begin{itemize}
-			\item Whether the \texttt{need\_write} flag is set
-			\item The level of the btree node
-			\item The number of sectors written
-			\item Whether writing this node is blocked, waiting for
-				other nodes to be written
-			\item Whether it is waiting on a btree\_update to
-				complete and make it reachable on-disk
-		\end{itemize}
-
 	\item \texttt{btree\_key\_cache} \\
 		Prints information on the btree key cache: number of freed keys
 		(which must wait for an SRCU barrier to complete before being
@@ -1167,9 +1145,6 @@ quantiles for latency/duration in the
 
 	\item \texttt{new\_stripes} \\
 		Lists new erasure-coded stripes being created.
-
-	\item \texttt{stripes\_heap} \\
-		Lists erasure-coded stripes that are available to be reused.
 
 	\item \texttt{open\_buckets} \\
 		Lists buckets currently being written to, along with data type
@@ -1195,18 +1170,6 @@ quantiles for latency/duration in the
 	\item \texttt{trigger\_btree\_cache\_shrink} \\
 		Echoing to this file prunes the btree node cache.
 
-	\item \texttt{read\_realloc\_races} \\
-		This counts events where the read path reads an extent and
-		discovers the bucket that was read from has been reused while
-		the IO was in flight, causing the read to be retried.
-
-	\item \texttt{extent\_migrate\_done} \\
-		This counts extents moved by the core move path, used by copygc
-		and rebalance.
-
-	\item \texttt{extent\_migrate\_raced} \\
-		This counts extents that the move path attempted to move but no
-		longer existed when doing the final btree update.
 \end{description}
 
 \subsubsection{Unit and performance tests}
