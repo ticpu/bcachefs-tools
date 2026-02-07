@@ -507,6 +507,38 @@ durability=0 for a device, it can be used as a cache and only as a cache -
 bcachefs won't consider copies on that device to count towards the number of
 replicas we're supposed to keep.
 
+\subsubsection{Splitbrain detection}
+
+When assembling a multi-device filesystem, bcachefs detects devices that have
+diverged - been mounted and modified independently. Every superblock records a
+sequence number (\texttt{seq}) and write timestamp (\texttt{write\_time});
+devices with the same sequence but different write times have diverged. Since
+version 1.4, superblocks also track the last known sequence of every other
+member device: if a device's actual sequence exceeds what another member
+expected, it was modified independently while that member was offline.
+
+The two common causes of splitbrain are:
+
+\begin{itemize}
+	\item \textbf{Partial mount of replicated filesystem}: Mounting a subset
+		of devices from a replicated filesystem (\texttt{replicas >= 2})
+		with \texttt{-o degraded=very} allows writes to proceed despite
+		missing devices. If the ``missing'' device is later reconnected,
+		it now has stale metadata while the mounted devices have advanced.
+
+	\item \textbf{External snapshots}: LVM, SAN, or VM snapshots create
+		block devices with valid bcachefs superblocks sharing the same
+		filesystem UUID. If both original and snapshot are visible
+		during assembly, or if the snapshot is mounted read-write and
+		later reassembled with the original, the devices have diverged.
+\end{itemize}
+
+When divergence is detected, bcachefs excludes the stale device. Once devices
+have genuinely diverged with writes on both sides, recovery is impractical -
+resolving differences key-by-key across all btrees is not feasible. The
+\texttt{-o no\_splitbrain\_check} option includes divergent devices anyway,
+but is only safe when no actual modifications occurred on the excluded device.
+
 \subsection{Reflink}
 
 bcachefs supports reflink, similarly to other filesystems with the same feature.
