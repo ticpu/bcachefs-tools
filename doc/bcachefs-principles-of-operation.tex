@@ -1028,11 +1028,28 @@ quantiles for latency/duration in the
 		handles for pinning open buckets are in use (we statically
 		allocate 1024).
 
-	\item \texttt{blocked\_journal} \\
-		Tracks when getting a journal reservation must wait, either
-		because journal reclaim isn't keeping up with reclaiming space
-		in the journal, or because journal writes are taking too long to
-		complete and we already have too many in flight.
+	\item \texttt{blocked\_journal\_low\_on\_space} \\
+		Tracks when getting a journal reservation must wait because
+		journal reclaim is not keeping up with reclaiming space.
+
+	\item \texttt{blocked\_journal\_low\_on\_pin} \\
+		Tracks when journal pins (dirty btree nodes, key cache
+		entries) are not being flushed fast enough, preventing
+		old journal entries from being reclaimed.
+
+	\item \texttt{blocked\_journal\_max\_in\_flight} \\
+		Tracks when getting a journal reservation must wait because
+		too many journal writes are already in flight and have not
+		yet completed.
+
+	\item \texttt{blocked\_journal\_max\_open} \\
+		Tracks when getting a journal reservation must wait because
+		too many journal entries are open (not yet closed for
+		writing).
+
+	\item \texttt{blocked\_journal\_write\_buffer\_flush} \\
+		Tracks when getting a journal reservation must wait for the
+		write buffer to be flushed.
 
 	\item \texttt{btree\_gc} \\
 		Tracks when the btree\_gc code must walk the btree at runtime -
@@ -1163,14 +1180,19 @@ quantiles for latency/duration in the
 		Lists outstanding IO timers - timers that wait on total reads or
 		writes to the filesystem.
 
-	\item \texttt{trigger\_journal\_flush} \\
+	\item \texttt{trigger\_journal\_commit} \\
 		Echoing to this file triggers a journal commit.
+
+	\item \texttt{trigger\_journal\_flush} \\
+		Echoing to this file flushes all journal pins (forcing dirty
+		btree nodes and key cache entries to be written) and then
+		issues a journal meta write.
 
 	\item \texttt{trigger\_gc} \\
 		Echoing to this file causes the GC code to recalculate each
 		bucket's oldest\_gen field.
 
-	\item \texttt{prune\_cache} \\
+	\item \texttt{trigger\_btree\_cache\_shrink} \\
 		Echoing to this file prunes the btree node cache.
 
 	\item \texttt{read\_realloc\_races} \\
