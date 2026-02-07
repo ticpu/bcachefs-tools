@@ -70,6 +70,9 @@
 #define BCH_IOCTL_FSCK_ONLINE		_IOW(0xbc,	20, struct bch_ioctl_fsck_online)
 #define BCH_IOCTL_QUERY_ACCOUNTING	_IOW(0xbc,	21, struct bch_ioctl_query_accounting)
 #define BCH_IOCTL_QUERY_COUNTERS	_IOW(0xbc,	21, struct bch_ioctl_query_counters)
+#define BCH_IOCTL_SUBVOLUME_LIST	_IOWR(0xbc,	31, struct bch_ioctl_subvol_readdir)
+#define BCH_IOCTL_SUBVOLUME_TO_PATH	_IOWR(0xbc,	32, struct bch_ioctl_subvol_to_path)
+#define BCH_IOCTL_SNAPSHOT_TREE		_IOWR(0xbc,	33, struct bch_ioctl_snapshot_tree_query)
 
 /* ioctl below act on a particular file, not the filesystem as a whole: */
 
@@ -495,6 +498,101 @@ struct bch_ioctl_query_counters {
 	__u16			flags;
 	__u32			pad;
 	__u64			d[];
+};
+
+struct bch_ioctl_subvol_dirent {
+	__u32			reclen;
+	__u32			subvolid;
+	__u32			flags;
+	__u32			snapshot_parent;
+	__u64			otime_sec;
+	__u32			otime_nsec;
+	__u32			pad;
+	char			path[];
+};
+
+/*
+ * The path is NUL-terminated, but reclen is 8-byte aligned so there may
+ * be extra NUL padding beyond the terminator.
+ */
+static inline __u32 bch_ioctl_subvol_dirent_path_len(struct bch_ioctl_subvol_dirent *d)
+{
+	return strnlen(d->path,
+		       d->reclen - offsetof(struct bch_ioctl_subvol_dirent, path));
+}
+
+/*
+ * BCH_IOCTL_SUBVOLUME_LIST: list child subvolumes of a given parent,
+ * readdir style.
+ *
+ * Parent subvolume is determined from the directory fd used for the ioctl.
+ *
+ * @pos		- in/out: cursor (child subvolid); 0 to start
+ * @buf_size	- size of buffer in bytes
+ * @buf		- pointer to userspace buffer for entries
+ * @used	- out: bytes written to buffer
+ *
+ * Each entry in the buffer is a struct bch_ioctl_subvol_dirent with a
+ * variable-length NUL-terminated path (relative to the parent subvolume
+ * root), padded to 8-byte alignment.
+ *
+ * Returns 0 on success (used == 0 means no more entries).
+ */
+struct bch_ioctl_subvol_readdir {
+	__u32			pos;
+	__u32			buf_size;
+	__u64			buf;
+	__u32			used;
+	__u32			pad;
+};
+
+/*
+ * BCH_IOCTL_SUBVOLUME_TO_PATH: resolve a subvolume ID to its filesystem path,
+ * relative to the directory fd used for the ioctl.
+ *
+ * @subvolid	- subvolume ID to resolve
+ * @buf_size	- size of userspace buffer in bytes
+ * @buf		- pointer to userspace buffer for NUL-terminated path
+ *
+ * Returns 0 on success, -ENOENT if the subvolume doesn't exist or isn't
+ * reachable from the fd, -ERANGE if the buffer is too small.
+ */
+struct bch_ioctl_subvol_to_path {
+	__u32			subvolid;
+	__u32			buf_size;
+	__u64			buf;
+};
+
+/*
+ * BCH_IOCTL_SNAPSHOT_TREE: return the full snapshot tree (interior + leaf
+ * nodes) with per-node disk accounting.
+ *
+ * @tree_id	- snapshot tree to query; 0 = infer from fd's subvolume
+ * @master_subvol - out: master subvolume of this tree
+ * @root_snapshot - out: root snapshot ID
+ * @nr		- in: capacity of nodes[]; out: entries returned
+ * @total	- out: total nodes in tree
+ *
+ * Returns -ERANGE if nr < total (nr and total are still written back)
+ */
+struct bch_ioctl_snapshot_node {
+	__u32			id;		/* snapshot ID */
+	__u32			parent;		/* parent snapshot ID, 0 for root */
+	__u32			children[2];
+	__u32			subvol;		/* subvolume ID, 0 for interior */
+	__u32			flags;
+	__u32			pad[2];
+	__u64			sectors;	/* BCH_DISK_ACCOUNTING_snapshot */
+};
+
+struct bch_ioctl_snapshot_tree_query {
+	__u32			tree_id;	/* in: 0 = infer from fd's subvol */
+	__u32			master_subvol;	/* out */
+	__u32			root_snapshot;	/* out */
+	__u32			nr;		/* in: capacity; out: returned */
+	__u32			total;		/* out: total nodes */
+	__u32			pad;
+	struct bch_ioctl_snapshot_node nodes[];
 };
 
 #endif /* _BCACHEFS_IOCTL_H */
