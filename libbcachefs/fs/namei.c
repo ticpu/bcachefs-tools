@@ -538,6 +538,8 @@ DEFINE_DARRAY(subvol_inum);
 
 static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 				      u32 subvol, u64 inum, u32 snapshot,
+				      u32 stop_subvol,
+				      unsigned flags,
 				      struct printbuf *path)
 {
 	struct bch_fs *c = trans->c;
@@ -579,8 +581,10 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 		if (ret)
 			break;
 
-		if (inode.bi_subvol == BCACHEFS_ROOT_SUBVOL &&
-		    inode.bi_inum == BCACHEFS_ROOT_INO)
+		if (stop_subvol
+		    ? inode.bi_subvol == stop_subvol
+		    : (inode.bi_subvol == BCACHEFS_ROOT_SUBVOL &&
+		       inode.bi_inum == BCACHEFS_ROOT_INO))
 			break;
 
 		if (!inode.bi_dir && !inode.bi_dir_offset) {
@@ -610,7 +614,8 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 		inum = inode.bi_dir;
 	}
 
-	if (ret && !bch2_err_matches(ret, BCH_ERR_transaction_restart)) {
+	if (ret && !bch2_err_matches(ret, BCH_ERR_transaction_restart) &&
+	    !(flags & INUM_TO_PATH_FAIL_ON_ERR)) {
 		prt_printf_reversed(path, "(%s: disconnected at %llu.%u)",
 				    bch2_err_str(ret), inum, snapshot);
 		ret = 0;
@@ -621,11 +626,13 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 
 static int __bch2_inum_to_path(struct btree_trans *trans,
 			       u32 subvol, u64 inum, u32 snapshot,
+			       u32 stop_subvol, unsigned flags,
 			       struct printbuf *path)
 {
 	struct printbuf_restore restore = printbuf_state_save(path);
 	unsigned orig_pos = path->pos;
-	int ret = bch2_inum_to_path_reversed(trans, subvol, inum, snapshot, path);
+	int ret = bch2_inum_to_path_reversed(trans, subvol, inum, snapshot,
+					     stop_subvol, flags, path);
 	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 		printbuf_state_restore(path, restore); /* Don't leave garbage output */
 	else {
@@ -640,14 +647,23 @@ int bch2_inum_to_path(struct btree_trans *trans,
 		      subvol_inum inum,
 		      struct printbuf *path)
 {
-	return __bch2_inum_to_path(trans, inum.subvol, inum.inum, 0, path);
+	return __bch2_inum_to_path(trans, inum.subvol, inum.inum, 0, 0, 0, path);
+}
+
+int bch2_inum_to_path_in_subvol(struct btree_trans *trans,
+				subvol_inum inum,
+				u32 stop_subvol,
+				unsigned flags,
+				struct printbuf *path)
+{
+	return __bch2_inum_to_path(trans, inum.subvol, inum.inum, 0, stop_subvol, flags, path);
 }
 
 int bch2_inum_snapshot_to_path(struct btree_trans *trans, u64 inum, u32 snapshot,
 			       snapshot_id_list *snapshot_overwrites,
 			       struct printbuf *path)
 {
-	return __bch2_inum_to_path(trans, 0, inum, snapshot, path);
+	return __bch2_inum_to_path(trans, 0, inum, snapshot, 0, 0, path);
 }
 
 /* fsck */
