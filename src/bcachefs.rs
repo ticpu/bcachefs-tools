@@ -130,6 +130,9 @@ fn main() -> ExitCode {
         "fs" if args.get(2).map(|s| s.as_str()) == Some("timestats") => {
             commands::timestats(args[2..].to_vec()).report()
         }
+        "fs" if args.get(2).map(|s| s.as_str()) == Some("top") => {
+            commands::top(args[2..].to_vec()).report()
+        }
         _ => {
             let r = handle_c_command(args, symlink_cmd);
 

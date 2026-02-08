@@ -32,6 +32,10 @@ impl BcachefsHandle {
         self.inner.sysfs_fd
     }
 
+    pub(crate) fn ioctl_fd_raw(&self) -> i32 {
+        self.inner.ioctl_fd
+    }
+
     /// Opens a bcachefs filesystem and returns its handle
     pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self, BchError> {
         let path = path_to_cstr(path);

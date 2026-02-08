@@ -20,7 +20,6 @@ int image_cmds(int argc, char *argv[]);
 
 int fs_usage(void);
 int cmd_fs_usage(int argc, char *argv[]);
-int cmd_fs_top(int argc, char *argv[]);
 
 int device_cmds(int argc, char *argv[]);
 

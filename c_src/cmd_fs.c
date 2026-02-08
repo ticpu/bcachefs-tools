@@ -759,8 +759,6 @@ int fs_cmds(int argc, char *argv[])
 		return fs_usage();
 	if (!strcmp(cmd, "usage"))
 		return cmd_fs_usage(argc, argv);
-	if (!strcmp(cmd, "top"))
-		return cmd_fs_top(argc, argv);
 
 	fs_usage();
 	return -EINVAL;
