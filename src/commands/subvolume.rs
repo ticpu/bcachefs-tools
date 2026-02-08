@@ -1,4 +1,5 @@
 use std::{collections::HashMap, env, ffi::CStr, mem, os::fd::{AsRawFd, OwnedFd}, path::{Path, PathBuf}};
+use chrono::{Local, TimeZone};
 
 use anyhow::{Context, Result};
 use bch_bindgen::c::{
@@ -206,24 +207,9 @@ fn format_time(sec: i64, _nsec: u32) -> String {
     if sec == 0 {
         return "-".to_string();
     }
-    unsafe {
-        let mut tm: libc::tm = mem::zeroed();
-        let t = sec as libc::time_t;
-        if libc::localtime_r(&t, &mut tm).is_null() {
-            return sec.to_string();
-        }
-        let mut buf = [0u8; 32];
-        let fmt = b"%Y-%m-%d %H:%M\0";
-        let n = libc::strftime(
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            fmt.as_ptr() as *const libc::c_char,
-            &tm,
-        );
-        if n == 0 {
-            return sec.to_string();
-        }
-        String::from_utf8_lossy(&buf[..n]).into_owned()
+    match Local.timestamp_opt(sec, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        _ => sec.to_string(),
     }
 }
 
@@ -770,12 +756,23 @@ fn print_snapshot_json(dir: &Path) -> Result<()> {
         nodes_json.push(serde_json::Value::Object(obj));
     }
 
-    let mut root = serde_json::Map::new();
-    root.insert("root_snapshot".into(), tree.root_snapshot.into());
-    root.insert("master_subvol".into(), tree.master_subvol.into());
-    root.insert("nodes".into(), serde_json::Value::Array(nodes_json));
+    let mut query_root = serde_json::Map::new();
+    query_root.insert("subvol".into(), tree.master_subvol.into());
+    query_root.insert("snapshot".into(), tree.root_snapshot.into());
+    if let Some(path) = resolve_subvol_path(&fd, tree.master_subvol) {
+        query_root.insert("path".into(), path.into());
+    }
 
-    println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(root))?);
+    let query_root_json = serde_json::to_string(&serde_json::Value::Object(query_root))?;
+    let nodes_json_str = serde_json::to_string_pretty(&serde_json::Value::Array(nodes_json))?;
+    // Indent nodes array to sit inside the outer object
+    let nodes_indented = nodes_json_str.lines()
+        .enumerate()
+        .map(|(i, l)| if i == 0 { l.to_string() } else { format!("  {}", l) })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    println!("{{\n  \"query_root\": {},\n  \"nodes\": {}\n}}", query_root_json, nodes_indented);
     Ok(())
 }
 
