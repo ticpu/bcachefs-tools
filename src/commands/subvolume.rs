@@ -9,6 +9,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::wrappers::handle::BcachefsHandle;
 
+// bcachefs file ioctl numbers
+const BCH_IOCTL_SUBVOLUME_LIST: u32 = 31;
+const BCH_IOCTL_SUBVOLUME_TO_PATH: u32 = 32;
+const BCH_IOCTL_SNAPSHOT_TREE_USAGE: u32 = 33;
+
 #[derive(Clone, Debug, ValueEnum)]
 enum SortBy {
     Name,
@@ -111,8 +116,6 @@ struct SubvolEntry {
     path: String,
 }
 
-// bcachefs file ioctl helpers
-
 const fn bch_ioc_rw<T>(nr: u32) -> libc::c_ulong {
     ((3u32 << 30) | ((mem::size_of::<T>() as u32) << 16) | (0xbcu32 << 8) | nr) as libc::c_ulong
 }
@@ -184,40 +187,6 @@ struct BchIoctlSubvolToPath {
     buf:        u64,
 }
 
-fn parse_readdir_buf(buf: &[u8], used: u32) -> Vec<SubvolEntry> {
-    let mut entries = Vec::new();
-    let mut offset = 0usize;
-    let used = used as usize;
-    let hdr_size = mem::size_of::<bch_ioctl_subvol_dirent>();
-
-    while offset + hdr_size <= used {
-        let dirent = unsafe { &*(buf.as_ptr().add(offset) as *const bch_ioctl_subvol_dirent) };
-        let reclen = dirent.reclen as usize;
-
-        if reclen < hdr_size || offset + reclen > used {
-            break;
-        }
-
-        // path is NUL-terminated; alignment padding after the NUL is zeroed
-        let path_bytes = &buf[offset + hdr_size..offset + reclen];
-        let path = CStr::from_bytes_until_nul(path_bytes)
-            .map(|c| c.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
-        entries.push(SubvolEntry {
-            subvolid: dirent.subvolid,
-            flags: dirent.flags,
-            snapshot_parent: dirent.snapshot_parent,
-            otime_sec: dirent.otime_sec as i64,
-            otime_nsec: dirent.otime_nsec,
-            path,
-        });
-        offset += reclen;
-    }
-
-    entries
-}
-
 // Subvolume flags — matches LE32_BITMASK definitions in snapshots/format.h
 const BCH_SUBVOLUME_RO:       u32 = 1 << 0;
 const BCH_SUBVOLUME_UNLINKED: u32 = 1 << 2;
@@ -278,6 +247,103 @@ fn human_readable_size(sectors: u64) -> String {
     format!("{:.1}E", val)
 }
 
+fn open_dir(path: &Path) -> Result<OwnedFd> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    Ok(f.into())
+}
+
+// Readdir ioctl: one call + parse → Vec<SubvolEntry>
+fn subvol_readdir(fd: &OwnedFd, pos: &mut u32) -> Result<Vec<SubvolEntry>> {
+    let buf_size = 64 * 1024u32;
+    let mut buf = vec![0u8; buf_size as usize];
+    let mut arg = bch_ioctl_subvol_readdir {
+        pos: *pos,
+        buf_size,
+        buf: buf.as_mut_ptr() as u64,
+        used: 0,
+        pad: 0,
+    };
+
+    bcachefs_ioctl(fd, BCH_IOCTL_SUBVOLUME_LIST, &mut arg)
+        .context("BCH_IOCTL_SUBVOLUME_LIST")?;
+    *pos = arg.pos;
+
+    let mut entries = Vec::new();
+    let mut offset = 0usize;
+    let used = arg.used as usize;
+    let hdr_size = mem::size_of::<bch_ioctl_subvol_dirent>();
+
+    while offset + hdr_size <= used {
+        let dirent = unsafe { &*(buf.as_ptr().add(offset) as *const bch_ioctl_subvol_dirent) };
+        let reclen = dirent.reclen as usize;
+        if reclen < hdr_size || offset + reclen > used { break; }
+
+        let path_bytes = &buf[offset + hdr_size..offset + reclen];
+        let path = CStr::from_bytes_until_nul(path_bytes)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        entries.push(SubvolEntry {
+            subvolid: dirent.subvolid,
+            flags: dirent.flags,
+            snapshot_parent: dirent.snapshot_parent,
+            otime_sec: dirent.otime_sec as i64,
+            otime_nsec: dirent.otime_nsec,
+            path,
+        });
+        offset += reclen;
+    }
+
+    Ok(entries)
+}
+
+fn list_children(fd: &OwnedFd) -> Result<Vec<SubvolEntry>> {
+    let mut all = Vec::new();
+    let mut pos = 0u32;
+    loop {
+        let entries = subvol_readdir(fd, &mut pos)?;
+        if entries.is_empty() { break; }
+        all.extend(entries);
+    }
+    Ok(all)
+}
+
+// Subvol-to-path ioctl wrapper
+fn subvol_to_path(fd: &OwnedFd, subvolid: u32) -> Result<String> {
+    let mut buf = vec![0u8; 4096];
+    let mut arg = BchIoctlSubvolToPath {
+        subvolid,
+        buf_size: buf.len() as u32,
+        buf: buf.as_mut_ptr() as u64,
+    };
+
+    bcachefs_ioctl(fd, BCH_IOCTL_SUBVOLUME_TO_PATH, &mut arg)
+        .context("BCH_IOCTL_SUBVOLUME_TO_PATH")?;
+
+    let path = CStr::from_bytes_until_nul(&buf)
+        .context("invalid path from ioctl")?
+        .to_string_lossy()
+        .into_owned();
+    Ok(format!("/{}", path))
+}
+
+fn resolve_subvol_path(fd: &OwnedFd, subvolid: u32) -> Option<String> {
+    subvol_to_path(fd, subvolid).ok()
+}
+
+fn snapshot_parent_str(fd: &OwnedFd, parent: u32) -> String {
+    if parent == 0 {
+        return String::new();
+    }
+    resolve_subvol_path(fd, parent)
+        .unwrap_or_else(|| parent.to_string())
+}
+
 // Snapshot tree ioctl
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -292,7 +358,7 @@ struct BchIoctlSnapshotTreeQuery {
 
 impl FlexArrayIoctl for BchIoctlSnapshotTreeQuery {
     type Node = bch_ioctl_snapshot_node;
-    const NR: u32 = 33;
+    const NR: u32 = BCH_IOCTL_SNAPSHOT_TREE_USAGE;
     fn set_capacity(&mut self, n: u32) { self.nr = n; }
     fn nr(&self) -> u32 { self.nr }
     fn total(&self) -> u32 { self.total }
@@ -319,105 +385,37 @@ fn query_snapshot_tree(fd: &OwnedFd, tree_id: u32) -> Result<SnapshotTreeResult>
     })
 }
 
-fn open_dir(path: &Path) -> Result<OwnedFd> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY)
-        .open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
-    Ok(f.into())
-}
-
-fn list_children(fd: &OwnedFd) -> Result<Vec<SubvolEntry>> {
-    let buf_size = 64 * 1024u32;
-    let mut buf = vec![0u8; buf_size as usize];
-    let mut all_entries = Vec::new();
-    let mut pos = 0u32;
-
-    loop {
-        let mut arg = bch_ioctl_subvol_readdir {
-            pos,
-            buf_size,
-            buf: buf.as_mut_ptr() as u64,
-            used: 0,
-            pad: 0,
-        };
-
-        bcachefs_ioctl(fd, 31, &mut arg)
-            .context("BCH_IOCTL_SUBVOLUME_LIST")?;
-
-        if arg.used == 0 {
-            break;
-        }
-
-        all_entries.extend(parse_readdir_buf(&buf, arg.used));
-        pos = arg.pos;
-    }
-
-    Ok(all_entries)
-}
-
-fn resolve_subvol_path(fd: &OwnedFd, subvolid: u32) -> Option<String> {
-    let mut buf = vec![0u8; 4096];
-    let mut arg = BchIoctlSubvolToPath {
-        subvolid,
-        buf_size: buf.len() as u32,
-        buf: buf.as_mut_ptr() as u64,
-    };
-
-    bcachefs_ioctl(fd, 32, &mut arg).ok()?;
-
-    CStr::from_bytes_until_nul(&buf)
-        .ok()
-        .map(|c| format!("/{}", c.to_string_lossy()))
-}
-
-fn snapshot_parent_str(fd: &OwnedFd, parent: u32) -> String {
-    if parent == 0 {
-        return String::new();
-    }
-    resolve_subvol_path(fd, parent)
-        .unwrap_or_else(|| parent.to_string())
-}
-
-fn subvol_cumulative_sectors(dir: &Path, subvolid: u32) -> Option<u64> {
-    let fd = open_dir(dir).ok()?;
-    let tree = query_snapshot_tree(&fd, 0).ok()?;
-
+/// Query snapshot tree and compute cumulative sectors per subvolume.
+fn subvol_sizes(fd: &OwnedFd) -> Option<HashMap<u32, u64>> {
+    let tree = query_snapshot_tree(fd, 0).ok()?;
     let by_id: HashMap<u32, &SnapshotNode> = tree.nodes.iter()
         .map(|n| (n.id, n)).collect();
 
-    let node = tree.nodes.iter().find(|n| n.subvol == subvolid)?;
-
-    let mut total = 0u64;
-    let mut cur = node.id;
-    loop {
-        let n = by_id.get(&cur)?;
-        total += n.sectors;
-        if n.parent == 0 { break; }
-        cur = n.parent;
+    let mut sizes = HashMap::new();
+    for n in &tree.nodes {
+        if n.subvol == 0 { continue; }
+        let mut cumulative = 0u64;
+        let mut cur = n.id;
+        loop {
+            if let Some(node) = by_id.get(&cur) {
+                cumulative += node.sectors;
+                if node.parent == 0 { break; }
+                cur = node.parent;
+            } else {
+                break;
+            }
+        }
+        sizes.insert(n.subvol, cumulative);
     }
-    Some(total)
+    Some(sizes)
 }
 
-// Flat entry with pre-resolved data for filtering and sorting
-struct FlatEntry {
-    full_path: String,
-    subvolid: u32,
-    flags: u32,
-    snapshot_parent: u32,
-    otime_sec: i64,
-    otime_nsec: u32,
-    size: Option<u64>,
-}
-
-fn collect_flat_entries(dir: &Path, prefix: &str, recursive: bool) -> Result<Vec<FlatEntry>> {
+fn collect_entries(dir: &Path, prefix: &str, recursive: bool) -> Result<Vec<(String, SubvolEntry)>> {
     let fd = open_dir(dir)?;
-    let entries = list_children(&fd)?;
-    let mut result = Vec::new();
+    let children = list_children(&fd)?;
+    let mut out = Vec::new();
 
-    for e in entries {
+    for e in children {
         let full_path = if prefix.is_empty() {
             e.path.clone()
         } else {
@@ -425,33 +423,25 @@ fn collect_flat_entries(dir: &Path, prefix: &str, recursive: bool) -> Result<Vec
         };
 
         let child_dir = dir.join(&e.path);
-        let size = subvol_cumulative_sectors(&child_dir, e.subvolid);
-
-        result.push(FlatEntry {
-            full_path: full_path.clone(),
-            subvolid: e.subvolid,
-            flags: e.flags,
-            snapshot_parent: e.snapshot_parent,
-            otime_sec: e.otime_sec,
-            otime_nsec: e.otime_nsec,
-            size,
-        });
+        out.push((full_path.clone(), e));
 
         if recursive {
-            if let Ok(children) = collect_flat_entries(&child_dir, &full_path, true) {
-                result.extend(children);
+            if let Ok(sub) = collect_entries(&child_dir, &full_path, true) {
+                out.extend(sub);
             }
         }
     }
 
-    Ok(result)
+    Ok(out)
 }
 
 fn print_flat(dir: &Path, recursive: bool, show_snapshots: bool,
               readonly: bool, sort: Option<SortBy>) -> Result<()> {
-    let mut entries = collect_flat_entries(dir, "", recursive)?;
+    let fd = open_dir(dir)?;
+    let sizes = subvol_sizes(&fd);
+    let mut entries = collect_entries(dir, "", recursive)?;
 
-    entries.retain(|e| {
+    entries.retain(|(_, e)| {
         if !show_snapshots && e.snapshot_parent != 0 { return false; }
         if readonly && (e.flags & BCH_SUBVOLUME_RO) == 0 { return false; }
         true
@@ -459,15 +449,15 @@ fn print_flat(dir: &Path, recursive: bool, show_snapshots: bool,
 
     if let Some(ref sort) = sort {
         match sort {
-            SortBy::Name => entries.sort_by(|a, b| a.full_path.cmp(&b.full_path)),
-            SortBy::Size => entries.sort_by(|a, b|
-                b.size.unwrap_or(0).cmp(&a.size.unwrap_or(0))),
-            SortBy::Time => entries.sort_by(|a, b|
-                b.otime_sec.cmp(&a.otime_sec)),
+            SortBy::Name => entries.sort_by(|a, b| a.0.cmp(&b.0)),
+            SortBy::Size => entries.sort_by(|a, b| {
+                let sa = sizes.as_ref().and_then(|s| s.get(&a.1.subvolid)).copied().unwrap_or(0);
+                let sb = sizes.as_ref().and_then(|s| s.get(&b.1.subvolid)).copied().unwrap_or(0);
+                sb.cmp(&sa)
+            }),
+            SortBy::Time => entries.sort_by(|a, b| b.1.otime_sec.cmp(&a.1.otime_sec)),
         }
     }
-
-    let fd = open_dir(dir)?;
 
     if show_snapshots {
         println!("{:<24} {:<8} {:<16} {:<12} {:<12} {}",
@@ -477,10 +467,13 @@ fn print_flat(dir: &Path, recursive: bool, show_snapshots: bool,
             "Path", "ID", "Created", "Flags", "Size");
     }
 
-    for e in &entries {
+    for (path, e) in &entries {
         let f = flags_str(e.flags);
         let flags_display = if f.is_empty() { "-".to_string() } else { f };
-        let size = e.size.map(|s| human_readable_size(s)).unwrap_or_default();
+        let size = sizes.as_ref()
+            .and_then(|s| s.get(&e.subvolid))
+            .map(|&s| human_readable_size(s))
+            .unwrap_or_default();
 
         if show_snapshots {
             let snap = if e.snapshot_parent != 0 {
@@ -489,12 +482,12 @@ fn print_flat(dir: &Path, recursive: bool, show_snapshots: bool,
                 String::new()
             };
             println!("{:<24} {:<8} {:<16} {:<12} {:<12} {}",
-                e.full_path, e.subvolid,
+                path, e.subvolid,
                 format_time(e.otime_sec, e.otime_nsec),
                 flags_display, size, snap);
         } else {
             println!("{:<24} {:<8} {:<16} {:<12} {}",
-                e.full_path, e.subvolid,
+                path, e.subvolid,
                 format_time(e.otime_sec, e.otime_nsec),
                 flags_display, size);
         }
@@ -503,7 +496,8 @@ fn print_flat(dir: &Path, recursive: bool, show_snapshots: bool,
     Ok(())
 }
 
-fn print_tree_recursive(dir: &Path, prefix: &str, show_snapshots: bool) -> Result<()> {
+fn print_tree_recursive(dir: &Path, prefix: &str, show_snapshots: bool,
+                        sizes: &Option<HashMap<u32, u64>>) -> Result<()> {
     let fd = open_dir(dir)?;
     let entries = list_children(&fd)?;
 
@@ -524,7 +518,7 @@ fn print_tree_recursive(dir: &Path, prefix: &str, show_snapshots: bool) -> Resul
         }
         let f = flags_str(e.flags);
         if !f.is_empty() { annotations.push(f); }
-        if let Some(sectors) = subvol_cumulative_sectors(&dir.join(&e.path), e.subvolid) {
+        if let Some(&sectors) = sizes.as_ref().and_then(|s| s.get(&e.subvolid)) {
             annotations.push(human_readable_size(sectors));
         }
         let otime = format_time(e.otime_sec, e.otime_nsec);
@@ -538,14 +532,18 @@ fn print_tree_recursive(dir: &Path, prefix: &str, show_snapshots: bool) -> Resul
         println!("{}{}{}{}", prefix, connector, e.path, suffix);
 
         let next_prefix = format!("{}{}", prefix, child_indent);
-        print_tree_recursive(&dir.join(&e.path), &next_prefix, show_snapshots)?;
+        print_tree_recursive(&dir.join(&e.path), &next_prefix, show_snapshots, sizes)?;
     }
 
     Ok(())
 }
 
 fn print_json(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool) -> Result<()> {
-    fn collect(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool) -> Result<Vec<serde_json::Value>> {
+    let top_fd = open_dir(dir)?;
+    let sizes = subvol_sizes(&top_fd);
+
+    fn collect(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool,
+               sizes: &Option<HashMap<u32, u64>>) -> Result<Vec<serde_json::Value>> {
         let fd = open_dir(dir)?;
         let entries = list_children(&fd)?;
         let mut result = Vec::new();
@@ -570,12 +568,12 @@ fn print_json(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool)
             if !f.is_empty() {
                 obj.insert("flags".into(), serde_json::Value::String(f));
             }
-            if let Some(sectors) = subvol_cumulative_sectors(&dir.join(&e.path), e.subvolid) {
+            if let Some(&sectors) = sizes.as_ref().and_then(|s| s.get(&e.subvolid)) {
                 obj.insert("size".into(), serde_json::Value::String(human_readable_size(sectors)));
                 obj.insert("sectors".into(), serde_json::Value::Number(sectors.into()));
             }
             if recursive {
-                let children = collect(&dir.join(&e.path), true, show_snapshots, readonly)?;
+                let children = collect(&dir.join(&e.path), true, show_snapshots, readonly, sizes)?;
                 if !children.is_empty() {
                     obj.insert("children".into(), serde_json::Value::Array(children));
                 }
@@ -585,7 +583,7 @@ fn print_json(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool)
         Ok(result)
     }
 
-    let tree = collect(dir, recursive, show_snapshots, readonly)?;
+    let tree = collect(dir, recursive, show_snapshots, readonly, &sizes)?;
     println!("{}", serde_json::to_string_pretty(&tree)?);
     Ok(())
 }
@@ -848,8 +846,10 @@ pub fn subvolume(argv: Vec<String>) -> Result<()> {
             if json {
                 print_json(&target, recursive, snapshots, readonly)?;
             } else if tree {
+                let fd = open_dir(&target)?;
+                let sizes = subvol_sizes(&fd);
                 println!("{}", target.display());
-                print_tree_recursive(&target, "", snapshots)?;
+                print_tree_recursive(&target, "", snapshots, &sizes)?;
             } else {
                 print_flat(&target, recursive, snapshots, readonly, sort)?;
             }
