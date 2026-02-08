@@ -780,87 +780,89 @@ pub fn subvolume(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
 
     match cli.subcommands {
-        Subcommands::Create { targets } => {
-            for target in targets {
-                let target = if target.is_absolute() {
-                    target
-                } else {
-                    env::current_dir()
-                        .map(|p| p.join(target))
-                        .context("unable to get current directory")?
-                };
+        Subcommands::Create { targets }                                         => cmd_create(targets),
+        Subcommands::Delete { targets }                                         => cmd_delete(targets),
+        Subcommands::Snapshot { read_only, source, dest }                       => cmd_snapshot(read_only, source, dest),
+        Subcommands::List { json, tree, recursive, snapshots, readonly, sort, target }
+                                                                                => cmd_list(json, tree, recursive, snapshots, readonly, sort, target),
+        Subcommands::ListSnapshots { flat, json, readonly, sort, target }       => cmd_list_snapshots(flat, json, readonly, sort, target),
+    }
+}
 
-                if let Some(dirname) = target.parent() {
-                    let fs =
-                        BcachefsHandle::open(dirname).context("Failed to open the filesystem")?;
-                    fs.create_subvolume(target)
-                        .context("Failed to create the subvolume")?;
-                }
-            }
-        }
-        Subcommands::Delete { targets } => {
-            for target in targets {
-                let target = target
-                    .canonicalize()
-                    .context("subvolume path does not exist or can not be canonicalized")?;
+fn cmd_create(targets: Vec<PathBuf>) -> Result<()> {
+    for target in targets {
+        let target = if target.is_absolute() {
+            target
+        } else {
+            env::current_dir()
+                .map(|p| p.join(target))
+                .context("unable to get current directory")?
+        };
 
-                if let Some(dirname) = target.parent() {
-                    let fs =
-                        BcachefsHandle::open(dirname).context("Failed to open the filesystem")?;
-                    fs.delete_subvolume(target)
-                        .context("Failed to delete the subvolume")?;
-                }
-            }
-        }
-        Subcommands::Snapshot {
-            read_only,
-            source,
-            dest,
-        } => {
-            if let Some(dirname) = dest.parent() {
-                let dot = PathBuf::from(".");
-                let dir = if dirname.as_os_str().is_empty() {
-                    &dot
-                } else {
-                    dirname
-                };
-                let fs = BcachefsHandle::open(dir).context("Failed to open the filesystem")?;
-
-                fs.snapshot_subvolume(
-                    if read_only {
-                        BCH_SUBVOL_SNAPSHOT_RO
-                    } else {
-                        0x0
-                    },
-                    source,
-                    dest,
-                )
-                .context("Failed to snapshot the subvolume")?;
-            }
-        }
-        Subcommands::List { json, tree, recursive, snapshots, readonly, sort, target } => {
-            let recursive = recursive || tree;
-            if json {
-                print_json(&target, recursive, snapshots, readonly)?;
-            } else if tree {
-                let fd = open_dir(&target)?;
-                let sizes = subvol_sizes(&fd);
-                println!("{}", target.display());
-                print_tree_recursive(&target, "", snapshots, &sizes)?;
-            } else {
-                print_flat(&target, recursive, snapshots, readonly, sort)?;
-            }
-        }
-        Subcommands::ListSnapshots { flat, json, readonly, sort, target } => {
-            if json {
-                print_snapshot_json(&target)?;
-            } else if flat {
-                print_snapshot_flat(&target, readonly, sort)?;
-            } else {
-                print_snapshot_tree(&target)?;
-            }
+        if let Some(dirname) = target.parent() {
+            let fs = BcachefsHandle::open(dirname).context("Failed to open the filesystem")?;
+            fs.create_subvolume(target)
+                .context("Failed to create the subvolume")?;
         }
     }
+    Ok(())
+}
 
+fn cmd_delete(targets: Vec<PathBuf>) -> Result<()> {
+    for target in targets {
+        let target = target
+            .canonicalize()
+            .context("subvolume path does not exist or can not be canonicalized")?;
+
+        if let Some(dirname) = target.parent() {
+            let fs = BcachefsHandle::open(dirname).context("Failed to open the filesystem")?;
+            fs.delete_subvolume(target)
+                .context("Failed to delete the subvolume")?;
+        }
+    }
+    Ok(())
+}
+
+fn cmd_snapshot(read_only: bool, source: Option<PathBuf>, dest: PathBuf) -> Result<()> {
+    if let Some(dirname) = dest.parent() {
+        let dot = PathBuf::from(".");
+        let dir = if dirname.as_os_str().is_empty() { &dot } else { dirname };
+        let fs = BcachefsHandle::open(dir).context("Failed to open the filesystem")?;
+
+        fs.snapshot_subvolume(
+            if read_only { BCH_SUBVOL_SNAPSHOT_RO } else { 0x0 },
+            source,
+            dest,
+        )
+        .context("Failed to snapshot the subvolume")?;
+    }
+    Ok(())
+}
+
+fn cmd_list(json: bool, tree: bool, recursive: bool, snapshots: bool,
+            readonly: bool, sort: Option<SortBy>, target: PathBuf) -> Result<()> {
+    let recursive = recursive || tree;
+    if json {
+        print_json(&target, recursive, snapshots, readonly)?;
+    } else if tree {
+        let fd = open_dir(&target)?;
+        let sizes = subvol_sizes(&fd);
+        println!("{}", target.display());
+        print_tree_recursive(&target, "", snapshots, &sizes)?;
+    } else {
+        print_flat(&target, recursive, snapshots, readonly, sort)?;
+    }
+    Ok(())
+}
+
+fn cmd_list_snapshots(flat: bool, json: bool, readonly: bool,
+                      sort: Option<SortBy>, target: PathBuf) -> Result<()> {
+    if json {
+        print_snapshot_json(&target)?;
+    } else if flat {
+        print_snapshot_flat(&target, readonly, sort)?;
+    } else {
+        print_snapshot_tree(&target)?;
+    }
     Ok(())
 }
