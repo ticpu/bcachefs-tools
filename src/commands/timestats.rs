@@ -16,8 +16,9 @@ use crossterm::{
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
+use crate::util::run_tui;
 use crate::wrappers::handle::BcachefsHandle;
-use crate::wrappers::sysfs::dev_name_from_sysfs;
+use crate::wrappers::sysfs::{dev_name_from_sysfs, sysfs_path_from_fd};
 
 const SYSFS_BASE: &str = "/sys/fs/bcachefs";
 
@@ -166,11 +167,6 @@ struct FsSnapshot {
 }
 
 // Sysfs reading
-
-fn sysfs_path_from_fd(fd: i32) -> Result<PathBuf> {
-    let link = format!("/proc/self/fd/{}", fd);
-    fs::read_link(&link).with_context(|| format!("resolving sysfs fd {}", fd))
-}
 
 fn find_all_sysfs_dirs() -> Result<Vec<PathBuf>> {
     let base = Path::new(SYSFS_BASE);
@@ -525,7 +521,6 @@ fn handle_key(state: &mut TuiState, key: KeyCode, modifiers: KeyModifiers, total
 }
 
 fn run_interactive(cli: Cli, sysfs_paths: Vec<PathBuf>) -> Result<()> {
-    let mut stdout = io::stdout();
     let mut state = TuiState {
         sort_col:      cli.sort.col_index(),
         reverse:       false,
@@ -537,40 +532,30 @@ fn run_interactive(cli: Cli, sysfs_paths: Vec<PathBuf>) -> Result<()> {
         scroll_offset: 0,
     };
 
-    terminal::enable_raw_mode()?;
-    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
+    run_tui(|stdout| loop {
+        let mut snaps = collect_stats(&sysfs_paths, state.show_devices)
+            .unwrap_or_default();
+        prepare_snaps(&mut snaps, &state);
+        let total_rows = count_total_rows(&snaps);
+        if total_rows > 0 && state.cursor >= total_rows {
+            state.cursor = total_rows - 1;
+        }
 
-    let result = (|| -> Result<()> {
-        loop {
-            let mut snaps = collect_stats(&sysfs_paths, state.show_devices)
-                .unwrap_or_default();
-            prepare_snaps(&mut snaps, &state);
-            let total_rows = count_total_rows(&snaps);
-            if total_rows > 0 && state.cursor >= total_rows {
-                state.cursor = total_rows - 1;
+        render_frame(stdout, &snaps, &mut state, sysfs_paths.len() > 1)?;
+
+        if event::poll(state.interval)? {
+            if let Event::Key(key) = event::read()? {
+                if handle_key(&mut state, key.code, key.modifiers, total_rows) { return Ok(()) }
             }
+            while event::poll(Duration::ZERO)? { let _ = event::read()?; }
+        }
 
-            render_frame(&mut stdout, &snaps, &mut state, sysfs_paths.len() > 1)?;
-
-            if event::poll(state.interval)? {
-                if let Event::Key(key) = event::read()? {
-                    if handle_key(&mut state, key.code, key.modifiers, total_rows) { break }
-                }
-                while event::poll(Duration::ZERO)? { let _ = event::read()?; }
-            }
-
-            if state.paused {
-                if let Event::Key(key) = event::read()? {
-                    if handle_key(&mut state, key.code, key.modifiers, total_rows) { break }
-                }
+        if state.paused {
+            if let Event::Key(key) = event::read()? {
+                if handle_key(&mut state, key.code, key.modifiers, total_rows) { return Ok(()) }
             }
         }
-        Ok(())
-    })();
-
-    let _ = execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen);
-    let _ = terminal::disable_raw_mode();
-    result
+    })
 }
 
 // Entry point

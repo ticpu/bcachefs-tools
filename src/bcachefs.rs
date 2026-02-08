@@ -2,6 +2,7 @@ mod commands;
 mod key;
 mod dump_stack;
 mod logging;
+mod util;
 mod wrappers;
 mod device_scan;
 mod http;

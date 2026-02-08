@@ -1,5 +1,7 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 
 /// Resolve the block device name for a bcachefs sysfs device directory.
 ///
@@ -16,4 +18,9 @@ pub fn dev_name_from_sysfs(dev_sysfs_path: &Path) -> String {
     dev_sysfs_path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+pub fn sysfs_path_from_fd(fd: i32) -> Result<PathBuf> {
+    let link = format!("/proc/self/fd/{}", fd);
+    fs::read_link(&link).with_context(|| format!("resolving sysfs fd {}", fd))
 }

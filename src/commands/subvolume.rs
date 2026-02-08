@@ -8,6 +8,7 @@ use bch_bindgen::c::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::util::fmt_bytes_human;
 use crate::wrappers::handle::BcachefsHandle;
 
 // ---- CLI definitions ----
@@ -373,23 +374,7 @@ fn format_time(sec: i64, _nsec: u32) -> String {
 }
 
 fn human_readable_size(sectors: u64) -> String {
-    let bytes = sectors * 512;
-    const UNITS: &[&str] = &["B", "K", "M", "G", "T", "P"];
-    if bytes == 0 {
-        return "0B".to_string();
-    }
-    let mut val = bytes as f64;
-    for &unit in UNITS {
-        if val < 1024.0 {
-            return if val == val.trunc() {
-                format!("{:.0}{}", val, unit)
-            } else {
-                format!("{:.1}{}", val, unit)
-            };
-        }
-        val /= 1024.0;
-    }
-    format!("{:.1}E", val)
+    fmt_bytes_human(sectors * 512)
 }
 
 fn snapshot_parent_str(fd: &OwnedFd, parent: u32) -> String {

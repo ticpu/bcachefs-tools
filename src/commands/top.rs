@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fs;
-use std::io::{self, Write as IoWrite};
+use std::io::{self, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use bch_bindgen::c::bch_counters_flags;
+use anyhow::{anyhow, Result};
+use bch_bindgen::c::{bch_counters_flags, bch_ioctl_query_counters};
 use bch_bindgen::c::bch_persistent_counters::BCH_COUNTER_NR;
 use clap::Parser;
 use crossterm::{
@@ -16,160 +16,73 @@ use crossterm::{
     execute,
     terminal::{self, ClearType},
 };
+use serde::Deserialize;
 
+use crate::util::{fmt_bytes_human, fmt_num_human, run_tui};
 use crate::wrappers::handle::BcachefsHandle;
-use crate::wrappers::sysfs::dev_name_from_sysfs;
+use crate::wrappers::sysfs::{dev_name_from_sysfs, sysfs_path_from_fd};
 
 // ioctl constants
 
 const BCH_IOCTL_QUERY_COUNTERS_NR: u32 = 21;
 const BCH_IOCTL_QUERY_COUNTERS_MOUNT: u16 = 1 << 0;
+const NR_COUNTERS: usize = BCH_COUNTER_NR as usize;
 
 const fn bch_ioc_w<T>(nr: u32) -> libc::c_ulong {
     ((1u32 << 30) | ((mem::size_of::<T>() as u32) << 16) | (0xbcu32 << 8) | nr) as libc::c_ulong
 }
 
-// Counter info from bindgen
+// Counter info accessors — read directly from bch_bindgen FFI arrays
 
-struct CounterInfo {
-    names:      Vec<String>,
-    flags:      Vec<bch_counters_flags>,
-    stable_map: Vec<u16>,
+unsafe fn counter_name(i: usize) -> &'static str {
+    let p = *bch_bindgen::c::bch2_counter_names.as_ptr().add(i);
+    if p.is_null() { "???" } else { CStr::from_ptr(p).to_str().unwrap_or("???") }
 }
 
-fn counter_info() -> CounterInfo {
-    let nr = BCH_COUNTER_NR as usize;
-    let mut names = Vec::with_capacity(nr);
-    let mut flags = Vec::with_capacity(nr);
-    let mut stable_map = Vec::with_capacity(nr);
+unsafe fn counter_stable_id(i: usize) -> u16 {
+    *bch_bindgen::c::bch2_counter_stable_map.as_ptr().add(i)
+}
 
-    // bch2_counter_names is a NULL-terminated extern array (bindgen size 0),
-    // bch2_counter_flags is a static const array (bindgen size 131),
-    // bch2_counter_flags_map and bch2_counter_stable_map are extern arrays (size 0).
-    // Access all via raw pointers for uniformity.
-    unsafe {
-        let names_ptr = bch_bindgen::c::bch2_counter_names.as_ptr();
-        let flags_ptr = bch_bindgen::c::bch2_counter_flags_map.as_ptr();
-        let stable_ptr = bch_bindgen::c::bch2_counter_stable_map.as_ptr();
-
-        for i in 0..nr {
-            let name_ptr = *names_ptr.add(i);
-            let name = if name_ptr.is_null() {
-                format!("counter_{}", i)
-            } else {
-                CStr::from_ptr(name_ptr).to_string_lossy().to_string()
-            };
-            names.push(name);
-            flags.push(*flags_ptr.add(i));
-            stable_map.push(*stable_ptr.add(i));
-        }
-    }
-
-    CounterInfo { names, flags, stable_map }
+unsafe fn counter_is_sectors(i: usize) -> bool {
+    *bch_bindgen::c::bch2_counter_flags_map.as_ptr().add(i) == bch_counters_flags::TYPE_SECTORS
 }
 
 // ioctl query
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct BchIoctlQueryCounters {
-    nr:    u16,
-    flags: u16,
-    pad:   u32,
-}
-
 fn read_counters(fd: i32, flags: u16, nr_stable: u16) -> Result<Vec<u64>> {
-    let hdr_size = mem::size_of::<BchIoctlQueryCounters>();
+    let hdr_size = mem::size_of::<bch_ioctl_query_counters>();
     let buf_size = hdr_size + (nr_stable as usize) * mem::size_of::<u64>();
     let mut buf = vec![0u8; buf_size];
 
-    let hdr = BchIoctlQueryCounters {
-        nr:    nr_stable,
-        flags,
-        pad:   0,
-    };
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            &hdr as *const _ as *const u8,
-            buf.as_mut_ptr(),
-            hdr_size,
-        );
+        let hdr = &mut *(buf.as_mut_ptr() as *mut bch_ioctl_query_counters);
+        hdr.nr = nr_stable;
+        hdr.flags = flags;
     }
 
-    let request = bch_ioc_w::<BchIoctlQueryCounters>(BCH_IOCTL_QUERY_COUNTERS_NR);
+    let request = bch_ioc_w::<bch_ioctl_query_counters>(BCH_IOCTL_QUERY_COUNTERS_NR);
     let ret = unsafe { libc::ioctl(fd, request, buf.as_mut_ptr()) };
     if ret < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
 
-    let returned_hdr = unsafe { &*(buf.as_ptr() as *const BchIoctlQueryCounters) };
-    let actual_nr = returned_hdr.nr as usize;
-
-    let mut values = vec![0u64; actual_nr];
-    for i in 0..actual_nr {
-        values[i] = unsafe {
-            std::ptr::read_unaligned(
-                buf.as_ptr().add(hdr_size + i * mem::size_of::<u64>()) as *const u64
-            )
-        };
-    }
-
-    Ok(values)
+    let actual_nr = unsafe { (*(buf.as_ptr() as *const bch_ioctl_query_counters)).nr } as usize;
+    let data = unsafe { buf.as_ptr().add(hdr_size) as *const u64 };
+    Ok((0..actual_nr).map(|i| unsafe { std::ptr::read_unaligned(data.add(i)) }).collect())
 }
 
-// Per-device IO from sysfs
-//
-// io_done format (values in bytes):
-//   read:
-//   sb          :       12345
-//   journal     :           0
-//   ...
-//   write:
-//   sb          :       12345
-//   ...
+// Per-device IO from sysfs (io_done is JSON: {"read": {...}, "write": {...}}, values in bytes)
+
+#[derive(Deserialize)]
+struct IoDone {
+    read:  HashMap<String, u64>,
+    write: HashMap<String, u64>,
+}
 
 struct DevIoEntry {
     label:      String,     // "dev/data_type"
     read_bytes: u64,
     write_bytes: u64,
-}
-
-fn parse_io_done(dev_name: &str, text: &str) -> Vec<DevIoEntry> {
-    let mut entries: Vec<(String, u64, u64)> = Vec::new();
-    let mut in_write = false;
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line == "read:" {
-            in_write = false;
-            continue;
-        }
-        if line == "write:" {
-            in_write = true;
-            continue;
-        }
-        if let Some((name, val_str)) = line.split_once(':') {
-            let name = name.trim();
-            if let Ok(v) = val_str.trim().parse::<u64>() {
-                if let Some(entry) = entries.iter_mut().find(|(n, _, _)| n == name) {
-                    if in_write { entry.2 = v; } else { entry.1 = v; }
-                } else if in_write {
-                    entries.push((name.to_string(), 0, v));
-                } else {
-                    entries.push((name.to_string(), v, 0));
-                }
-            }
-        }
-    }
-
-    entries.into_iter()
-        .filter(|(_, r, w)| *r != 0 || *w != 0)
-        .map(|(dtype, r, w)| DevIoEntry {
-            label: format!("{}/{}", dev_name, dtype),
-            read_bytes: r,
-            write_bytes: w,
-        })
-        .collect()
 }
 
 fn read_device_io(sysfs_path: &Path) -> Vec<DevIoEntry> {
@@ -185,8 +98,18 @@ fn read_device_io(sysfs_path: &Path) -> Vec<DevIoEntry> {
 
         let io_done_path = dev_path.join("io_done");
         let Ok(content) = fs::read_to_string(&io_done_path) else { continue };
+        let Ok(io_done) = serde_json::from_str::<IoDone>(&content) else { continue };
 
-        entries.extend(parse_io_done(&dev_name, &content));
+        for (dtype, &r) in &io_done.read {
+            let w = io_done.write.get(dtype).copied().unwrap_or(0);
+            if r != 0 || w != 0 {
+                entries.push(DevIoEntry {
+                    label: format!("{}/{}", dev_name, dtype),
+                    read_bytes: r,
+                    write_bytes: w,
+                });
+            }
+        }
     }
     entries.sort_by(|a, b| a.label.cmp(&b.label));
     entries
@@ -198,18 +121,9 @@ fn fmt_bytes(bytes: u64, human_readable: bool) -> String {
     if human_readable { fmt_bytes_human(bytes) } else { format!("{}", bytes) }
 }
 
-fn is_sectors(flags: bch_counters_flags) -> bool {
-    flags == bch_counters_flags::TYPE_SECTORS
-}
-
 fn fmt_counter(val: u64, sectors: bool, human_readable: bool) -> String {
     if sectors {
-        let bytes = val << 9;
-        if human_readable {
-            fmt_bytes_human(bytes)
-        } else {
-            format!("{}", bytes)
-        }
+        fmt_bytes(val << 9, human_readable)
     } else if human_readable && val >= 10_000 {
         fmt_num_human(val)
     } else {
@@ -217,44 +131,6 @@ fn fmt_counter(val: u64, sectors: bool, human_readable: bool) -> String {
     }
 }
 
-fn fmt_bytes_human(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    if bytes == 0 { return "0B".to_string() }
-    let mut val = bytes as f64;
-    for unit in UNITS {
-        if val < 1024.0 || *unit == "PiB" {
-            return if val >= 100.0 {
-                format!("{:.0}{}", val, unit)
-            } else if val >= 10.0 {
-                format!("{:.1}{}", val, unit)
-            } else {
-                format!("{:.2}{}", val, unit)
-            };
-        }
-        val /= 1024.0;
-    }
-    format!("{}B", bytes)
-}
-
-fn fmt_num_human(n: u64) -> String {
-    const UNITS: &[&str] = &["", "K", "M", "G", "T"];
-    let mut val = n as f64;
-    for unit in UNITS {
-        if val < 1000.0 || *unit == "T" {
-            return if val >= 100.0 {
-                format!("{:.0}{}", val, unit)
-            } else if val >= 10.0 {
-                format!("{:.1}{}", val, unit)
-            } else if unit.is_empty() {
-                format!("{}", n)
-            } else {
-                format!("{:.2}{}", val, unit)
-            };
-        }
-        val /= 1000.0;
-    }
-    format!("{}", n)
-}
 
 // CLI
 
@@ -272,7 +148,6 @@ pub struct Cli {
 // TUI state
 
 struct TopState {
-    info:           CounterInfo,
     ioctl_fd:       i32,
     nr_stable:      u16,
     mount_vals:     Vec<u64>,
@@ -285,16 +160,12 @@ struct TopState {
     interval_secs:  u32,
 }
 
-fn sysfs_path_from_fd(fd: i32) -> Result<PathBuf> {
-    let link = format!("/proc/self/fd/{}", fd);
-    fs::read_link(&link).with_context(|| format!("resolving sysfs fd {}", fd))
-}
-
 impl TopState {
     fn new(handle: &BcachefsHandle, human_readable: bool) -> Result<Self> {
-        let info = counter_info();
         let ioctl_fd = handle.ioctl_fd_raw();
-        let nr_stable = info.stable_map.iter().copied().max().unwrap_or(0) + 1;
+        let nr_stable = unsafe {
+            (0..NR_COUNTERS).map(|i| counter_stable_id(i)).max().unwrap_or(0) + 1
+        };
 
         let mount_vals = read_counters(ioctl_fd, BCH_IOCTL_QUERY_COUNTERS_MOUNT, nr_stable)?;
         let start_vals = read_counters(ioctl_fd, 0, nr_stable)?;
@@ -303,7 +174,7 @@ impl TopState {
         let sysfs_path = sysfs_path_from_fd(handle.sysfs_fd())?;
 
         Ok(TopState {
-            info, ioctl_fd, nr_stable,
+            ioctl_fd, nr_stable,
             mount_vals, start_vals, prev_vals,
             prev_dev_io: HashMap::new(),
             human_readable, show_devices: true,
@@ -326,9 +197,8 @@ impl TopState {
         write!(stdout, "{:<40} {:>14} {:>14} {:>14}\r\n",
             "", format!("{}/s", self.interval_secs), "total", "mount")?;
 
-        let nr = self.info.names.len();
-        for i in 0..nr {
-            let stable = self.info.stable_map[i];
+        for i in 0..NR_COUNTERS {
+            let (stable, sectors) = unsafe { (counter_stable_id(i), counter_is_sectors(i)) };
             let cv = Self::get_val(curr, stable);
             let pv = Self::get_val(&self.prev_vals, stable);
             let sv = Self::get_val(&self.start_vals, stable);
@@ -340,10 +210,8 @@ impl TopState {
             let v_rate  = cv.wrapping_sub(pv);
             let v_total = cv.wrapping_sub(sv);
 
-            let sectors = is_sectors(self.info.flags[i]);
-
             write!(stdout, "{:<40} {:>12}/s {:>14} {:>14}\r\n",
-                &self.info.names[i],
+                unsafe { counter_name(i) },
                 fmt_counter(v_rate / self.interval_secs as u64, sectors, self.human_readable),
                 fmt_counter(v_total, sectors, self.human_readable),
                 fmt_counter(v_mount, sectors, self.human_readable))?;
@@ -375,44 +243,32 @@ impl TopState {
 
 fn run_interactive(handle: BcachefsHandle, human_readable: bool) -> Result<()> {
     let mut state = TopState::new(&handle, human_readable)?;
-    let mut stdout = io::stdout();
 
-    terminal::enable_raw_mode()?;
-    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
+    run_tui(|stdout| loop {
+        let curr = read_counters(state.ioctl_fd, 0, state.nr_stable)?;
+        let dev_io = read_device_io(&state.sysfs_path);
+        state.render(&curr, &dev_io, stdout)?;
+        state.prev_vals = curr;
+        state.prev_dev_io = dev_io.into_iter()
+            .map(|d| (d.label, (d.read_bytes, d.write_bytes)))
+            .collect();
 
-    let result = (|| -> Result<()> {
-        loop {
-            let curr = read_counters(state.ioctl_fd, 0, state.nr_stable)?;
-            let dev_io = read_device_io(&state.sysfs_path);
-            state.render(&curr, &dev_io, &mut stdout)?;
-            state.prev_vals = curr;
-            state.prev_dev_io = dev_io.into_iter()
-                .map(|d| (d.label, (d.read_bytes, d.write_bytes)))
-                .collect();
-
-            // Wait for interval or keypress
-            if event::poll(Duration::from_secs(state.interval_secs as u64))? {
-                if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-                        KeyCode::Char('h') => state.human_readable = !state.human_readable,
-                        KeyCode::Char('d') => state.show_devices = !state.show_devices,
-                        KeyCode::Char(c @ '1'..='9') => {
-                            state.interval_secs = (c as u32) - ('0' as u32);
-                        }
-                        _ => {}
+        if event::poll(Duration::from_secs(state.interval_secs as u64))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                    KeyCode::Char('h') => state.human_readable = !state.human_readable,
+                    KeyCode::Char('d') => state.show_devices = !state.show_devices,
+                    KeyCode::Char(c @ '1'..='9') => {
+                        state.interval_secs = (c as u32) - ('0' as u32);
                     }
+                    _ => {}
                 }
-                // Drain remaining events
-                while event::poll(Duration::ZERO)? { let _ = event::read()?; }
             }
+            while event::poll(Duration::ZERO)? { let _ = event::read()?; }
         }
-    })();
-
-    let _ = execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen);
-    let _ = terminal::disable_raw_mode();
-    result
+    })
 }
 
 pub fn top(argv: Vec<String>) -> Result<()> {
