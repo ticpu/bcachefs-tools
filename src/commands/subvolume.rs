@@ -10,10 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::wrappers::handle::BcachefsHandle;
 
-// bcachefs file ioctl numbers
-const BCH_IOCTL_SUBVOLUME_LIST: u32 = 31;
-const BCH_IOCTL_SUBVOLUME_TO_PATH: u32 = 32;
-const BCH_IOCTL_SNAPSHOT_TREE_USAGE: u32 = 33;
+// ---- CLI definitions ----
 
 #[derive(Clone, Debug, ValueEnum)]
 enum SortBy {
@@ -108,6 +105,8 @@ enum Subcommands {
     },
 }
 
+// ---- Data types ----
+
 struct SubvolEntry {
     subvolid: u32,
     flags: u32,
@@ -116,6 +115,23 @@ struct SubvolEntry {
     otime_nsec: u32,
     path: String,
 }
+
+type SnapshotNode = bch_ioctl_snapshot_node;
+
+struct SnapshotTreeResult {
+    master_subvol:  u32,
+    root_snapshot:  u32,
+    nodes:          Vec<SnapshotNode>,
+}
+
+// ---- Ioctl layer ----
+
+const BCH_IOCTL_SUBVOLUME_LIST: u32 = 31;
+const BCH_IOCTL_SUBVOLUME_TO_PATH: u32 = 32;
+const BCH_IOCTL_SNAPSHOT_TREE_USAGE: u32 = 33;
+
+const BCH_SUBVOLUME_RO:       u32 = 1 << 0;
+const BCH_SUBVOLUME_UNLINKED: u32 = 1 << 2;
 
 const fn bch_ioc_rw<T>(nr: u32) -> libc::c_ulong {
     ((3u32 << 30) | ((mem::size_of::<T>() as u32) << 16) | (0xbcu32 << 8) | nr) as libc::c_ulong
@@ -130,7 +146,6 @@ fn bcachefs_ioctl<T>(fd: &OwnedFd, nr: u32, arg: &mut T) -> std::io::Result<()> 
     }
 }
 
-/// Trait for ioctls returning a header + variable-length node array.
 trait FlexArrayIoctl: Copy {
     type Node: Copy;
     const NR: u32;
@@ -139,7 +154,6 @@ trait FlexArrayIoctl: Copy {
     fn total(&self) -> u32;
 }
 
-/// Call a bcachefs ioctl that returns a flex array, with ERANGE retry.
 fn bcachefs_flex_ioctl<H: FlexArrayIoctl>(
     fd: &OwnedFd,
     mut arg: H,
@@ -188,49 +202,23 @@ struct BchIoctlSubvolToPath {
     buf:        u64,
 }
 
-// Subvolume flags — matches LE32_BITMASK definitions in snapshots/format.h
-const BCH_SUBVOLUME_RO:       u32 = 1 << 0;
-const BCH_SUBVOLUME_UNLINKED: u32 = 1 << 2;
-
-fn flags_str(flags: u32) -> String {
-    let mut parts = Vec::new();
-    if flags & BCH_SUBVOLUME_RO != 0       { parts.push("ro"); }
-    if flags & BCH_SUBVOLUME_UNLINKED != 0 { parts.push("unlinked"); }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        parts.join(",")
-    }
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct BchIoctlSnapshotTreeQuery {
+    tree_id:        u32,
+    master_subvol:  u32,
+    root_snapshot:  u32,
+    nr:             u32,
+    total:          u32,
+    pad:            u32,
 }
 
-fn format_time(sec: i64, _nsec: u32) -> String {
-    if sec == 0 {
-        return "-".to_string();
-    }
-    match Local.timestamp_opt(sec, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
-        _ => sec.to_string(),
-    }
-}
-
-fn human_readable_size(sectors: u64) -> String {
-    let bytes = sectors * 512;
-    const UNITS: &[&str] = &["B", "K", "M", "G", "T", "P"];
-    if bytes == 0 {
-        return "0B".to_string();
-    }
-    let mut val = bytes as f64;
-    for &unit in UNITS {
-        if val < 1024.0 {
-            return if val == val.trunc() {
-                format!("{:.0}{}", val, unit)
-            } else {
-                format!("{:.1}{}", val, unit)
-            };
-        }
-        val /= 1024.0;
-    }
-    format!("{:.1}E", val)
+impl FlexArrayIoctl for BchIoctlSnapshotTreeQuery {
+    type Node = bch_ioctl_snapshot_node;
+    const NR: u32 = BCH_IOCTL_SNAPSHOT_TREE_USAGE;
+    fn set_capacity(&mut self, n: u32) { self.nr = n; }
+    fn nr(&self) -> u32 { self.nr }
+    fn total(&self) -> u32 { self.total }
 }
 
 fn open_dir(path: &Path) -> Result<OwnedFd> {
@@ -243,7 +231,6 @@ fn open_dir(path: &Path) -> Result<OwnedFd> {
     Ok(f.into())
 }
 
-// Readdir ioctl: one call + parse → Vec<SubvolEntry>
 fn subvol_readdir(fd: &OwnedFd, pos: &mut u32) -> Result<Vec<SubvolEntry>> {
     let buf_size = 64 * 1024u32;
     let mut buf = vec![0u8; buf_size as usize];
@@ -299,7 +286,6 @@ fn list_children(fd: &OwnedFd) -> Result<Vec<SubvolEntry>> {
     Ok(all)
 }
 
-// Subvol-to-path ioctl wrapper
 fn subvol_to_path(fd: &OwnedFd, subvolid: u32) -> Result<String> {
     let mut buf = vec![0u8; 4096];
     let mut arg = BchIoctlSubvolToPath {
@@ -322,42 +308,6 @@ fn resolve_subvol_path(fd: &OwnedFd, subvolid: u32) -> Option<String> {
     subvol_to_path(fd, subvolid).ok()
 }
 
-fn snapshot_parent_str(fd: &OwnedFd, parent: u32) -> String {
-    if parent == 0 {
-        return String::new();
-    }
-    resolve_subvol_path(fd, parent)
-        .unwrap_or_else(|| parent.to_string())
-}
-
-// Snapshot tree ioctl
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-struct BchIoctlSnapshotTreeQuery {
-    tree_id:        u32,
-    master_subvol:  u32,
-    root_snapshot:  u32,
-    nr:             u32,
-    total:          u32,
-    pad:            u32,
-}
-
-impl FlexArrayIoctl for BchIoctlSnapshotTreeQuery {
-    type Node = bch_ioctl_snapshot_node;
-    const NR: u32 = BCH_IOCTL_SNAPSHOT_TREE_USAGE;
-    fn set_capacity(&mut self, n: u32) { self.nr = n; }
-    fn nr(&self) -> u32 { self.nr }
-    fn total(&self) -> u32 { self.total }
-}
-
-type SnapshotNode = bch_ioctl_snapshot_node;
-
-struct SnapshotTreeResult {
-    master_subvol:  u32,
-    root_snapshot:  u32,
-    nodes:          Vec<SnapshotNode>,
-}
-
 fn query_snapshot_tree(fd: &OwnedFd, tree_id: u32) -> Result<SnapshotTreeResult> {
     let (hdr, nodes) = bcachefs_flex_ioctl(fd, BchIoctlSnapshotTreeQuery {
         tree_id,
@@ -371,9 +321,7 @@ fn query_snapshot_tree(fd: &OwnedFd, tree_id: u32) -> Result<SnapshotTreeResult>
     })
 }
 
-/// Query snapshot tree and compute cumulative sectors per subvolume.
-fn subvol_sizes(fd: &OwnedFd) -> Option<HashMap<u32, u64>> {
-    let tree = query_snapshot_tree(fd, 0).ok()?;
+fn compute_subvol_sizes(tree: &SnapshotTreeResult) -> HashMap<u32, u64> {
     let by_id: HashMap<u32, &SnapshotNode> = tree.nodes.iter()
         .map(|n| (n.id, n)).collect();
 
@@ -393,8 +341,66 @@ fn subvol_sizes(fd: &OwnedFd) -> Option<HashMap<u32, u64>> {
         }
         sizes.insert(n.subvol, cumulative);
     }
-    Some(sizes)
+    sizes
 }
+
+fn subvol_sizes(fd: &OwnedFd) -> Option<HashMap<u32, u64>> {
+    let tree = query_snapshot_tree(fd, 0).ok()?;
+    Some(compute_subvol_sizes(&tree))
+}
+
+// ---- Formatting helpers ----
+
+fn flags_str(flags: u32) -> String {
+    let mut parts = Vec::new();
+    if flags & BCH_SUBVOLUME_RO != 0       { parts.push("ro"); }
+    if flags & BCH_SUBVOLUME_UNLINKED != 0 { parts.push("unlinked"); }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        parts.join(",")
+    }
+}
+
+fn format_time(sec: i64, _nsec: u32) -> String {
+    if sec == 0 {
+        return "-".to_string();
+    }
+    match Local.timestamp_opt(sec, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        _ => sec.to_string(),
+    }
+}
+
+fn human_readable_size(sectors: u64) -> String {
+    let bytes = sectors * 512;
+    const UNITS: &[&str] = &["B", "K", "M", "G", "T", "P"];
+    if bytes == 0 {
+        return "0B".to_string();
+    }
+    let mut val = bytes as f64;
+    for &unit in UNITS {
+        if val < 1024.0 {
+            return if val == val.trunc() {
+                format!("{:.0}{}", val, unit)
+            } else {
+                format!("{:.1}{}", val, unit)
+            };
+        }
+        val /= 1024.0;
+    }
+    format!("{:.1}E", val)
+}
+
+fn snapshot_parent_str(fd: &OwnedFd, parent: u32) -> String {
+    if parent == 0 {
+        return String::new();
+    }
+    resolve_subvol_path(fd, parent)
+        .unwrap_or_else(|| parent.to_string())
+}
+
+// ---- Display: subvolume list ----
 
 fn collect_entries(dir: &Path, prefix: &str, recursive: bool) -> Result<Vec<(String, SubvolEntry)>> {
     let fd = open_dir(dir)?;
@@ -524,54 +530,100 @@ fn print_tree_recursive(dir: &Path, prefix: &str, show_snapshots: bool,
     Ok(())
 }
 
-fn print_json(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool) -> Result<()> {
-    let top_fd = open_dir(dir)?;
-    let sizes = subvol_sizes(&top_fd);
+fn collect_subvol_json(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool,
+                       sizes: &Option<HashMap<u32, u64>>) -> Result<Vec<serde_json::Value>> {
+    let fd = open_dir(dir)?;
+    let entries = list_children(&fd)?;
+    let mut result = Vec::new();
 
-    fn collect(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool,
-               sizes: &Option<HashMap<u32, u64>>) -> Result<Vec<serde_json::Value>> {
-        let fd = open_dir(dir)?;
-        let entries = list_children(&fd)?;
-        let mut result = Vec::new();
-        for e in &entries {
-            if !show_snapshots && e.snapshot_parent != 0 { continue; }
-            if readonly && (e.flags & BCH_SUBVOLUME_RO) == 0 { continue; }
+    for e in &entries {
+        if !show_snapshots && e.snapshot_parent != 0 { continue; }
+        if readonly && (e.flags & BCH_SUBVOLUME_RO) == 0 { continue; }
 
-            let mut obj = serde_json::Map::new();
-            obj.insert("subvolid".into(), serde_json::Value::Number(e.subvolid.into()));
-            obj.insert("path".into(), serde_json::Value::String(e.path.clone()));
-            if e.otime_sec != 0 {
-                obj.insert("otime".into(), serde_json::Value::String(
-                    format_time(e.otime_sec, e.otime_nsec)));
-                obj.insert("otime_unix".into(), serde_json::Value::Number(e.otime_sec.into()));
-            }
-            if e.snapshot_parent != 0 {
-                let parent_path = resolve_subvol_path(&fd, e.snapshot_parent)
-                    .unwrap_or_else(|| e.snapshot_parent.to_string());
-                obj.insert("snapshot_parent".into(), serde_json::Value::String(parent_path));
-            }
-            let f = flags_str(e.flags);
-            if !f.is_empty() {
-                obj.insert("flags".into(), serde_json::Value::String(f));
-            }
-            if let Some(&sectors) = sizes.as_ref().and_then(|s| s.get(&e.subvolid)) {
-                obj.insert("size".into(), serde_json::Value::String(human_readable_size(sectors)));
-                obj.insert("sectors".into(), serde_json::Value::Number(sectors.into()));
-            }
-            if recursive {
-                let children = collect(&dir.join(&e.path), true, show_snapshots, readonly, sizes)?;
-                if !children.is_empty() {
-                    obj.insert("children".into(), serde_json::Value::Array(children));
-                }
-            }
-            result.push(serde_json::Value::Object(obj));
+        let mut obj = serde_json::Map::new();
+        obj.insert("subvolid".into(), serde_json::Value::Number(e.subvolid.into()));
+        obj.insert("path".into(), serde_json::Value::String(e.path.clone()));
+        if e.otime_sec != 0 {
+            obj.insert("otime".into(), serde_json::Value::String(
+                format_time(e.otime_sec, e.otime_nsec)));
+            obj.insert("otime_unix".into(), serde_json::Value::Number(e.otime_sec.into()));
         }
-        Ok(result)
+        if e.snapshot_parent != 0 {
+            let parent_path = resolve_subvol_path(&fd, e.snapshot_parent)
+                .unwrap_or_else(|| e.snapshot_parent.to_string());
+            obj.insert("snapshot_parent".into(), serde_json::Value::String(parent_path));
+        }
+        let f = flags_str(e.flags);
+        if !f.is_empty() {
+            obj.insert("flags".into(), serde_json::Value::String(f));
+        }
+        if let Some(&sectors) = sizes.as_ref().and_then(|s| s.get(&e.subvolid)) {
+            obj.insert("size".into(), serde_json::Value::String(human_readable_size(sectors)));
+            obj.insert("sectors".into(), serde_json::Value::Number(sectors.into()));
+        }
+        if recursive {
+            let children = collect_subvol_json(&dir.join(&e.path), true, show_snapshots, readonly, sizes)?;
+            if !children.is_empty() {
+                obj.insert("children".into(), serde_json::Value::Array(children));
+            }
+        }
+        result.push(serde_json::Value::Object(obj));
     }
 
-    let tree = collect(dir, recursive, show_snapshots, readonly, &sizes)?;
+    Ok(result)
+}
+
+fn print_json(dir: &Path, recursive: bool, show_snapshots: bool, readonly: bool) -> Result<()> {
+    let fd = open_dir(dir)?;
+    let sizes = subvol_sizes(&fd);
+    let tree = collect_subvol_json(dir, recursive, show_snapshots, readonly, &sizes)?;
     println!("{}", serde_json::to_string_pretty(&tree)?);
     Ok(())
+}
+
+// ---- Display: snapshot tree ----
+
+fn snapshot_node_children(node: &SnapshotNode, by_id: &HashMap<u32, &SnapshotNode>) -> Vec<u32> {
+    node.children.iter()
+        .copied()
+        .filter(|&c| c != 0 && by_id.contains_key(&c))
+        .collect()
+}
+
+fn snapshot_node_label(id: u32, node: &SnapshotNode, names: &HashMap<u32, String>) -> String {
+    let name = names.get(&id)
+        .cloned()
+        .unwrap_or_else(|| "(shared)".to_string());
+    let mut label = format!("{} [{}]", name, human_readable_size(node.sectors));
+    let f = flags_str(node.flags);
+    if !f.is_empty() {
+        label.push_str(&format!(" ({})", f));
+    }
+    label
+}
+
+fn print_snapshot_subtree(
+    id: u32,
+    by_id: &HashMap<u32, &SnapshotNode>,
+    names: &HashMap<u32, String>,
+    prefix: &str,
+    is_last: bool,
+) {
+    let Some(node) = by_id.get(&id) else { return };
+
+    let connector = if is_last { "└── " } else { "├── " };
+    println!("{}{}{}", prefix, connector, snapshot_node_label(id, node, names));
+
+    let child_prefix = if is_last {
+        format!("{}    ", prefix)
+    } else {
+        format!("{}│   ", prefix)
+    };
+
+    let children = snapshot_node_children(node, by_id);
+    for (i, &child_id) in children.iter().enumerate() {
+        print_snapshot_subtree(child_id, by_id, names, &child_prefix, i == children.len() - 1);
+    }
 }
 
 fn print_snapshot_tree(dir: &Path) -> Result<()> {
@@ -596,65 +648,21 @@ fn print_snapshot_tree(dir: &Path) -> Result<()> {
 
     let by_id: HashMap<u32, &SnapshotNode> = tree.nodes.iter().map(|n| (n.id, n)).collect();
 
-    let mut subvol_names: HashMap<u32, String> = HashMap::new();
+    let mut names: HashMap<u32, String> = HashMap::new();
     for n in &tree.nodes {
         if n.subvol != 0 {
             let name = resolve_subvol_path(&fd, n.subvol)
                 .unwrap_or_else(|| format!("subvol {}", n.subvol));
-            subvol_names.insert(n.id, name);
+            names.insert(n.id, name);
         }
     }
 
-    fn node_children(node: &SnapshotNode, by_id: &HashMap<u32, &SnapshotNode>) -> Vec<u32> {
-        node.children.iter()
-            .copied()
-            .filter(|&c| c != 0 && by_id.contains_key(&c))
-            .collect()
-    }
-
-    fn node_label(id: u32, node: &SnapshotNode, subvol_names: &HashMap<u32, String>) -> String {
-        let name = subvol_names.get(&id)
-            .cloned()
-            .unwrap_or_else(|| "(shared)".to_string());
-        let mut label = format!("{} [{}]", name, human_readable_size(node.sectors));
-        let f = flags_str(node.flags);
-        if !f.is_empty() {
-            label.push_str(&format!(" ({})", f));
-        }
-        label
-    }
-
-    fn print_subtree(
-        id: u32,
-        by_id: &HashMap<u32, &SnapshotNode>,
-        subvol_names: &HashMap<u32, String>,
-        prefix: &str,
-        is_last: bool,
-    ) {
-        let Some(node) = by_id.get(&id) else { return };
-
-        let connector = if is_last { "└── " } else { "├── " };
-        println!("{}{}{}", prefix, connector, node_label(id, node, subvol_names));
-
-        let child_prefix = if is_last {
-            format!("{}    ", prefix)
-        } else {
-            format!("{}│   ", prefix)
-        };
-
-        let children = node_children(node, by_id);
-        for (i, &child_id) in children.iter().enumerate() {
-            print_subtree(child_id, by_id, subvol_names, &child_prefix, i == children.len() - 1);
-        }
-    }
-
-    // Print root, then recurse into children with tree connectors
     if let Some(root) = by_id.get(&tree.root_snapshot) {
-        println!("{}", node_label(tree.root_snapshot, root, &subvol_names));
+        println!("{}", snapshot_node_label(tree.root_snapshot, root, &names));
 
-        let children = node_children(root, &by_id);
+        let children = snapshot_node_children(root, &by_id);
         for (i, &child_id) in children.iter().enumerate() {
-            print_subtree(child_id, &by_id, &subvol_names, "", i == children.len() - 1);
+            print_snapshot_subtree(child_id, &by_id, &names, "", i == children.len() - 1);
         }
     }
 
@@ -664,66 +672,37 @@ fn print_snapshot_tree(dir: &Path) -> Result<()> {
 fn print_snapshot_flat(dir: &Path, readonly: bool, sort: Option<SortBy>) -> Result<()> {
     let fd = open_dir(dir)?;
     let tree = query_snapshot_tree(&fd, 0)?;
+    let sizes = compute_subvol_sizes(&tree);
 
-    let by_id: HashMap<u32, &SnapshotNode> = tree.nodes.iter()
-        .map(|n| (n.id, n)).collect();
-
-    struct SnapFlatEntry {
-        path: String,
-        subvol: u32,
-        own_sectors: u64,
-        cumulative: u64,
-        flags: u32,
-    }
-
-    let mut entries: Vec<SnapFlatEntry> = Vec::new();
-
-    for n in &tree.nodes {
-        if n.subvol == 0 { continue; }
-        if readonly && (n.flags & BCH_SUBVOLUME_RO) == 0 { continue; }
-
-        let path = resolve_subvol_path(&fd, n.subvol)
-            .unwrap_or_else(|| format!("subvol {}", n.subvol));
-
-        let mut cumulative = 0u64;
-        let mut cur = n.id;
-        loop {
-            if let Some(node) = by_id.get(&cur) {
-                cumulative += node.sectors;
-                if node.parent == 0 { break; }
-                cur = node.parent;
-            } else {
-                break;
-            }
-        }
-
-        entries.push(SnapFlatEntry {
-            path,
-            subvol: n.subvol,
-            own_sectors: n.sectors,
-            cumulative,
-            flags: n.flags,
-        });
-    }
+    let mut entries: Vec<(String, &SnapshotNode, u64)> = tree.nodes.iter()
+        .filter(|n| n.subvol != 0)
+        .filter(|n| !readonly || (n.flags & BCH_SUBVOLUME_RO) != 0)
+        .map(|n| {
+            let path = resolve_subvol_path(&fd, n.subvol)
+                .unwrap_or_else(|| format!("subvol {}", n.subvol));
+            let cumulative = sizes.get(&n.subvol).copied().unwrap_or(0);
+            (path, n, cumulative)
+        })
+        .collect();
 
     if let Some(ref sort) = sort {
         match sort {
-            SortBy::Name => entries.sort_by(|a, b| a.path.cmp(&b.path)),
-            SortBy::Size => entries.sort_by(|a, b| b.cumulative.cmp(&a.cumulative)),
-            SortBy::Time => {} // no time data from snapshot tree ioctl
+            SortBy::Name => entries.sort_by(|a, b| a.0.cmp(&b.0)),
+            SortBy::Size => entries.sort_by(|a, b| b.2.cmp(&a.2)),
+            SortBy::Time => {}
         }
     }
 
     println!("{:<24} {:<8} {:<12} {:<12} {}",
         "Path", "ID", "Own", "Total", "Flags");
 
-    for e in &entries {
-        let f = flags_str(e.flags);
+    for (path, n, cumulative) in &entries {
+        let f = flags_str(n.flags);
         let flags_display = if f.is_empty() { "-".to_string() } else { f };
         println!("{:<24} {:<8} {:<12} {:<12} {}",
-            e.path, e.subvol,
-            human_readable_size(e.own_sectors),
-            human_readable_size(e.cumulative),
+            path, n.subvol,
+            human_readable_size(n.sectors),
+            human_readable_size(*cumulative),
             flags_display);
     }
 
@@ -765,7 +744,6 @@ fn print_snapshot_json(dir: &Path) -> Result<()> {
 
     let query_root_json = serde_json::to_string(&serde_json::Value::Object(query_root))?;
     let nodes_json_str = serde_json::to_string_pretty(&serde_json::Value::Array(nodes_json))?;
-    // Indent nodes array to sit inside the outer object
     let nodes_indented = nodes_json_str.lines()
         .enumerate()
         .map(|(i, l)| if i == 0 { l.to_string() } else { format!("  {}", l) })
@@ -775,6 +753,8 @@ fn print_snapshot_json(dir: &Path) -> Result<()> {
     println!("{{\n  \"query_root\": {},\n  \"nodes\": {}\n}}", query_root_json, nodes_indented);
     Ok(())
 }
+
+// ---- Command handlers ----
 
 pub fn subvolume(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
