@@ -26,30 +26,12 @@ pub fn sysfs_path_from_fd(fd: i32) -> Result<PathBuf> {
     fs::read_link(&link).with_context(|| format!("resolving sysfs fd {}", fd))
 }
 
-/// Read a sysfs attribute as a trimmed string.
-/// Returns None if the file doesn't exist or is empty.
-pub fn read_sysfs_str(path: &Path) -> io::Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(s) => {
-            let trimmed = s.trim_end_matches('\n').to_string();
-            Ok(if trimmed.is_empty() { None } else { Some(trimmed) })
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
 /// Read a sysfs attribute as a u64.
 pub fn read_sysfs_u64(path: &Path) -> io::Result<u64> {
     let s = fs::read_to_string(path)?;
     s.trim().parse::<u64>()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData,
             format!("{}: {:?}", e, s.trim())))
-}
-
-/// Write a string to a sysfs attribute.
-pub fn write_sysfs_str(path: &Path, val: &str) -> io::Result<()> {
-    fs::write(path, val)
 }
 
 const KERNEL_VERSION_PATH: &str = "/sys/module/bcachefs/parameters/version";
@@ -64,14 +46,12 @@ pub fn bcachefs_kernel_version() -> u64 {
 pub struct DevInfo {
     pub idx:        u32,
     pub dev:        String,
-    pub label:      Option<String>,
-    pub durability: u64,
 }
 
 /// Enumerate devices for a mounted filesystem from its sysfs directory.
 ///
 /// Reads `dev-N/` subdirectories under `sysfs_path`, extracting the block
-/// device name (from the `block` symlink), label, and durability for each.
+/// device name (from the `block` symlink) for each.
 pub fn fs_get_devices(sysfs_path: &Path) -> Result<Vec<DevInfo>> {
     let mut devs = Vec::new();
     for entry in fs::read_dir(sysfs_path)
@@ -88,13 +68,7 @@ pub fn fs_get_devices(sysfs_path: &Path) -> Result<Vec<DevInfo>> {
         let dev_path = entry.path();
         let dev = dev_name_from_sysfs(&dev_path);
 
-        let label = read_sysfs_str(&dev_path.join("label"))
-            .unwrap_or(None);
-
-        let durability = read_sysfs_u64(&dev_path.join("durability"))
-            .unwrap_or(1);
-
-        devs.push(DevInfo { idx, dev, label, durability });
+        devs.push(DevInfo { idx, dev });
     }
     devs.sort_by_key(|d| d.idx);
     Ok(devs)

@@ -51,8 +51,6 @@ type SubvolDestroyOpcode   = WriteOpcode<0xbc, 17, bch_ioctl_subvolume>;
 type SubvolDestroyV2Opcode = WriteOpcode<0xbc, 30, bch_ioctl_subvolume_v2>;
 
 // Disk ioctl opcodes (_IOW(0xbc, N, struct))
-type DiskAddOpcode         = WriteOpcode<0xbc, 4,  bch_ioctl_disk>;
-type DiskAddV2Opcode       = WriteOpcode<0xbc, 23, bch_ioctl_disk_v2>;
 type DiskRemoveOpcode      = WriteOpcode<0xbc, 5,  bch_ioctl_disk>;
 type DiskRemoveV2Opcode    = WriteOpcode<0xbc, 24, bch_ioctl_disk_v2>;
 type DiskOnlineOpcode      = WriteOpcode<0xbc, 6,  bch_ioctl_disk>;
@@ -174,13 +172,6 @@ impl BcachefsHandle {
         )
     }
 
-    /// Add a device to this filesystem.
-    pub(crate) fn disk_add(&self, dev_path: &CStr) -> Result<(), Errno> {
-        self.disk_ioctl::<DiskAddV2Opcode, DiskAddOpcode>(
-            0, dev_path.as_ptr() as u64,
-        )
-    }
-
     /// Remove a device (by index) from this filesystem.
     pub(crate) fn disk_remove(&self, dev_idx: u32, flags: u32) -> Result<(), Errno> {
         self.disk_ioctl::<DiskRemoveV2Opcode, DiskRemoveOpcode>(
@@ -258,11 +249,7 @@ impl BcachefsHandle {
             let mut data_types = Vec::with_capacity(actual_nr);
             for i in 0..actual_nr {
                 let d = unsafe { std::ptr::read_unaligned(data_ptr.add(i)) };
-                data_types.push(DevUsageType {
-                    buckets: d.buckets,
-                    sectors: d.sectors,
-                    fragmented: d.fragmented,
-                });
+                data_types.push(DevUsageType { sectors: d.sectors });
             }
 
             return Ok(DevUsage {
@@ -292,11 +279,7 @@ impl BcachefsHandle {
 
         let mut data_types = Vec::new();
         for d in &u_v1.d {
-            data_types.push(DevUsageType {
-                buckets: d.buckets,
-                sectors: d.sectors,
-                fragmented: d.fragmented,
-            });
+            data_types.push(DevUsageType { sectors: d.sectors });
         }
 
         Ok(DevUsage {
@@ -318,9 +301,7 @@ pub(crate) struct DevUsage {
 
 /// Per-data-type usage on a device.
 pub(crate) struct DevUsageType {
-    pub buckets: u64,
     pub sectors: u64,
-    pub fragmented: u64,
 }
 
 fn print_errmsg(err_buf: &[u8]) {
