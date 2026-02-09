@@ -271,10 +271,12 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 
 	uuid_generate(sb.sb->uuid.b);
 
-	if (opts.label)
-		memcpy(sb.sb->label,
-		       opts.label,
-		       min(strlen(opts.label), sizeof(sb.sb->label)));
+	if (opts.label) {
+		if (strlen(opts.label) >= sizeof(sb.sb->label))
+			die("filesystem label too long (max %zu characters)",
+			    sizeof(sb.sb->label) - 1);
+		memcpy(sb.sb->label, opts.label, strlen(opts.label));
+	}
 
 	bch2_opt_set_sb_all(sb.sb, -1, &fs_opts);
 
