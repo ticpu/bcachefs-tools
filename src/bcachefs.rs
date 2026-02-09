@@ -77,8 +77,6 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "recover-super" => c::cmd_recover_super(argc, argv),
             "strip-alloc" => c::cmd_strip_alloc(argc, argv),
             "unlock" => c::cmd_unlock(argc, argv),
-            "version" => c::cmd_version(argc, argv),
-
             #[cfg(feature = "fuse")]
             "fusemount" => c::cmd_fusemount(argc, argv),
 
@@ -126,6 +124,11 @@ fn main() -> ExitCode {
     }
 
     match cmd {
+        "version" => {
+            let vh = include_str!("../version.h");
+            println!("{}", vh.split('"').nth(1).unwrap_or("unknown"));
+            ExitCode::SUCCESS
+        }
         "completions" => {
             commands::completions(args[1..].to_vec());
             ExitCode::SUCCESS
