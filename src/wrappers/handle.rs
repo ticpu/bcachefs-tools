@@ -101,7 +101,7 @@ impl BcachefsHandle {
     }
 
     fn ioctl_fd(&self) -> BorrowedFd<'_> {
-        unsafe { BorrowedFd::borrow_raw(self.inner.ioctl_fd) }
+        unsafe { BorrowedFd::borrow_raw(self.ioctl_fd_raw()) }
     }
 
     fn subvol_ioctl<V2: CompileTimeOpcode, V1: CompileTimeOpcode>(
@@ -246,7 +246,7 @@ impl BcachefsHandle {
         }
 
         let request = bch_ioc_wr::<bch_ioctl_dev_usage_v2>(18);
-        let ret = unsafe { libc::ioctl(self.inner.ioctl_fd, request, buf.as_mut_ptr()) };
+        let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, buf.as_mut_ptr()) };
 
         if ret == 0 {
             // v2 succeeded — parse result
@@ -285,7 +285,7 @@ impl BcachefsHandle {
             ..unsafe { mem::zeroed() }
         };
         let request_v1 = bch_ioc_wr::<bch_ioctl_dev_usage>(11);
-        let ret = unsafe { libc::ioctl(self.inner.ioctl_fd, request_v1, &mut u_v1 as *mut _) };
+        let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request_v1, &mut u_v1 as *mut _) };
         if ret < 0 {
             return Err(Errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)));
         }
