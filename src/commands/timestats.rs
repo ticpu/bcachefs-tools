@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write as IoWrite};
@@ -64,8 +63,6 @@ struct BtreeTransFnStats {
     lock_hold_times:    Option<TimeStats>,
 }
 
-// Cell: typed column value — single source of truth for formatting and sorting
-
 const NAME_WIDTH: usize = 40;
 const COL_WIDTH: usize = 13;
 
@@ -82,33 +79,6 @@ fn fmt_duration(ns: u64) -> String {
     format!("{}{}", ns / scale, name)
 }
 
-enum Cell<'a> {
-    Name(&'a str),
-    Count(u64),
-    Duration(u64),
-}
-
-impl Cell<'_> {
-    fn format(&self) -> String {
-        match self {
-            Cell::Name(s)     => format!("{:<NAME_WIDTH$}", s),
-            Cell::Count(n)    => format!("{:>COL_WIDTH$}", n),
-            Cell::Duration(ns) => format!("{:>COL_WIDTH$}", fmt_duration(*ns)),
-        }
-    }
-
-    fn cmp_val(&self, other: &Cell) -> Ordering {
-        match (self, other) {
-            (Cell::Name(a), Cell::Name(b))         => a.cmp(b),
-            (Cell::Count(a), Cell::Count(b))       => b.cmp(a),
-            (Cell::Duration(a), Cell::Duration(b)) => b.cmp(a),
-            _ => Ordering::Equal,
-        }
-    }
-}
-
-// Column definitions
-
 const NUM_COLS: usize = 9;
 
 const COLUMNS: &[&str; NUM_COLS] = &[
@@ -118,40 +88,46 @@ const COLUMNS: &[&str; NUM_COLS] = &[
     "STDDEV", "STDDEV_RECENT",
 ];
 
-impl StatEntry {
-    fn cell(&self, col: usize) -> Cell<'_> {
-        let s = &self.stats;
-        match col {
-            0 => Cell::Name(&self.name),
-            1 => Cell::Count(s.count),
-            2 => Cell::Duration(s.duration_ns.min),
-            3 => Cell::Duration(s.duration_ns.max),
-            4 => Cell::Duration(s.duration_ns.total),
-            5 => Cell::Duration(s.duration_ns.mean),
-            6 => Cell::Duration(s.duration_ewma_ns.mean),
-            7 => Cell::Duration(s.duration_ns.stddev),
-            8 => Cell::Duration(s.duration_ewma_ns.stddev),
-            _ => Cell::Count(0),
-        }
+fn sort_val(e: &StatEntry, col: usize) -> u64 {
+    let s = &e.stats;
+    match col {
+        1 => s.count,
+        2 => s.duration_ns.min,
+        3 => s.duration_ns.max,
+        4 => s.duration_ns.total,
+        5 => s.duration_ns.mean,
+        6 => s.duration_ewma_ns.mean,
+        7 => s.duration_ns.stddev,
+        8 => s.duration_ewma_ns.stddev,
+        _ => 0,
     }
 }
 
 fn sort_entries(entries: &mut [StatEntry], sort_col: usize, reverse: bool) {
     entries.sort_by(|a, b| {
-        let ord = a.cell(sort_col).cmp_val(&b.cell(sort_col));
+        let ord = if sort_col == 0 {
+            a.name.cmp(&b.name)
+        } else {
+            sort_val(b, sort_col).cmp(&sort_val(a, sort_col))
+        };
         if reverse { ord.reverse() } else { ord }
     });
 }
 
-fn header_columns() -> Vec<String> {
-    COLUMNS.iter().enumerate().map(|(i, name)| {
-        if i == 0 { format!("{:<NAME_WIDTH$}", name) }
-        else { format!("{:>COL_WIDTH$}", name) }
-    }).collect()
+fn format_header() -> String {
+    COLUMNS.iter().enumerate()
+        .map(|(i, &name)| if i == 0 { format!("{:<NAME_WIDTH$}", name) } else { format!("{:>COL_WIDTH$}", name) })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn stat_columns(entry: &StatEntry) -> Vec<String> {
-    (0..NUM_COLS).map(|i| entry.cell(i).format()).collect()
+fn format_row(e: &StatEntry) -> String {
+    let s = &e.stats;
+    format!("{:<NAME_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$} {:>COL_WIDTH$}",
+        e.name, s.count,
+        fmt_duration(s.duration_ns.min), fmt_duration(s.duration_ns.max), fmt_duration(s.duration_ns.total),
+        fmt_duration(s.duration_ns.mean), fmt_duration(s.duration_ewma_ns.mean),
+        fmt_duration(s.duration_ns.stddev), fmt_duration(s.duration_ewma_ns.stddev))
 }
 
 // Structured data: sections within a filesystem snapshot
@@ -382,9 +358,9 @@ fn display_stats(snaps: Vec<FsSnapshot>, cli: &Cli) -> Result<()> {
             if !first { println!(); }
             first = false;
             println!("{}:", section.label);
-            println!("{}", header_columns().join(" "));
+            println!("  {}", format_header());
             for e in &section.entries {
-                println!("{}", stat_columns(e).join(" "));
+                println!("  {}", format_row(e));
             }
         }
         println!();
@@ -408,26 +384,17 @@ struct TuiState {
 fn format_tui_header(sort_col: usize, reverse: bool) -> String {
     let arrow = if reverse { "\u{25b2}" } else { "\u{25bc}" };
     let mut out = String::from("  ");
-    for (i, col) in header_columns().iter().enumerate() {
+    for (i, &name) in COLUMNS.iter().enumerate() {
         if i > 0 { out.push(' '); }
+        let col = if i == 0 { format!("{:<NAME_WIDTH$}", name) }
+                  else       { format!("{:>COL_WIDTH$}", name) };
         if i == sort_col {
             out.push_str(&format!("{}{}", col.reversed(), arrow.reversed()));
         } else {
-            out.push_str(col);
+            out.push_str(&col);
         }
     }
     out
-}
-
-fn prepare_snaps(snaps: &mut [FsSnapshot], state: &TuiState) {
-    for snap in snaps.iter_mut() {
-        for section in &mut snap.sections {
-            if !state.show_all {
-                section.entries.retain(|e| e.stats.count > 0);
-            }
-            sort_entries(&mut section.entries, state.sort_col, state.reverse);
-        }
-    }
 }
 
 fn build_frame(snaps: &[FsSnapshot], state: &TuiState, multi: bool) -> (Vec<String>, Option<usize>) {
@@ -456,12 +423,12 @@ fn build_frame(snaps: &[FsSnapshot], state: &TuiState, multi: bool) -> (Vec<Stri
             lines.push(format!("{}:", section.label));
             lines.push(header.clone());
             for entry in &section.entries {
-                let cols = stat_columns(entry).join(" ");
+                let row_str = format_row(entry);
                 if row == state.cursor {
                     cursor_line = Some(lines.len());
-                    lines.push(format!("{}{}", "\u{25ba} ".bold(), cols.bold()));
+                    lines.push(format!("{}{}", "\u{25ba} ".bold(), row_str.bold()));
                 } else {
-                    lines.push(format!("  {}", cols));
+                    lines.push(format!("  {}", row_str));
                 }
                 row += 1;
             }
@@ -498,10 +465,6 @@ fn render_frame(
     stdout.flush()
 }
 
-fn count_total_rows(snaps: &[FsSnapshot]) -> usize {
-    snaps.iter().flat_map(|s| &s.sections).map(|sec| sec.entries.len()).sum()
-}
-
 fn handle_key(state: &mut TuiState, key: KeyCode, modifiers: KeyModifiers, total_rows: usize) -> bool {
     match key {
         KeyCode::Char('q') | KeyCode::Esc => return true,
@@ -535,8 +498,17 @@ fn run_interactive(cli: Cli, sysfs_paths: Vec<PathBuf>) -> Result<()> {
     run_tui(|stdout| loop {
         let mut snaps = collect_stats(&sysfs_paths, state.show_devices)
             .unwrap_or_default();
-        prepare_snaps(&mut snaps, &state);
-        let total_rows = count_total_rows(&snaps);
+        for snap in &mut snaps {
+            for section in &mut snap.sections {
+                if !state.show_all {
+                    section.entries.retain(|e| e.stats.count > 0);
+                }
+                sort_entries(&mut section.entries, state.sort_col, state.reverse);
+            }
+        }
+        let total_rows: usize = snaps.iter()
+            .flat_map(|s| &s.sections)
+            .map(|sec| sec.entries.len()).sum();
         if total_rows > 0 && state.cursor >= total_rows {
             state.cursor = total_rows - 1;
         }
