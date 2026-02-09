@@ -522,34 +522,34 @@ fn collect_subvol_json(dir: &Path, recursive: bool, show_snapshots: bool, readon
         if !show_snapshots && e.snapshot_parent != 0 { continue; }
         if readonly && (e.flags & BCH_SUBVOLUME_RO) == 0 { continue; }
 
-        let mut obj = serde_json::Map::new();
-        obj.insert("subvolid".into(), serde_json::Value::Number(e.subvolid.into()));
-        obj.insert("path".into(), serde_json::Value::String(e.path.clone()));
+        let mut obj = serde_json::json!({
+            "subvolid": e.subvolid,
+            "path":     &e.path,
+        });
         if e.otime_sec != 0 {
-            obj.insert("otime".into(), serde_json::Value::String(
-                format_time(e.otime_sec, e.otime_nsec)));
-            obj.insert("otime_unix".into(), serde_json::Value::Number(e.otime_sec.into()));
+            obj["otime"] = serde_json::json!(format_time(e.otime_sec, e.otime_nsec));
+            obj["otime_unix"] = serde_json::json!(e.otime_sec);
         }
         if e.snapshot_parent != 0 {
             let parent_path = resolve_subvol_path(&fd, e.snapshot_parent)
                 .unwrap_or_else(|| e.snapshot_parent.to_string());
-            obj.insert("snapshot_parent".into(), serde_json::Value::String(parent_path));
+            obj["snapshot_parent"] = serde_json::json!(parent_path);
         }
         let f = flags_str(e.flags);
         if !f.is_empty() {
-            obj.insert("flags".into(), serde_json::Value::String(f));
+            obj["flags"] = serde_json::json!(f);
         }
         if let Some(&sectors) = sizes.as_ref().and_then(|s| s.get(&e.subvolid)) {
-            obj.insert("size".into(), serde_json::Value::String(human_readable_size(sectors)));
-            obj.insert("sectors".into(), serde_json::Value::Number(sectors.into()));
+            obj["size"] = serde_json::json!(human_readable_size(sectors));
+            obj["sectors"] = serde_json::json!(sectors);
         }
         if recursive {
             let children = collect_subvol_json(&dir.join(&e.path), true, show_snapshots, readonly, sizes)?;
             if !children.is_empty() {
-                obj.insert("children".into(), serde_json::Value::Array(children));
+                obj["children"] = serde_json::json!(children);
             }
         }
-        result.push(serde_json::Value::Object(obj));
+        result.push(obj);
     }
 
     Ok(result)
@@ -697,24 +697,24 @@ fn print_snapshot_json(dir: &Path) -> Result<()> {
 
     let mut nodes_json = Vec::new();
     for n in &tree.nodes {
-        let mut obj = serde_json::Map::new();
-        obj.insert("id".into(), n.id.into());
-        obj.insert("parent".into(), n.parent.into());
-        obj.insert("children".into(), serde_json::json!(
-            n.children.iter().filter(|&&c| c != 0).collect::<Vec<_>>()));
-        obj.insert("subvol".into(), n.subvol.into());
-        obj.insert("sectors".into(), n.sectors.into());
-        obj.insert("size".into(), human_readable_size(n.sectors).into());
+        let mut obj = serde_json::json!({
+            "id":       n.id,
+            "parent":   n.parent,
+            "children": n.children.iter().filter(|&&c| c != 0).collect::<Vec<_>>(),
+            "subvol":   n.subvol,
+            "sectors":  n.sectors,
+            "size":     human_readable_size(n.sectors),
+        });
         let f = flags_str(n.flags);
         if !f.is_empty() {
-            obj.insert("flags".into(), f.into());
+            obj["flags"] = serde_json::json!(f);
         }
         if n.subvol != 0 {
             if let Some(path) = resolve_subvol_path(&fd, n.subvol) {
-                obj.insert("path".into(), path.into());
+                obj["path"] = serde_json::json!(path);
             }
         }
-        nodes_json.push(serde_json::Value::Object(obj));
+        nodes_json.push(obj);
     }
 
     let mut query_root = serde_json::json!({
