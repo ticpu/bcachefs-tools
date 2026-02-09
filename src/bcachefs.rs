@@ -74,7 +74,7 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "reset-counters" => c::cmd_reset_counters(argc, argv),
             "set-fs-option" => c::cmd_set_option(argc, argv),
             "set-passphrase" => c::cmd_set_passphrase(argc, argv),
-            "set-file-option" => c::cmd_setattr(argc, argv),
+            // set-file-option handled in Rust dispatch
             "show-super" => c::cmd_show_super(argc, argv),
             "recover-super" => c::cmd_recover_super(argc, argv),
             "strip-alloc" => c::cmd_strip_alloc(argc, argv),
@@ -176,6 +176,7 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        "set-file-option" => commands::cmd_setattr(args[1..].to_vec()).report(),
         _ => c_command(args, symlink_cmd),
     }
 }
