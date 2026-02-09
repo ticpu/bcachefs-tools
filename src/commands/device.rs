@@ -32,12 +32,10 @@ fn open_dev(path: &str) -> Result<(BcachefsHandle, u32)> {
 /// Resolve a device identifier (path or numeric index) to a dev_idx
 /// on a given filesystem handle.
 fn resolve_dev(handle: &BcachefsHandle, dev_str: &str) -> Result<u32> {
-    // If it's a plain number, use it as a dev index directly
     if let Ok(idx) = dev_str.parse::<u32>() {
         return Ok(idx);
     }
 
-    // Otherwise, open the device and compare UUIDs
     let dev_handle = BcachefsHandle::open(dev_str)
         .map_err(|e| anyhow!("Error opening '{}': {}", dev_str, e))?;
 
@@ -50,6 +48,21 @@ fn resolve_dev(handle: &BcachefsHandle, dev_str: &str) -> Result<u32> {
         return Err(anyhow!("Could not determine device index for '{}'", dev_str));
     }
     Ok(idx as u32)
+}
+
+/// Open a device by path or numeric index, with optional filesystem path.
+/// When device is a numeric index, fs_path is required.
+fn open_dev_by_path_or_index(device: &str, fs_path: Option<&str>) -> Result<(BcachefsHandle, u32)> {
+    if let Some(fs_path) = fs_path {
+        let handle = BcachefsHandle::open(fs_path)
+            .map_err(|e| anyhow!("Failed to open filesystem '{}': {}", fs_path, e))?;
+        let dev_idx = resolve_dev(&handle, device)?;
+        Ok((handle, dev_idx))
+    } else if device.parse::<u32>().is_err() {
+        open_dev(device)
+    } else {
+        Err(anyhow!("Filesystem path required when specifying device by index"))
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -119,18 +132,8 @@ pub fn cmd_device_remove(argv: Vec<String>) -> Result<()> {
         flags |= BCH_FORCE_IF_METADATA_LOST;
     }
 
-    let is_numeric = cli.device.parse::<u32>().is_ok();
-
-    let (handle, dev_idx) = if let Some(ref fs_path) = cli.path {
-        let handle = BcachefsHandle::open(fs_path)
-            .map_err(|e| anyhow!("Failed to open filesystem '{}': {}", fs_path, e))?;
-        let dev_idx = resolve_dev(&handle, &cli.device)?;
-        (handle, dev_idx)
-    } else if !is_numeric {
-        open_dev(&cli.device)?
-    } else {
-        return Err(anyhow!("Filesystem path required when specifying device by index"));
-    };
+    let (handle, dev_idx) = open_dev_by_path_or_index(
+        &cli.device, cli.path.as_deref())?;
 
     handle.disk_remove(dev_idx, flags)
         .map_err(|e| anyhow!("Failed to remove device '{}': {}", cli.device, e))
@@ -198,18 +201,8 @@ pub fn cmd_device_set_state(argv: Vec<String>) -> Result<()> {
         flags |= BCH_FORCE_IF_DEGRADED | BCH_FORCE_IF_DATA_LOST | BCH_FORCE_IF_METADATA_LOST;
     }
 
-    let is_numeric = cli.device.parse::<u32>().is_ok();
-
-    let (handle, dev_idx) = if let Some(ref fs_path) = cli.path {
-        let handle = BcachefsHandle::open(fs_path)
-            .map_err(|e| anyhow!("Failed to open filesystem '{}': {}", fs_path, e))?;
-        let dev_idx = resolve_dev(&handle, &cli.device)?;
-        (handle, dev_idx)
-    } else if !is_numeric {
-        open_dev(&cli.device)?
-    } else {
-        return Err(anyhow!("Filesystem path required when specifying device by index"));
-    };
+    let (handle, dev_idx) = open_dev_by_path_or_index(
+        &cli.device, cli.path.as_deref())?;
 
     handle.disk_set_state(dev_idx, new_state, flags)
         .map_err(|e| anyhow!("Failed to set device state: {}", e))
