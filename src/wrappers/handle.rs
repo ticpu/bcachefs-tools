@@ -1,9 +1,13 @@
 use std::ffi::CStr;
+use std::mem;
 use std::os::fd::BorrowedFd;
 use std::path::Path;
 
 use bch_bindgen::c::{
     bcache_fs_close, bcache_fs_open_fallible,
+    bch_data_type,
+    bch_ioctl_dev_usage, bch_ioctl_dev_usage_v2,
+    bch_ioctl_dev_usage_bch_ioctl_dev_usage_type,
     bch_ioctl_disk, bch_ioctl_disk_v2,
     bch_ioctl_disk_set_state, bch_ioctl_disk_set_state_v2,
     bch_ioctl_disk_resize, bch_ioctl_disk_resize_v2,
@@ -12,6 +16,7 @@ use bch_bindgen::c::{
     bchfs_handle,
     BCH_BY_INDEX, BCH_SUBVOL_SNAPSHOT_CREATE,
 };
+use crate::wrappers::ioctl::bch_ioc_wr;
 use bch_bindgen::errcode::{BchError, ret_to_result};
 use bch_bindgen::path_to_cstr;
 use errno::Errno;
@@ -309,6 +314,99 @@ impl BcachefsHandle {
         unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<DiskResizeJournalOpcode, _>::new(arg)) }
             .map_err(|e| Errno(e.raw_os_error()))
     }
+
+    /// Query device usage (v2 with flex array, v1 fallback).
+    pub(crate) fn dev_usage(&self, dev_idx: u32) -> Result<DevUsage, Errno> {
+        let nr_data_types = bch_data_type::BCH_DATA_NR as usize;
+        let entry_size = mem::size_of::<bch_ioctl_dev_usage_bch_ioctl_dev_usage_type>();
+        let hdr_size = mem::size_of::<bch_ioctl_dev_usage_v2>();
+        let buf_size = hdr_size + nr_data_types * entry_size;
+        let mut buf = vec![0u8; buf_size];
+
+        // Fill header
+        unsafe {
+            let hdr = &mut *(buf.as_mut_ptr() as *mut bch_ioctl_dev_usage_v2);
+            hdr.dev = dev_idx as u64;
+            hdr.flags = BCH_BY_INDEX;
+            hdr.nr_data_types = nr_data_types as u8;
+        }
+
+        let request = bch_ioc_wr::<bch_ioctl_dev_usage_v2>(18);
+        let ret = unsafe { libc::ioctl(self.inner.ioctl_fd, request, buf.as_mut_ptr()) };
+
+        if ret == 0 {
+            // v2 succeeded — parse result
+            let hdr = unsafe { &*(buf.as_ptr() as *const bch_ioctl_dev_usage_v2) };
+            let actual_nr = hdr.nr_data_types as usize;
+            let data_ptr = unsafe { buf.as_ptr().add(hdr_size) }
+                as *const bch_ioctl_dev_usage_bch_ioctl_dev_usage_type;
+
+            let mut data_types = Vec::with_capacity(actual_nr);
+            for i in 0..actual_nr {
+                let d = unsafe { std::ptr::read_unaligned(data_ptr.add(i)) };
+                data_types.push(DevUsageType {
+                    buckets: d.buckets,
+                    sectors: d.sectors,
+                    fragmented: d.fragmented,
+                });
+            }
+
+            return Ok(DevUsage {
+                state: hdr.state,
+                bucket_size: hdr.bucket_size,
+                nr_buckets: hdr.nr_buckets,
+                data_types,
+            });
+        }
+
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if errno != libc::ENOTTY {
+            return Err(Errno(errno));
+        }
+
+        // v1 fallback
+        let mut u_v1 = bch_ioctl_dev_usage {
+            dev: dev_idx as u64,
+            flags: BCH_BY_INDEX,
+            ..unsafe { mem::zeroed() }
+        };
+        let request_v1 = bch_ioc_wr::<bch_ioctl_dev_usage>(11);
+        let ret = unsafe { libc::ioctl(self.inner.ioctl_fd, request_v1, &mut u_v1 as *mut _) };
+        if ret < 0 {
+            return Err(Errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)));
+        }
+
+        let mut data_types = Vec::new();
+        for d in &u_v1.d {
+            data_types.push(DevUsageType {
+                buckets: d.buckets,
+                sectors: d.sectors,
+                fragmented: d.fragmented,
+            });
+        }
+
+        Ok(DevUsage {
+            state: u_v1.state,
+            bucket_size: u_v1.bucket_size,
+            nr_buckets: u_v1.nr_buckets,
+            data_types,
+        })
+    }
+}
+
+/// Device disk space usage.
+pub(crate) struct DevUsage {
+    pub state: u8,
+    pub bucket_size: u32,
+    pub nr_buckets: u64,
+    pub data_types: Vec<DevUsageType>,
+}
+
+/// Per-data-type usage on a device.
+pub(crate) struct DevUsageType {
+    pub buckets: u64,
+    pub sectors: u64,
+    pub fragmented: u64,
 }
 
 fn print_errmsg(err_buf: &[u8]) {
