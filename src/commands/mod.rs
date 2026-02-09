@@ -1,6 +1,7 @@
 use clap::Subcommand;
 
 pub mod completions;
+pub mod device;
 pub mod list;
 pub mod mount;
 pub mod scrub;
@@ -9,6 +10,7 @@ pub mod timestats;
 pub mod top;
 
 pub use completions::completions;
+pub use device::{cmd_device_online, cmd_device_offline};
 pub use list::list;
 pub use mount::mount;
 pub use scrub::scrub;
