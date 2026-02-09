@@ -71,7 +71,7 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "mkfs" => c::cmd_format(argc, argv),
             "reconcile" => c::reconcile_cmds(argc, argv),
             "remove-passphrase" => c::cmd_remove_passphrase(argc, argv),
-            "reset-counters" => c::cmd_reset_counters(argc, argv),
+            // reset-counters handled in Rust dispatch
             "set-fs-option" => c::cmd_set_option(argc, argv),
             "set-passphrase" => c::cmd_set_passphrase(argc, argv),
             // set-file-option handled in Rust dispatch
@@ -176,6 +176,7 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        "reset-counters" => commands::cmd_reset_counters(args[1..].to_vec()).report(),
         "set-file-option" => commands::cmd_setattr(args[1..].to_vec()).report(),
         _ => c_command(args, symlink_cmd),
     }
