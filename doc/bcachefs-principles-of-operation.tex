@@ -421,43 +421,58 @@ within a filesystem.
 
 \subsubsection{Erasure coding}
 
-bcachefs also supports Reed-Solomon erasure coding - the same algorithm used by
-most RAID5/6 implementations. When enabled with the \texttt{ec} option, the
-desired redundancy is taken from the \texttt{data\_replicas} option - erasure
+bcachefs supports Reed-Solomon erasure coding, the same algorithm used by
+most RAID5/6 implementations. Erasure coding is a per-inode option
+(\texttt{erasure\_code}), so it can be enabled on specific directories via
+\texttt{set-file-option} without affecting the rest of the filesystem. The
+desired redundancy is taken from the \texttt{data\_replicas} option; erasure
 coding of metadata is not supported.
 
-Erasure coding works significantly differently from both conventional RAID
-implementations and other filesystems with similar features. In conventional
-RAID, the "write hole" is a significant problem - doing a small write within a
-stripe requires the P and Q (recovery) blocks to be updated as well, and since
-those writes cannot be done atomically there is a window where the P and Q
-blocks are inconsistent - meaning that if the system crashes and recovers with a
-drive missing, reconstruct reads for unrelated data within that stripe will be
-corrupted.
+In conventional RAID, the ``write hole'' is a significant problem: a small write
+within a stripe requires updating the P and Q (parity) blocks, and since those
+writes cannot be done atomically, a crash can leave parity inconsistent,
+corrupting reconstruct reads for unrelated data in the same stripe. ZFS avoids
+this by making every write a new stripe, but the resulting fragmentation hurts
+performance: metadata grows and IO becomes excessively fragmented.
 
-ZFS avoids this by fragmenting individual writes so that every write becomes a
-new stripe - this works, but the fragmentation has a negative effect on
-performance: metadata becomes bigger, and both read and write requests are
-excessively fragmented. Btrfs's erasure coding implementation is more
-conventional, and still subject to the write hole problem.
+bcachefs takes advantage of copy-on-write to avoid both problems. Since
+updating stripes in place is the root cause, we simply never do it. And since
+per-extent stripes would cause the same fragmentation as ZFS, we erasure code
+entire buckets, taking advantage of bucket-based allocation and copying
+garbage collection.
 
-bcachefs's erasure coding takes advantage of our copy on write nature - since
-updating stripes in place is a problem, we simply don't do that. And since
-excessively small stripes is a problem for fragmentation, we don't erasure code
-individual extents, we erasure code entire buckets - taking advantage of bucket
-based allocation and copying garbage collection.
-
-When erasure coding is enabled, writes are initially replicated, but one of the
-replicas is allocated from a bucket that is queued up to be part of a new
-stripe. When we finish filling up the new stripe, we write out the P and Q
-buckets and then drop the extra replicas for all the data within that stripe -
-the effect is similar to full data journalling, and it means that after erasure
-coding is done the layout of our data on disk is ideal.
-
-Since disks have write caches that are only flushed when we issue a cache flush
-command - which we only do on journal commit - the allocator immediately returns
+Writes with erasure coding enabled are initially replicated, but one replica is
+allocated from a bucket queued for a new stripe. When the stripe is full, parity
+buckets are written, the stripe key is committed to the stripes btree, and then
+the extra replicas are dropped from each extent individually. The effect is
+similar to full data journalling, producing an ideal on-disk layout. Since
+device write caches are only flushed on journal commit, the allocator can
+immediately return
 the extra-replica buckets to the write point for reuse, so the overhead of this
 full data journalling approach is negligible in practice.
+
+Erasure coding involves several btrees: the stripes btree (ID 6) stores stripe
+metadata and parity checksums, the \texttt{bucket\_to\_stripe} btree (ID 26)
+maps each stripe-member bucket to the stripes referencing it, the
+\texttt{stripe\_backpointers} btree (ID 27) stores backpointers indexed by
+stripe pointers for data on invalid or removed devices (enabling stripe repair),
+the alloc btree tracks per-bucket \texttt{stripe\_refcount} and
+\texttt{stripe\_sectors} separately from \texttt{dirty\_sectors}, and after
+stripe creation each data extent receives an inline \texttt{stripe\_ptr} entry.
+Backpointers for stripe blocks point back to the stripes btree rather than the
+extents btree. Stripe fragmentation is tracked in the LRU btree so that copygc
+and stripe reuse can reclaim mostly-empty stripes.
+
+The allocator segregates EC and non-EC writes at the open-bucket level: a write
+requesting EC will only be placed in a bucket already tagged for stripe
+membership, and non-EC writes will never use such buckets. This means a bug in
+stripe creation, parity computation, or extent updating is structurally scoped
+to EC-enabled data: non-EC extents never carry \texttt{stripe\_ptr} entries
+and are never read through EC reconstruction paths. If stripe creation fails
+partway (e.g.\ a crash between writing parity and updating extents), the extra
+replicas from the staging phase remain valid; the reconcile subsystem detects
+the incomplete state and retries. Btree nodes are never placed in EC buckets;
+this is explicitly checked and flagged as a filesystem inconsistency.
 
 \subsubsection{Device labels and targets}
 
