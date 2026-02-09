@@ -103,11 +103,7 @@ impl BcachefsHandle {
             Ok(()) => return Ok(()),
             Err(e) if e == rustix::io::Errno::NOTTY => {}
             Err(e) => {
-                let msg = String::from_utf8_lossy(&err_buf);
-                let msg = msg.trim_end_matches('\0');
-                if !msg.is_empty() {
-                    eprintln!("ioctl error: {}", msg);
-                }
+                print_errmsg(&err_buf);
                 return Err(Errno(e.raw_os_error()));
             }
         }
