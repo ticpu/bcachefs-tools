@@ -36,6 +36,11 @@ impl BcachefsHandle {
         self.inner.ioctl_fd
     }
 
+    /// Device index when opened via a block device path; -1 when opened via mount point.
+    pub(crate) fn dev_idx(&self) -> i32 {
+        self.inner.dev_idx
+    }
+
     /// Opens a bcachefs filesystem and returns its handle
     pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self, BchError> {
         let path = path_to_cstr(path);

@@ -20,6 +20,7 @@ use serde::Deserialize;
 
 use crate::util::{fmt_bytes_human, fmt_num_human, run_tui};
 use crate::wrappers::handle::BcachefsHandle;
+use crate::wrappers::ioctl::bch_ioc_w;
 use crate::wrappers::sysfs::{dev_name_from_sysfs, sysfs_path_from_fd};
 
 // ioctl constants
@@ -27,10 +28,6 @@ use crate::wrappers::sysfs::{dev_name_from_sysfs, sysfs_path_from_fd};
 const BCH_IOCTL_QUERY_COUNTERS_NR: u32 = 21;
 const BCH_IOCTL_QUERY_COUNTERS_MOUNT: u16 = 1 << 0;
 const NR_COUNTERS: usize = BCH_COUNTER_NR as usize;
-
-const fn bch_ioc_w<T>(nr: u32) -> libc::c_ulong {
-    ((1u32 << 30) | ((mem::size_of::<T>() as u32) << 16) | (0xbcu32 << 8) | nr) as libc::c_ulong
-}
 
 // Counter info accessors — read directly from bch_bindgen FFI arrays
 
