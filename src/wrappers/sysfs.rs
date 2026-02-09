@@ -59,3 +59,43 @@ const KERNEL_VERSION_PATH: &str = "/sys/module/bcachefs/parameters/version";
 pub fn bcachefs_kernel_version() -> u64 {
     read_sysfs_u64(Path::new(KERNEL_VERSION_PATH)).unwrap_or(0)
 }
+
+/// Info about a device in a mounted bcachefs filesystem, read from sysfs.
+pub struct DevInfo {
+    pub idx:        u32,
+    pub dev:        String,
+    pub label:      Option<String>,
+    pub durability: u64,
+}
+
+/// Enumerate devices for a mounted filesystem from its sysfs directory.
+///
+/// Reads `dev-N/` subdirectories under `sysfs_path`, extracting the block
+/// device name (from the `block` symlink), label, and durability for each.
+pub fn fs_get_devices(sysfs_path: &Path) -> Result<Vec<DevInfo>> {
+    let mut devs = Vec::new();
+    for entry in fs::read_dir(sysfs_path)
+        .with_context(|| format!("reading sysfs dir {}", sysfs_path.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let idx: u32 = match name.strip_prefix("dev-").and_then(|s| s.parse().ok()) {
+            Some(i) => i,
+            None => continue,
+        };
+
+        let dev_path = entry.path();
+        let dev = dev_name_from_sysfs(&dev_path);
+
+        let label = read_sysfs_str(&dev_path.join("label"))
+            .unwrap_or(None);
+
+        let durability = read_sysfs_u64(&dev_path.join("durability"))
+            .unwrap_or(1);
+
+        devs.push(DevInfo { idx, dev, label, durability });
+    }
+    devs.sort_by_key(|d| d.idx);
+    Ok(devs)
+}
