@@ -384,12 +384,18 @@ static long __bch2_ioctl_subvolume_destroy(struct bch_fs *c, struct file *filp,
 		goto err;
 	}
 
+	ret = mnt_want_write(path.mnt);
+	if (ret)
+		goto err;
+
 	ret =   inode_permission(file_mnt_idmap(filp), d_inode(victim), MAY_WRITE) ?:
 		__bch2_unlink(dir, victim, true);
 	if (!ret) {
 		fsnotify_rmdir(dir, victim);
 		d_invalidate(victim);
 	}
+
+	mnt_drop_write(path.mnt);
 err:
 	inode_unlock(dir);
 	dput(victim);
