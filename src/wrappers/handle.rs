@@ -22,6 +22,28 @@ use bch_bindgen::path_to_cstr;
 use errno::Errno;
 use rustix::ioctl::{self, CompileTimeOpcode, Setter, WriteOpcode};
 
+/// Try a v2 ioctl (with error message buffer), falling back to v1 on ENOTTY.
+macro_rules! v2_v1_ioctl {
+    ($fd:expr, $V2:ty, $V1:ty, $v2_arg:expr, $v1_arg:expr) => {{
+        let mut err_buf = [0u8; 8192];
+        let mut arg = $v2_arg;
+        arg.err.msg_ptr = err_buf.as_mut_ptr() as u64;
+        arg.err.msg_len = err_buf.len() as u32;
+
+        match unsafe { ioctl::ioctl($fd, Setter::<$V2, _>::new(arg)) } {
+            Ok(()) => Ok(()),
+            Err(e) if e == rustix::io::Errno::NOTTY => {
+                unsafe { ioctl::ioctl($fd, Setter::<$V1, _>::new($v1_arg)) }
+                    .map_err(|e| Errno(e.raw_os_error()))
+            }
+            Err(e) => {
+                print_errmsg(&err_buf);
+                Err(Errno(e.raw_os_error()))
+            }
+        }
+    }};
+}
+
 // Subvolume ioctl opcodes
 type SubvolCreateOpcode    = WriteOpcode<0xbc, 16, bch_ioctl_subvolume>;
 type SubvolCreateV2Opcode  = WriteOpcode<0xbc, 29, bch_ioctl_subvolume_v2>;
@@ -82,8 +104,6 @@ impl BcachefsHandle {
         unsafe { BorrowedFd::borrow_raw(self.inner.ioctl_fd) }
     }
 
-    /// Try a v2 ioctl (with error message support), falling back to v1
-    /// if the kernel returns ENOTTY.
     fn subvol_ioctl<V2: CompileTimeOpcode, V1: CompileTimeOpcode>(
         &self,
         flags: u32,
@@ -92,28 +112,11 @@ impl BcachefsHandle {
         dst_ptr: u64,
         src_ptr: u64,
     ) -> Result<(), Errno> {
-        let mut err_buf = [0u8; 8192];
-        let mut arg = bch_ioctl_subvolume_v2 {
-            flags, dirfd, mode, dst_ptr, src_ptr, ..Default::default()
-        };
-        arg.err.msg_ptr = err_buf.as_mut_ptr() as u64;
-        arg.err.msg_len = err_buf.len() as u32;
-
-        match unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<V2, _>::new(arg)) } {
-            Ok(()) => return Ok(()),
-            Err(e) if e == rustix::io::Errno::NOTTY => {}
-            Err(e) => {
-                print_errmsg(&err_buf);
-                return Err(Errno(e.raw_os_error()));
-            }
-        }
-
-        // Fallback: v1 ioctl without error message support
-        let arg = bch_ioctl_subvolume {
-            flags, dirfd, mode, dst_ptr, src_ptr, ..Default::default()
-        };
-        unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<V1, _>::new(arg)) }
-            .map_err(|e| Errno(e.raw_os_error()))
+        v2_v1_ioctl!(
+            self.ioctl_fd(), V2, V1,
+            bch_ioctl_subvolume_v2 { flags, dirfd, mode, dst_ptr, src_ptr, ..Default::default() },
+            bch_ioctl_subvolume    { flags, dirfd, mode, dst_ptr, src_ptr, ..Default::default() }
+        )
     }
 
     /// Create a subvolume for this bcachefs filesystem
@@ -161,33 +164,14 @@ impl BcachefsHandle {
         )
     }
 
-    // --- Disk ioctl helpers ---
-
-    /// Try a v2 disk ioctl (with error message), falling back to v1 on ENOTTY.
     fn disk_ioctl<V2: CompileTimeOpcode, V1: CompileTimeOpcode>(
-        &self,
-        flags: u32,
-        dev: u64,
+        &self, flags: u32, dev: u64,
     ) -> Result<(), Errno> {
-        let mut err_buf = [0u8; 8192];
-        let mut arg = bch_ioctl_disk_v2 {
-            flags, dev, ..Default::default()
-        };
-        arg.err.msg_ptr = err_buf.as_mut_ptr() as u64;
-        arg.err.msg_len = err_buf.len() as u32;
-
-        match unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<V2, _>::new(arg)) } {
-            Ok(()) => return Ok(()),
-            Err(e) if e == rustix::io::Errno::NOTTY => {}
-            Err(e) => {
-                print_errmsg(&err_buf);
-                return Err(Errno(e.raw_os_error()));
-            }
-        }
-
-        let arg = bch_ioctl_disk { flags, dev, ..Default::default() };
-        unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<V1, _>::new(arg)) }
-            .map_err(|e| Errno(e.raw_os_error()))
+        v2_v1_ioctl!(
+            self.ioctl_fd(), V2, V1,
+            bch_ioctl_disk_v2 { flags, dev, ..Default::default() },
+            bch_ioctl_disk    { flags, dev, ..Default::default() }
+        )
     }
 
     /// Add a device to this filesystem.
@@ -220,95 +204,29 @@ impl BcachefsHandle {
 
     /// Change device state (rw, ro, evacuating, spare).
     pub(crate) fn disk_set_state(&self, dev_idx: u32, new_state: u32, flags: u32) -> Result<(), Errno> {
-        let mut err_buf = [0u8; 8192];
-        let mut arg = bch_ioctl_disk_set_state_v2 {
-            flags: flags | BCH_BY_INDEX,
-            new_state: new_state as u8,
-            dev: dev_idx as u64,
-            ..Default::default()
-        };
-        arg.err.msg_ptr = err_buf.as_mut_ptr() as u64;
-        arg.err.msg_len = err_buf.len() as u32;
-
-        match unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<DiskSetStateV2Opcode, _>::new(arg)) } {
-            Ok(()) => return Ok(()),
-            Err(e) if e == rustix::io::Errno::NOTTY => {}
-            Err(e) => {
-                print_errmsg(&err_buf);
-                return Err(Errno(e.raw_os_error()));
-            }
-        }
-
-        let arg = bch_ioctl_disk_set_state {
-            flags: flags | BCH_BY_INDEX,
-            new_state: new_state as u8,
-            dev: dev_idx as u64,
-            ..Default::default()
-        };
-        unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<DiskSetStateOpcode, _>::new(arg)) }
-            .map_err(|e| Errno(e.raw_os_error()))
+        v2_v1_ioctl!(
+            self.ioctl_fd(), DiskSetStateV2Opcode, DiskSetStateOpcode,
+            bch_ioctl_disk_set_state_v2 { flags: flags | BCH_BY_INDEX, new_state: new_state as u8, dev: dev_idx as u64, ..Default::default() },
+            bch_ioctl_disk_set_state    { flags: flags | BCH_BY_INDEX, new_state: new_state as u8, dev: dev_idx as u64, ..Default::default() }
+        )
     }
 
     /// Resize filesystem on a device.
     pub(crate) fn disk_resize(&self, dev_idx: u32, nbuckets: u64) -> Result<(), Errno> {
-        let mut err_buf = [0u8; 8192];
-        let mut arg = bch_ioctl_disk_resize_v2 {
-            flags: BCH_BY_INDEX,
-            dev: dev_idx as u64,
-            nbuckets,
-            ..Default::default()
-        };
-        arg.err.msg_ptr = err_buf.as_mut_ptr() as u64;
-        arg.err.msg_len = err_buf.len() as u32;
-
-        match unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<DiskResizeV2Opcode, _>::new(arg)) } {
-            Ok(()) => return Ok(()),
-            Err(e) if e == rustix::io::Errno::NOTTY => {}
-            Err(e) => {
-                print_errmsg(&err_buf);
-                return Err(Errno(e.raw_os_error()));
-            }
-        }
-
-        let arg = bch_ioctl_disk_resize {
-            flags: BCH_BY_INDEX,
-            dev: dev_idx as u64,
-            nbuckets,
-            ..Default::default()
-        };
-        unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<DiskResizeOpcode, _>::new(arg)) }
-            .map_err(|e| Errno(e.raw_os_error()))
+        v2_v1_ioctl!(
+            self.ioctl_fd(), DiskResizeV2Opcode, DiskResizeOpcode,
+            bch_ioctl_disk_resize_v2 { flags: BCH_BY_INDEX, dev: dev_idx as u64, nbuckets, ..Default::default() },
+            bch_ioctl_disk_resize    { flags: BCH_BY_INDEX, dev: dev_idx as u64, nbuckets, ..Default::default() }
+        )
     }
 
     /// Resize journal on a device.
     pub(crate) fn disk_resize_journal(&self, dev_idx: u32, nbuckets: u64) -> Result<(), Errno> {
-        let mut err_buf = [0u8; 8192];
-        let mut arg = bch_ioctl_disk_resize_journal_v2 {
-            flags: BCH_BY_INDEX,
-            dev: dev_idx as u64,
-            nbuckets,
-            ..Default::default()
-        };
-        arg.err.msg_ptr = err_buf.as_mut_ptr() as u64;
-        arg.err.msg_len = err_buf.len() as u32;
-
-        match unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<DiskResizeJournalV2Opcode, _>::new(arg)) } {
-            Ok(()) => return Ok(()),
-            Err(e) if e == rustix::io::Errno::NOTTY => {}
-            Err(e) => {
-                print_errmsg(&err_buf);
-                return Err(Errno(e.raw_os_error()));
-            }
-        }
-
-        let arg = bch_ioctl_disk_resize_journal {
-            flags: BCH_BY_INDEX,
-            dev: dev_idx as u64,
-            nbuckets,
-            ..Default::default()
-        };
-        unsafe { ioctl::ioctl(self.ioctl_fd(), Setter::<DiskResizeJournalOpcode, _>::new(arg)) }
-            .map_err(|e| Errno(e.raw_os_error()))
+        v2_v1_ioctl!(
+            self.ioctl_fd(), DiskResizeJournalV2Opcode, DiskResizeJournalOpcode,
+            bch_ioctl_disk_resize_journal_v2 { flags: BCH_BY_INDEX, dev: dev_idx as u64, nbuckets, ..Default::default() },
+            bch_ioctl_disk_resize_journal    { flags: BCH_BY_INDEX, dev: dev_idx as u64, nbuckets, ..Default::default() }
+        )
     }
 
     /// Query device usage (v2 with flex array, v1 fallback).

@@ -16,6 +16,17 @@ use crate::util::fmt_bytes_human;
 use crate::wrappers::handle::BcachefsHandle;
 use crate::wrappers::sysfs::bcachefs_kernel_version;
 
+/// Open a filesystem by block device path and return its handle + device index.
+fn open_dev(path: &str) -> Result<(BcachefsHandle, u32)> {
+    let handle = BcachefsHandle::open(path)
+        .map_err(|e| anyhow!("Failed to open filesystem for '{}': {}", path, e))?;
+    let dev_idx = handle.dev_idx();
+    if dev_idx < 0 {
+        return Err(anyhow!("'{}' does not appear to be a block device member", path));
+    }
+    Ok((handle, dev_idx as u32))
+}
+
 /// Resolve a device identifier (path or numeric index) to a dev_idx
 /// on a given filesystem handle.
 fn resolve_dev(handle: &BcachefsHandle, dev_str: &str) -> Result<u32> {
@@ -70,17 +81,10 @@ pub struct OfflineCli {
 
 pub fn cmd_device_offline(argv: Vec<String>) -> Result<()> {
     let cli = OfflineCli::parse_from(argv);
-
-    let handle = BcachefsHandle::open(&cli.device)
-        .map_err(|e| anyhow!("Failed to open filesystem for '{}': {}", cli.device, e))?;
-
-    let dev_idx = handle.dev_idx();
-    if dev_idx < 0 {
-        return Err(anyhow!("'{}' does not appear to be a block device member", cli.device));
-    }
+    let (handle, dev_idx) = open_dev(&cli.device)?;
 
     let flags = if cli.force { BCH_FORCE_IF_DEGRADED } else { 0 };
-    handle.disk_offline(dev_idx as u32, flags)
+    handle.disk_offline(dev_idx, flags)
         .map_err(|e| anyhow!("Failed to offline device '{}': {}", cli.device, e))
 }
 
@@ -121,13 +125,7 @@ pub fn cmd_device_remove(argv: Vec<String>) -> Result<()> {
         let dev_idx = resolve_dev(&handle, &cli.device)?;
         (handle, dev_idx)
     } else if !is_numeric {
-        let handle = BcachefsHandle::open(&cli.device)
-            .map_err(|e| anyhow!("Failed to open filesystem for '{}': {}", cli.device, e))?;
-        let dev_idx = handle.dev_idx();
-        if dev_idx < 0 {
-            return Err(anyhow!("Could not determine device index for '{}'", cli.device));
-        }
-        (handle, dev_idx as u32)
+        open_dev(&cli.device)?
     } else {
         return Err(anyhow!("Filesystem path required when specifying device by index"));
     };
@@ -165,14 +163,7 @@ pub fn cmd_device_evacuate(argv: Vec<String>) -> Result<()> {
         ));
     }
 
-    let handle = BcachefsHandle::open(&cli.device)
-        .map_err(|e| anyhow!("Failed to open filesystem for '{}': {}", cli.device, e))?;
-
-    let dev_idx = handle.dev_idx();
-    if dev_idx < 0 {
-        return Err(anyhow!("'{}' does not appear to be a block device member", cli.device));
-    }
-    let dev_idx = dev_idx as u32;
+    let (handle, dev_idx) = open_dev(&cli.device)?;
 
     let usage = handle.dev_usage(dev_idx)
         .map_err(|e| anyhow!("Failed to query device usage: {}", e))?;

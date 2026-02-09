@@ -25,6 +25,12 @@ impl std::fmt::Display for ErrnoError {
 
 impl std::error::Error for ErrnoError {}
 
+fn c_command(args: Vec<String>, symlink_cmd: Option<&str>) -> ExitCode {
+    let r = handle_c_command(args, symlink_cmd);
+    debug!("return code from C command: {r}");
+    ExitCode::from(r as u8)
+}
+
 fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
     let cmd = match symlink_cmd {
         Some(s) => s.to_string(),
@@ -130,37 +136,20 @@ fn main() -> ExitCode {
         "subvolume" => commands::subvolume(args[1..].to_vec()).report(),
         "data" => match args.get(2).map(|s| s.as_str()) {
             Some("scrub") => commands::scrub(args[2..].to_vec()).report(),
-            _ => {
-                let r = handle_c_command(args, symlink_cmd);
-                debug!("return code from C command: {r}");
-                ExitCode::from(r as u8)
-            }
+            _ => c_command(args, symlink_cmd),
         },
         "device" => match args.get(2).map(|s| s.as_str()) {
             Some("online") => commands::cmd_device_online(args[2..].to_vec()).report(),
             Some("offline") => commands::cmd_device_offline(args[2..].to_vec()).report(),
             Some("remove") => commands::cmd_device_remove(args[2..].to_vec()).report(),
             Some("evacuate") => commands::cmd_device_evacuate(args[2..].to_vec()).report(),
-            _ => {
-                let r = handle_c_command(args, symlink_cmd);
-                debug!("return code from C command: {r}");
-                ExitCode::from(r as u8)
-            }
+            _ => c_command(args, symlink_cmd),
         },
         "fs" => match args.get(2).map(|s| s.as_str()) {
             Some("timestats") => commands::timestats(args[2..].to_vec()).report(),
             Some("top") => commands::top(args[2..].to_vec()).report(),
-            _ => {
-                let r = handle_c_command(args, symlink_cmd);
-                debug!("return code from C command: {r}");
-                ExitCode::from(r as u8)
-            }
+            _ => c_command(args, symlink_cmd),
         },
-        _ => {
-            let r = handle_c_command(args, symlink_cmd);
-
-            debug!("return code from C command: {r}");
-            ExitCode::from(r as u8)
-        }
+        _ => c_command(args, symlink_cmd),
     }
 }

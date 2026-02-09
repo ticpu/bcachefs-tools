@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::util::fmt_bytes_human;
 use crate::wrappers::handle::BcachefsHandle;
+use crate::wrappers::ioctl::bch_ioc_wr;
 
 // ---- CLI definitions ----
 
@@ -134,12 +135,8 @@ const BCH_IOCTL_SNAPSHOT_TREE_USAGE: u32 = 33;
 const BCH_SUBVOLUME_RO:       u32 = 1 << 0;
 const BCH_SUBVOLUME_UNLINKED: u32 = 1 << 2;
 
-const fn bch_ioc_rw<T>(nr: u32) -> libc::c_ulong {
-    ((3u32 << 30) | ((mem::size_of::<T>() as u32) << 16) | (0xbcu32 << 8) | nr) as libc::c_ulong
-}
-
 fn bcachefs_ioctl<T>(fd: &OwnedFd, nr: u32, arg: &mut T) -> std::io::Result<()> {
-    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), bch_ioc_rw::<T>(nr), arg as *mut T) };
+    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), bch_ioc_wr::<T>(nr), arg as *mut T) };
     if ret < 0 {
         Err(std::io::Error::last_os_error())
     } else {
@@ -161,7 +158,7 @@ fn bcachefs_flex_ioctl<H: FlexArrayIoctl>(
 ) -> Result<(H, Vec<H::Node>)> {
     let hdr_size = mem::size_of::<H>();
     let node_size = mem::size_of::<H::Node>();
-    let request = bch_ioc_rw::<H>(H::NR);
+    let request = bch_ioc_wr::<H>(H::NR);
     let mut capacity = 256u32;
 
     loop {
@@ -720,22 +717,18 @@ fn print_snapshot_json(dir: &Path) -> Result<()> {
         nodes_json.push(serde_json::Value::Object(obj));
     }
 
-    let mut query_root = serde_json::Map::new();
-    query_root.insert("subvol".into(), tree.master_subvol.into());
-    query_root.insert("snapshot".into(), tree.root_snapshot.into());
+    let mut query_root = serde_json::json!({
+        "subvol":   tree.master_subvol,
+        "snapshot": tree.root_snapshot,
+    });
     if let Some(path) = resolve_subvol_path(&fd, tree.master_subvol) {
-        query_root.insert("path".into(), path.into());
+        query_root["path"] = path.into();
     }
 
-    let query_root_json = serde_json::to_string(&serde_json::Value::Object(query_root))?;
-    let nodes_json_str = serde_json::to_string_pretty(&serde_json::Value::Array(nodes_json))?;
-    let nodes_indented = nodes_json_str.lines()
-        .enumerate()
-        .map(|(i, l)| if i == 0 { l.to_string() } else { format!("  {}", l) })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    println!("{{\n  \"query_root\": {},\n  \"nodes\": {}\n}}", query_root_json, nodes_indented);
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "query_root": query_root,
+        "nodes":      nodes_json,
+    }))?);
     Ok(())
 }
 
