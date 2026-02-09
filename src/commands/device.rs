@@ -1,4 +1,6 @@
+use std::ffi::CString;
 use std::io::{self, Write};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -132,6 +134,158 @@ pub fn cmd_device_remove(argv: Vec<String>) -> Result<()> {
 
     handle.disk_remove(dev_idx, flags)
         .map_err(|e| anyhow!("Failed to remove device '{}': {}", cli.device, e))
+}
+
+fn parse_member_state(s: &str) -> Result<u32> {
+    match s {
+        "rw"         => Ok(BCH_MEMBER_STATE_rw as u32),
+        "ro"         => Ok(BCH_MEMBER_STATE_ro as u32),
+        "evacuating" => Ok(BCH_MEMBER_STATE_evacuating as u32),
+        "spare"      => Ok(BCH_MEMBER_STATE_spare as u32),
+        _ => Err(anyhow!("invalid device state '{}' (expected: rw, ro, evacuating, spare)", s)),
+    }
+}
+
+fn parse_human_size(s: &str) -> Result<u64> {
+    let cstr = CString::new(s).map_err(|_| anyhow!("invalid size string"))?;
+    let mut val: u64 = 0;
+    let ret = unsafe { bch_bindgen::c::bch2_strtoull_h(cstr.as_ptr(), &mut val) };
+    if ret != 0 { return Err(anyhow!("invalid size: {}", s)) }
+    Ok(val)
+}
+
+fn block_device_size(dev: &str) -> Result<u64> {
+    let f = std::fs::File::open(dev)
+        .map_err(|e| anyhow!("error opening {}: {}", dev, e))?;
+    use std::os::unix::io::AsRawFd;
+    let mut size: u64 = 0;
+    // BLKGETSIZE64 = _IOR(0x12, 114, size_t)
+    const BLKGETSIZE64: libc::c_ulong = 0x80081272;
+    let ret = unsafe { libc::ioctl(f.as_raw_fd(), BLKGETSIZE64, &mut size) };
+    if ret < 0 {
+        return Err(anyhow!("BLKGETSIZE64 failed on {}", dev));
+    }
+    Ok(size)
+}
+
+#[derive(Parser, Debug)]
+#[command(about = "Change the state of a device")]
+pub struct SetStateCli {
+    /// Force if data redundancy will be degraded
+    #[arg(short, long)]
+    force: bool,
+
+    /// Force even if data will be lost
+    #[arg(short = 'F', long)]
+    force_if_data_lost: bool,
+
+    /// Device state: rw, ro, evacuating, spare
+    new_state: String,
+
+    /// Device path or numeric device index
+    device: String,
+
+    /// Filesystem path (required when specifying device by index)
+    path: Option<String>,
+}
+
+pub fn cmd_device_set_state(argv: Vec<String>) -> Result<()> {
+    let cli = SetStateCli::parse_from(argv);
+
+    let new_state = parse_member_state(&cli.new_state)?;
+    let mut flags = if cli.force { BCH_FORCE_IF_DEGRADED } else { 0 };
+    if cli.force_if_data_lost {
+        flags |= BCH_FORCE_IF_DEGRADED | BCH_FORCE_IF_DATA_LOST | BCH_FORCE_IF_METADATA_LOST;
+    }
+
+    let is_numeric = cli.device.parse::<u32>().is_ok();
+
+    let (handle, dev_idx) = if let Some(ref fs_path) = cli.path {
+        let handle = BcachefsHandle::open(fs_path)
+            .map_err(|e| anyhow!("Failed to open filesystem '{}': {}", fs_path, e))?;
+        let dev_idx = resolve_dev(&handle, &cli.device)?;
+        (handle, dev_idx)
+    } else if !is_numeric {
+        open_dev(&cli.device)?
+    } else {
+        return Err(anyhow!("Filesystem path required when specifying device by index"));
+    };
+
+    handle.disk_set_state(dev_idx, new_state, flags)
+        .map_err(|e| anyhow!("Failed to set device state: {}", e))
+}
+
+#[derive(Parser, Debug)]
+#[command(about = "Resize the filesystem on a device")]
+pub struct ResizeCli {
+    /// Device path
+    device: String,
+
+    /// New size (human-readable, e.g. 1G); defaults to device size
+    size: Option<String>,
+}
+
+/// Returns Ok(true) if handled, Ok(false) if device not mounted (needs offline path).
+pub fn cmd_device_resize(argv: Vec<String>) -> Result<bool> {
+    let cli = ResizeCli::parse_from(argv);
+
+    let (handle, dev_idx) = match open_dev(&cli.device) {
+        Ok(r) => r,
+        Err(_) if Path::new(&cli.device).exists() => return Ok(false),
+        Err(e) => return Err(e),
+    };
+
+    let size_bytes = match cli.size {
+        Some(ref s) => parse_human_size(s)?,
+        None => block_device_size(&cli.device)?,
+    };
+    let size_sectors = size_bytes >> 9;
+
+    let usage = handle.dev_usage(dev_idx)
+        .map_err(|e| anyhow!("Failed to query device usage: {}", e))?;
+    let nbuckets = size_sectors / usage.bucket_size as u64;
+
+    if nbuckets < usage.nr_buckets {
+        return Err(anyhow!("Shrinking not supported yet"));
+    }
+
+    println!("resizing {} to {} buckets", cli.device, nbuckets);
+    handle.disk_resize(dev_idx, nbuckets)
+        .map_err(|e| anyhow!("Failed to resize device: {}", e))?;
+    Ok(true)
+}
+
+#[derive(Parser, Debug)]
+#[command(about = "Resize the journal on a device")]
+pub struct ResizeJournalCli {
+    /// Device path
+    device: String,
+
+    /// New journal size (human-readable, e.g. 1G)
+    size: String,
+}
+
+/// Returns Ok(true) if handled, Ok(false) if device not mounted (needs offline path).
+pub fn cmd_device_resize_journal(argv: Vec<String>) -> Result<bool> {
+    let cli = ResizeJournalCli::parse_from(argv);
+
+    let (handle, dev_idx) = match open_dev(&cli.device) {
+        Ok(r) => r,
+        Err(_) if Path::new(&cli.device).exists() => return Ok(false),
+        Err(e) => return Err(e),
+    };
+
+    let size_bytes = parse_human_size(&cli.size)?;
+    let size_sectors = size_bytes >> 9;
+
+    let usage = handle.dev_usage(dev_idx)
+        .map_err(|e| anyhow!("Failed to query device usage: {}", e))?;
+    let nbuckets = size_sectors / usage.bucket_size as u64;
+
+    println!("resizing journal on {} to {} buckets", cli.device, nbuckets);
+    handle.disk_resize_journal(dev_idx, nbuckets)
+        .map_err(|e| anyhow!("Failed to resize journal: {}", e))?;
+    Ok(true)
 }
 
 fn data_type_is_empty(t: u32) -> bool {
