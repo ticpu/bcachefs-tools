@@ -10,7 +10,7 @@ pub mod timestats;
 pub mod top;
 
 pub use completions::completions;
-pub use device::{cmd_device_online, cmd_device_offline};
+pub use device::{cmd_device_online, cmd_device_offline, cmd_device_remove};
 pub use list::list;
 pub use mount::mount;
 pub use scrub::scrub;

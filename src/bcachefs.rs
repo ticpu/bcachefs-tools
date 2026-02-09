@@ -139,6 +139,7 @@ fn main() -> ExitCode {
         "device" => match args.get(2).map(|s| s.as_str()) {
             Some("online") => commands::cmd_device_online(args[2..].to_vec()).report(),
             Some("offline") => commands::cmd_device_offline(args[2..].to_vec()).report(),
+            Some("remove") => commands::cmd_device_remove(args[2..].to_vec()).report(),
             _ => {
                 let r = handle_c_command(args, symlink_cmd);
                 debug!("return code from C command: {r}");

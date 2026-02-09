@@ -59,6 +59,11 @@ impl BcachefsHandle {
         self.inner.dev_idx
     }
 
+    /// Filesystem UUID.
+    pub(crate) fn uuid(&self) -> [u8; 16] {
+        self.inner.uuid.b
+    }
+
     /// Opens a bcachefs filesystem and returns its handle
     pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self, BchError> {
         let path = path_to_cstr(path);
