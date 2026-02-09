@@ -737,29 +737,3 @@ int cmd_fs_usage(int argc, char *argv[])
 	return 0;
 }
 
-int fs_usage(void)
-{
-	puts("bcachefs fs - manage a running filesystem\n"
-	     "Usage: bcachefs fs <usage|top|timestats> [OPTION]...\n"
-	     "\n"
-	     "Commands:\n"
-	     "  usage                        Display detailed filesystem usage\n"
-	     "  top                          Show runtime performance information\n"
-	     "  timestats                    Show filesystem time statistics\n"
-	     "\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	exit(EXIT_SUCCESS);
-}
-
-int fs_cmds(int argc, char *argv[])
-{
-	char *cmd = pop_cmd(&argc, argv);
-
-	if (argc < 1)
-		return fs_usage();
-	if (!strcmp(cmd, "usage"))
-		return cmd_fs_usage(argc, argv);
-
-	fs_usage();
-	return -EINVAL;
-}

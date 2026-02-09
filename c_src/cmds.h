@@ -18,7 +18,6 @@ int cmd_set_option(int argc, char *argv[]);
 
 int image_cmds(int argc, char *argv[]);
 
-int fs_usage(void);
 int cmd_fs_usage(int argc, char *argv[]);
 
 int device_cmds(int argc, char *argv[]);
@@ -49,6 +48,5 @@ int cmd_setattr(int argc, char *argv[]);
 int cmd_fusemount(int argc, char *argv[]);
 
 void bcachefs_usage(void);
-int fs_cmds(int argc, char *argv[]);
 
 #endif /* _CMDS_H */
