@@ -128,12 +128,16 @@ fn main() -> ExitCode {
         "list" => commands::list(args[1..].to_vec()).report(),
         "mount" => commands::mount(args, symlink_cmd),
         "subvolume" => commands::subvolume(args[1..].to_vec()).report(),
-        "fs" if args.get(2).map(|s| s.as_str()) == Some("timestats") => {
-            commands::timestats(args[2..].to_vec()).report()
-        }
-        "fs" if args.get(2).map(|s| s.as_str()) == Some("top") => {
-            commands::top(args[2..].to_vec()).report()
-        }
+        "fs" => match args.get(2).map(|s| s.as_str()) {
+            Some("timestats") => commands::timestats(args[2..].to_vec()).report(),
+            Some("top") => commands::top(args[2..].to_vec()).report(),
+            _ => {
+                // fs usage and help still handled by C fs_cmds
+                let r = handle_c_command(args, symlink_cmd);
+                debug!("return code from C command: {r}");
+                ExitCode::from(r as u8)
+            }
+        },
         _ => {
             let r = handle_c_command(args, symlink_cmd);
 

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -23,4 +24,38 @@ pub fn dev_name_from_sysfs(dev_sysfs_path: &Path) -> String {
 pub fn sysfs_path_from_fd(fd: i32) -> Result<PathBuf> {
     let link = format!("/proc/self/fd/{}", fd);
     fs::read_link(&link).with_context(|| format!("resolving sysfs fd {}", fd))
+}
+
+/// Read a sysfs attribute as a trimmed string.
+/// Returns None if the file doesn't exist or is empty.
+pub fn read_sysfs_str(path: &Path) -> io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(s) => {
+            let trimmed = s.trim_end_matches('\n').to_string();
+            Ok(if trimmed.is_empty() { None } else { Some(trimmed) })
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Read a sysfs attribute as a u64.
+pub fn read_sysfs_u64(path: &Path) -> io::Result<u64> {
+    let s = fs::read_to_string(path)?;
+    s.trim().parse::<u64>()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData,
+            format!("{}: {:?}", e, s.trim())))
+}
+
+/// Write a string to a sysfs attribute.
+pub fn write_sysfs_str(path: &Path, val: &str) -> io::Result<()> {
+    fs::write(path, val)
+}
+
+const KERNEL_VERSION_PATH: &str = "/sys/module/bcachefs/parameters/version";
+
+/// Read the bcachefs kernel module metadata version.
+/// Returns 0 if the module isn't loaded.
+pub fn bcachefs_kernel_version() -> u64 {
+    read_sysfs_u64(Path::new(KERNEL_VERSION_PATH)).unwrap_or(0)
 }
