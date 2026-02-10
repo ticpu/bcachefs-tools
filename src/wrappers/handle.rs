@@ -249,7 +249,7 @@ impl BcachefsHandle {
             let mut data_types = Vec::with_capacity(actual_nr);
             for i in 0..actual_nr {
                 let d = unsafe { std::ptr::read_unaligned(data_ptr.add(i)) };
-                data_types.push(DevUsageType { sectors: d.sectors });
+                data_types.push(DevUsageType { buckets: d.buckets, sectors: d.sectors, fragmented: d.fragmented });
             }
 
             return Ok(DevUsage {
@@ -279,7 +279,7 @@ impl BcachefsHandle {
 
         let mut data_types = Vec::new();
         for d in &u_v1.d {
-            data_types.push(DevUsageType { sectors: d.sectors });
+            data_types.push(DevUsageType { buckets: d.buckets, sectors: d.sectors, fragmented: d.fragmented });
         }
 
         Ok(DevUsage {
@@ -301,7 +301,9 @@ pub(crate) struct DevUsage {
 
 /// Per-data-type usage on a device.
 pub(crate) struct DevUsageType {
+    pub buckets: u64,
     pub sectors: u64,
+    pub fragmented: u64,
 }
 
 fn print_errmsg(err_buf: &[u8]) {

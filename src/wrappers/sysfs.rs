@@ -46,6 +46,8 @@ pub fn bcachefs_kernel_version() -> u64 {
 pub struct DevInfo {
     pub idx:        u32,
     pub dev:        String,
+    pub label:      Option<String>,
+    pub durability: u32,
 }
 
 /// Enumerate devices for a mounted filesystem from its sysfs directory.
@@ -68,7 +70,15 @@ pub fn fs_get_devices(sysfs_path: &Path) -> Result<Vec<DevInfo>> {
         let dev_path = entry.path();
         let dev = dev_name_from_sysfs(&dev_path);
 
-        devs.push(DevInfo { idx, dev });
+        let label = fs::read_to_string(dev_path.join("label"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let durability = read_sysfs_u64(&dev_path.join("durability"))
+            .unwrap_or(1) as u32;
+
+        devs.push(DevInfo { idx, dev, label, durability });
     }
     devs.sort_by_key(|d| d.idx);
     Ok(devs)
