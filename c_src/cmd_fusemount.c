@@ -316,8 +316,8 @@ static void bcachefs_fuse_rename(fuse_req_t req,
 	struct bch_fs *c = fuse_req_userdata(req);
 	struct bch_inode_unpacked dst_dir_u, src_dir_u;
 	struct bch_inode_unpacked src_inode_u, dst_inode_u;
-	struct qstr dst_name = QSTR(srcname);
-	struct qstr src_name = QSTR(dstname);
+	struct qstr src_name = QSTR(srcname);
+	struct qstr dst_name = QSTR(dstname);
 	subvol_inum src_dir = map_root_ino(src_dir_ino);
 	subvol_inum dst_dir = map_root_ino(dst_dir_ino);
 	int ret;
