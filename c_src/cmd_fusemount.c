@@ -287,7 +287,10 @@ static void bcachefs_fuse_mkdir(fuse_req_t req, fuse_ino_t dir,
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_mkdir(%llu, %s, %x)\n",
 		 (u64) dir, name, mode);
 
-	BUG_ON(mode & S_IFMT);
+	if (mode & S_IFMT) {
+		fuse_reply_err(req, EINVAL);
+		return;
+	}
 
 	mode |= S_IFDIR;
 	bcachefs_fuse_mknod(req, dir, name, mode, 0);
@@ -657,7 +660,10 @@ static void bcachefs_fuse_write(fuse_req_t req, fuse_ino_t ino,
 
 	struct fuse_align_io align = align_io(c, size, offset);
 	void *aligned_buf = aligned_alloc(PAGE_SIZE, align.size);
-	BUG_ON(!aligned_buf);
+	if (!aligned_buf) {
+		fuse_reply_err(req, ENOMEM);
+		return;
+	}
 
 	if (get_inode_io_opts(c, inum, &io_opts)) {
 		ret = -ENOENT;
@@ -703,7 +709,10 @@ static void bcachefs_fuse_write(fuse_req_t req, fuse_ino_t ino,
 
 	/* Figure out how many unaligned bytes were written. */
 	size_t written = align_fix_up_bytes(&align, aligned_written);
-	BUG_ON(written > size);
+	if (written > size) {
+		ret = -EIO;
+		goto err;
+	}
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_write: wrote %zd bytes\n",
 		 written);
@@ -719,7 +728,10 @@ static void bcachefs_fuse_write(fuse_req_t req, fuse_ino_t ino,
 		ret = inode_update_times(c, inum);
 
 	if (!ret) {
-		BUG_ON(written == 0);
+		if (written == 0) {
+			ret = -EIO;
+			goto err;
+		}
 		fuse_reply_write(req, written);
 		free(aligned_buf);
 		return;
@@ -755,7 +767,10 @@ static void bcachefs_fuse_symlink(fuse_req_t req, const char *link,
 	struct fuse_align_io align = align_io(c, link_len + 1, 0);
 
 	void *aligned_buf = aligned_alloc(PAGE_SIZE, align.size);
-	BUG_ON(!aligned_buf);
+	if (!aligned_buf) {
+		ret = -ENOMEM;
+		goto err;
+	}
 
 	memset(aligned_buf, 0, align.size);
 	memcpy(aligned_buf, link, link_len); /* already terminated */
@@ -772,7 +787,10 @@ static void bcachefs_fuse_symlink(fuse_req_t req, const char *link,
 		goto err;
 
 	size_t written = align_fix_up_bytes(&align, aligned_written);
-	BUG_ON(written != link_len + 1); // TODO: handle short
+	if (written != link_len + 1) {
+		ret = -EIO;
+		goto err;
+	}
 
 	ret = inode_update_times(c, inum);
 	if (ret)
@@ -812,7 +830,10 @@ static void bcachefs_fuse_readlink(fuse_req_t req, fuse_ino_t ino)
 	if (ret)
 		goto err;
 
-	BUG_ON(buf[align.size - 1] != 0);
+	if (buf[align.size - 1] != 0) {
+		ret = -EIO;
+		goto err;
+	}
 
 	fuse_reply_readlink(req, buf);
 
@@ -1029,8 +1050,8 @@ static void bcachefs_fuse_statfs(fuse_req_t req, fuse_ino_t inum)
 		.f_bsize	= block_bytes(c),
 		.f_frsize	= block_bytes(c),
 		.f_blocks	= usage.capacity >> shift,
-		.f_bfree	= (usage.capacity - usage.used) >> shift,
-		//.f_bavail	= statbuf.f_bfree,
+		.f_bfree	= usage.free >> shift,
+		.f_bavail	= avail_factor(usage.free) >> shift,
 		.f_files	= nr_inodes,
 		.f_ffree	= U64_MAX,
 		.f_namemax	= BCH_NAME_MAX,
