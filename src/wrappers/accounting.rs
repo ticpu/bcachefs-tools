@@ -51,6 +51,12 @@ pub struct AccountingEntry {
     pub counters: Vec<u64>,
 }
 
+impl AccountingEntry {
+    pub fn counter(&self, i: usize) -> u64 {
+        self.counters.get(i).copied().unwrap_or(0)
+    }
+}
+
 /// Result of query_accounting ioctl.
 pub struct AccountingResult {
     pub capacity: u64,
