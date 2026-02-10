@@ -3,9 +3,9 @@ use std::fmt::Write as FmtWrite;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
-use crate::util::fmt_bytes_human;
 use crate::wrappers::accounting::{self, AccountingEntry, DiskAccountingPos};
 use crate::wrappers::handle::{BcachefsHandle, DevUsage};
+use crate::wrappers::printbuf::Printbuf;
 use crate::wrappers::sysfs::{self, DevInfo, bcachefs_kernel_version};
 
 // Field bitmask values
@@ -91,29 +91,13 @@ pub fn fs_usage(argv: Vec<String>) -> Result<()> {
     }
 
     for path in &cli.mountpoints {
-        let mut out = String::new();
-        fs_usage_to_text(&mut out, path, fields, cli.human_readable)?;
+        let mut out = Printbuf::new();
+        out.set_human_readable(cli.human_readable);
+        fs_usage_to_text(&mut out, path, fields)?;
         print!("{}", out);
     }
 
     Ok(())
-}
-
-fn fmt_size(out: &mut String, sectors: u64, human_readable: bool) {
-    let bytes = sectors << 9;
-    if human_readable {
-        write!(out, "{}", fmt_bytes_human(bytes)).unwrap();
-    } else {
-        write!(out, "{}", bytes).unwrap();
-    }
-}
-
-fn fmt_size_bytes(out: &mut String, bytes: u64, human_readable: bool) {
-    if human_readable {
-        write!(out, "{}", fmt_bytes_human(bytes)).unwrap();
-    } else {
-        write!(out, "{}", bytes).unwrap();
-    }
 }
 
 fn fmt_uuid(uuid: &[u8; 16]) -> String {
@@ -135,7 +119,7 @@ struct DevContext {
     leaving: u64,
 }
 
-fn fs_usage_to_text(out: &mut String, path: &str, fields: u32, human_readable: bool) -> Result<()> {
+fn fs_usage_to_text(out: &mut Printbuf, path: &str, fields: u32) -> Result<()> {
     let handle = BcachefsHandle::open(path)
         .map_err(|e| anyhow!("opening filesystem '{}': {}", path, e))?;
 
@@ -143,17 +127,17 @@ fn fs_usage_to_text(out: &mut String, path: &str, fields: u32, human_readable: b
     let devs = sysfs::fs_get_devices(&sysfs_path)?;
 
     // Try v1 (query_accounting), fall back to v0 on ENOTTY
-    let v1_ok = match fs_usage_v1_to_text(out, &handle, &devs, fields, human_readable) {
+    let v1_ok = match fs_usage_v1_to_text(out, &handle, &devs, fields) {
         Ok(()) => true,
         Err(e) if e.0 == libc::ENOTTY => false,
         Err(e) => return Err(anyhow!("query_accounting failed: {}", e)),
     };
 
     if !v1_ok {
-        fs_usage_v0_to_text(out, &handle, &devs, fields, human_readable)?;
+        fs_usage_v0_to_text(out, &handle, &devs, fields)?;
     }
 
-    devs_usage_to_text(out, &handle, &devs, fields, human_readable)?;
+    devs_usage_to_text(out, &handle, &devs, fields)?;
 
     Ok(())
 }
@@ -161,11 +145,10 @@ fn fs_usage_to_text(out: &mut String, path: &str, fields: u32, human_readable: b
 // ──────────────────────────── v1 path (query_accounting) ────────────────────
 
 fn fs_usage_v1_to_text(
-    out: &mut String,
+    out: &mut Printbuf,
     handle: &BcachefsHandle,
     devs: &[DevInfo],
     fields: u32,
-    human_readable: bool,
 ) -> Result<(), errno::Errno> {
     let mut accounting_types: u32 =
         (1 << 2) |  // BCH_DISK_ACCOUNTING_replicas
@@ -193,34 +176,45 @@ fn fs_usage_v1_to_text(
     sorted.sort_by(|a, b| a.bpos.cmp(&b.bpos));
 
     // Header
-    writeln!(out, "Filesystem: {}", fmt_uuid(&handle.uuid())).unwrap();
-    write!(out, "Size:                ").unwrap();
-    fmt_size(out, result.capacity, human_readable);
-    writeln!(out).unwrap();
-    write!(out, "Used:                ").unwrap();
-    fmt_size(out, result.used, human_readable);
-    writeln!(out).unwrap();
-    write!(out, "Online reserved:     ").unwrap();
-    fmt_size(out, result.online_reserved, human_readable);
-    writeln!(out).unwrap();
+    write!(out, "Filesystem: {}\n", fmt_uuid(&handle.uuid())).unwrap();
+
+    out.tabstops_reset();
+    out.tabstop_push(20);
+    out.tabstop_push(16);
+
+    write!(out, "Size:\t").unwrap();
+    out.units_u64(result.capacity << 9);
+    write!(out, "\r\n").unwrap();
+
+    write!(out, "Used:\t").unwrap();
+    out.units_u64(result.used << 9);
+    write!(out, "\r\n").unwrap();
+
+    write!(out, "Online reserved:\t").unwrap();
+    out.units_u64(result.online_reserved << 9);
+    write!(out, "\r\n").unwrap();
 
     // Replicas summary
-    replicas_summary_to_text(out, &sorted, devs, human_readable);
+    replicas_summary_to_text(out, &sorted, devs);
 
     // Detailed replicas
     if fields & FIELD_REPLICAS != 0 {
-        writeln!(out, "\n{:<16}{:<16}{:<14}{:<14}",
-            "Data type", "Required/total", "Durability", "Devices").unwrap();
+        out.tabstops_reset();
+        out.tabstop_push(16);
+        out.tabstop_push(16);
+        out.tabstop_push(14);
+        out.tabstop_push(14);
+        out.tabstop_push(14);
+        write!(out, "\nData type\tRequired/total\tDurability\tDevices\n").unwrap();
 
         for entry in &sorted {
             match &entry.pos {
                 DiskAccountingPos::PersistentReserved { nr_replicas } => {
                     let sectors = entry.counters.first().copied().unwrap_or(0) as i64;
                     if sectors == 0 { continue; }
-                    write!(out, "reserved:       1/{:<13}", nr_replicas).unwrap();
-                    write!(out, "[] ").unwrap();
-                    fmt_size(out, sectors as u64, human_readable);
-                    writeln!(out).unwrap();
+                    write!(out, "reserved:\t1/{}\t[] ", nr_replicas).unwrap();
+                    out.units_u64(sectors as u64 * 512);
+                    write!(out, "\r\n").unwrap();
                 }
                 DiskAccountingPos::Replicas { data_type, nr_devs, nr_required, devs: dev_list } => {
                     let sectors = entry.counters.first().copied().unwrap_or(0) as i64;
@@ -228,24 +222,14 @@ fn fs_usage_v1_to_text(
 
                     let dur = replicas_durability(*data_type, *nr_devs, *nr_required, dev_list, devs);
 
-                    write!(out, "{:<16}", format!("{}:", accounting::data_type_str(*data_type))).unwrap();
-                    write!(out, "{:<16}", format!("{}/{}", nr_required, nr_devs)).unwrap();
-                    write!(out, "{:<14}", dur.durability).unwrap();
+                    accounting::prt_data_type(out, *data_type);
+                    write!(out, ":\t{}/{}\t{}\t[", nr_required, nr_devs, dur.durability).unwrap();
 
-                    write!(out, "[").unwrap();
-                    for (i, &dev_idx) in dev_list.iter().enumerate() {
-                        if i > 0 { write!(out, " ").unwrap(); }
-                        if dev_idx == SB_MEMBER_INVALID {
-                            write!(out, "none").unwrap();
-                        } else if let Some(d) = devs.iter().find(|d| d.idx == dev_idx as u32) {
-                            write!(out, "{}", d.dev).unwrap();
-                        } else {
-                            write!(out, "{}", dev_idx).unwrap();
-                        }
-                    }
-                    write!(out, "] ").unwrap();
-                    fmt_size(out, sectors as u64, human_readable);
-                    writeln!(out).unwrap();
+                    prt_dev_list(out, dev_list, devs);
+                    write!(out, "]\t").unwrap();
+
+                    out.units_u64(sectors as u64 * 512);
+                    write!(out, "\r\n").unwrap();
                 }
                 _ => {}
             }
@@ -257,8 +241,13 @@ fn fs_usage_v1_to_text(
     for entry in &sorted {
         if let DiskAccountingPos::Compression { compression_type } = &entry.pos {
             if first_compression {
-                writeln!(out, "\nCompression:").unwrap();
-                writeln!(out, "{:<12}{:>16}{:>16}{:>24}", "type", "compressed", "uncompressed", "average extent size").unwrap();
+                write!(out, "\nCompression:\n").unwrap();
+                out.tabstops_reset();
+                out.tabstop_push(12);
+                out.tabstop_push(16);
+                out.tabstop_push(16);
+                out.tabstop_push(24);
+                write!(out, "type\tcompressed\runcompressed\raverage extent size\r\n").unwrap();
                 first_compression = false;
             }
 
@@ -266,20 +255,20 @@ fn fs_usage_v1_to_text(
             let sectors_uncompressed = entry.counters.get(1).copied().unwrap_or(0);
             let sectors_compressed = entry.counters.get(2).copied().unwrap_or(0);
 
-            write!(out, "{:<12}", accounting::compression_type_str(*compression_type)).unwrap();
-            let mut s = String::new();
-            fmt_size(&mut s, sectors_compressed, human_readable);
-            write!(out, "{:>16}", s).unwrap();
-            s.clear();
-            fmt_size(&mut s, sectors_uncompressed, human_readable);
-            write!(out, "{:>16}", s).unwrap();
-            s.clear();
+            accounting::prt_compression_type(out, *compression_type);
+            out.tab();
+
+            out.units_u64(sectors_compressed << 9);
+            out.tab_rjust();
+
+            out.units_u64(sectors_uncompressed << 9);
+            out.tab_rjust();
+
             let avg = if nr_extents > 0 {
                 (sectors_uncompressed << 9) / nr_extents
             } else { 0 };
-            fmt_size_bytes(&mut s, avg, human_readable);
-            write!(out, "{:>24}", s).unwrap();
-            writeln!(out).unwrap();
+            out.units_u64(avg);
+            write!(out, "\r\n").unwrap();
         }
     }
 
@@ -288,12 +277,15 @@ fn fs_usage_v1_to_text(
     for entry in &sorted {
         if let DiskAccountingPos::Btree { id } = &entry.pos {
             if first_btree {
-                writeln!(out, "\nBtree usage:").unwrap();
+                write!(out, "\nBtree usage:\n").unwrap();
+                out.tabstops_reset();
+                out.tabstop_push(12);
+                out.tabstop_push(16);
                 first_btree = false;
             }
-            write!(out, "{:<12} ", format!("{}:", accounting::btree_id_str(*id))).unwrap();
-            fmt_size(out, entry.counters.first().copied().unwrap_or(0), human_readable);
-            writeln!(out).unwrap();
+            write!(out, "{}:\t", accounting::btree_id_str(*id)).unwrap();
+            out.units_u64(entry.counters.first().copied().unwrap_or(0) << 9);
+            write!(out, "\r\n").unwrap();
         }
     }
 
@@ -304,27 +296,29 @@ fn fs_usage_v1_to_text(
         match &entry.pos {
             DiskAccountingPos::RebalanceWork => {
                 if first_rebalance {
-                    writeln!(out, "\nPending rebalance work:").unwrap();
+                    write!(out, "\nPending rebalance work:\n").unwrap();
                     first_rebalance = false;
                 }
-                fmt_size(out, entry.counters.first().copied().unwrap_or(0), human_readable);
-                writeln!(out).unwrap();
+                out.units_u64(entry.counters.first().copied().unwrap_or(0) << 9);
+                out.newline();
             }
             DiskAccountingPos::ReconcileWork { work_type } => {
                 if first_reconcile {
-                    writeln!(out, "\n{:<32}{:>12}{:>12}", "Pending reconcile:", "data", "metadata").unwrap();
+                    out.tabstops_reset();
+                    out.tabstop_push(32);
+                    out.tabstop_push(12);
+                    out.tabstop_push(12);
+                    write!(out, "\nPending reconcile:\tdata\rmetadata\r\n").unwrap();
                     first_reconcile = false;
                 }
-                write!(out, "{}:", accounting::reconcile_type_str(*work_type)).unwrap();
-                let pad = 32usize.saturating_sub(accounting::reconcile_type_str(*work_type).len() + 1);
-                write!(out, "{:width$}", "", width = pad).unwrap();
-                let mut s = String::new();
-                fmt_size(&mut s, entry.counters.first().copied().unwrap_or(0), human_readable);
-                write!(out, "{:>12}", s).unwrap();
-                s.clear();
-                fmt_size(&mut s, entry.counters.get(1).copied().unwrap_or(0), human_readable);
-                write!(out, "{:>12}", s).unwrap();
-                writeln!(out).unwrap();
+                accounting::prt_reconcile_type(out, *work_type);
+                write!(out, ":").unwrap();
+                out.tab();
+                out.units_u64(entry.counters.first().copied().unwrap_or(0) << 9);
+                out.tab_rjust();
+                out.units_u64(entry.counters.get(1).copied().unwrap_or(0) << 9);
+                out.tab_rjust();
+                out.newline();
             }
             _ => {}
         }
@@ -357,8 +351,6 @@ fn replicas_durability(
         if dev.is_none() {
             degraded += dev_durability;
         }
-        // TODO: check for evacuating state (requires reading superblock or
-        // passing dev_usage state through to this function)
         durability += dev_durability;
     }
 
@@ -372,12 +364,11 @@ fn replicas_durability(
 }
 
 fn replicas_summary_to_text(
-    out: &mut String,
+    out: &mut Printbuf,
     sorted: &[&AccountingEntry],
     devs: &[DevInfo],
-    human_readable: bool,
 ) {
-    // Build durability × degraded matrix
+    // Build durability x degraded matrix
     let mut matrix: Vec<Vec<u64>> = Vec::new(); // [durability][degraded] = sectors
     let mut cached: u64 = 0;
     let mut reserved: u64 = 0;
@@ -409,49 +400,50 @@ fn replicas_summary_to_text(
         }
     }
 
-    writeln!(out, "\nData by durability desired and amount degraded:").unwrap();
+    write!(out, "\nData by durability desired and amount degraded:\n").unwrap();
 
     let max_degraded = matrix.iter().map(|r| r.len()).max().unwrap_or(0);
 
     if max_degraded > 0 {
         // Header
-        write!(out, "        ").unwrap();
+        out.tabstops_reset();
+        out.tabstop_push(8);
+        out.tab();
         for i in 0..max_degraded {
+            out.tabstop_push(12);
             if i == 0 {
-                write!(out, "{:>12}", "undegraded").unwrap();
+                write!(out, "undegraded\r").unwrap();
             } else {
-                write!(out, "{:>12}", format!("-{}x", i)).unwrap();
+                write!(out, "-{}x\r", i).unwrap();
             }
         }
-        writeln!(out).unwrap();
+        out.newline();
 
         // Rows
         for (dur, row) in matrix.iter().enumerate() {
             if row.is_empty() { continue; }
 
-            write!(out, "{}x:     ", dur).unwrap();
+            write!(out, "{}x:\t", dur).unwrap();
+
             for val in row {
                 if *val != 0 {
-                    let mut s = String::new();
-                    fmt_size(&mut s, *val, human_readable);
-                    write!(out, "{:>12}", s).unwrap();
-                } else {
-                    write!(out, "{:>12}", "").unwrap();
+                    out.units_u64(*val << 9);
                 }
+                out.tab_rjust();
             }
-            writeln!(out).unwrap();
+            out.newline();
         }
     }
 
     if cached > 0 {
-        write!(out, "cached: ").unwrap();
-        fmt_size(out, cached, human_readable);
-        writeln!(out).unwrap();
+        write!(out, "cached:\t").unwrap();
+        out.units_u64(cached << 9);
+        write!(out, "\r\n").unwrap();
     }
     if reserved > 0 {
-        write!(out, "reserved: ").unwrap();
-        fmt_size(out, reserved, human_readable);
-        writeln!(out).unwrap();
+        write!(out, "reserved:\t").unwrap();
+        out.units_u64(reserved << 9);
+        write!(out, "\r\n").unwrap();
     }
 }
 
@@ -469,11 +461,10 @@ struct FsUsageHeader {
 }
 
 fn fs_usage_v0_to_text(
-    out: &mut String,
+    out: &mut Printbuf,
     handle: &BcachefsHandle,
     devs: &[DevInfo],
     fields: u32,
-    human_readable: bool,
 ) -> Result<()> {
     let hdr_size = std::mem::size_of::<FsUsageHeader>();
     let mut replica_entries_bytes: u32 = 4096;
@@ -503,29 +494,45 @@ fn fs_usage_v0_to_text(
 
     let hdr = unsafe { &*(buf.as_ptr() as *const FsUsageHeader) };
 
-    writeln!(out, "Filesystem: {}", fmt_uuid(&handle.uuid())).unwrap();
-    write!(out, "Size:                ").unwrap();
-    fmt_size(out, hdr.capacity, human_readable);
-    writeln!(out).unwrap();
-    write!(out, "Used:                ").unwrap();
-    fmt_size(out, hdr.used, human_readable);
-    writeln!(out).unwrap();
-    write!(out, "Online reserved:     ").unwrap();
-    fmt_size(out, hdr.online_reserved, human_readable);
-    writeln!(out).unwrap();
-    writeln!(out).unwrap();
+    write!(out, "Filesystem: {}\n", fmt_uuid(&handle.uuid())).unwrap();
+
+    out.tabstops_reset();
+    out.tabstop_push(20);
+    out.tabstop_push(16);
+
+    write!(out, "Size:").unwrap();
+    out.tab();
+    out.units_u64(hdr.capacity << 9);
+    write!(out, "\r\n").unwrap();
+
+    write!(out, "Used:").unwrap();
+    out.tab();
+    out.units_u64(hdr.used << 9);
+    write!(out, "\r\n").unwrap();
+
+    write!(out, "Online reserved:").unwrap();
+    out.tab();
+    out.units_u64(hdr.online_reserved << 9);
+    write!(out, "\r\n").unwrap();
+
+    out.newline();
+
+    out.tabstops_reset();
+    out.tabstop_push(16);
+    out.tabstop_push(16);
+    out.tabstop_push(14);
+    out.tabstop_push(14);
+    out.tabstop_push(14);
 
     if fields & FIELD_REPLICAS != 0 {
-        writeln!(out, "{:<16}{:<16}{:<14}{:<14}",
-            "Data type", "Required/total", "Durability", "Devices").unwrap();
+        write!(out, "Data type\tRequired/total\tDurability\tDevices\n").unwrap();
 
         for i in 0..4 {
             let sectors = hdr.persistent_reserved[i] as i64;
             if sectors == 0 { continue; }
-            write!(out, "reserved:       1/{:<13}", i).unwrap();
-            write!(out, "[] ").unwrap();
-            fmt_size(out, sectors as u64, human_readable);
-            writeln!(out).unwrap();
+            write!(out, "reserved:\t1/{}\t[] ", i).unwrap();
+            out.units_u64(sectors as u64 * 512);
+            write!(out, "\r\n").unwrap();
         }
 
         // Parse variable-length replicas entries
@@ -535,22 +542,22 @@ fn fs_usage_v0_to_text(
         // Print in order: metadata, user nr_required<=1, user nr_required>1, rest
         for r in &replica_entries {
             if r.data_type < DATA_USER {
-                print_replica_entry(out, r, devs, human_readable);
+                print_replica_entry(out, r, devs);
             }
         }
         for r in &replica_entries {
             if r.data_type == DATA_USER && r.nr_required <= 1 {
-                print_replica_entry(out, r, devs, human_readable);
+                print_replica_entry(out, r, devs);
             }
         }
         for r in &replica_entries {
             if r.data_type == DATA_USER && r.nr_required > 1 {
-                print_replica_entry(out, r, devs, human_readable);
+                print_replica_entry(out, r, devs);
             }
         }
         for r in &replica_entries {
             if r.data_type > DATA_USER {
-                print_replica_entry(out, r, devs, human_readable);
+                print_replica_entry(out, r, devs);
             }
         }
     }
@@ -590,17 +597,24 @@ fn parse_replica_entries(data: &[u8]) -> Vec<ReplicaEntry> {
     entries
 }
 
-fn print_replica_entry(out: &mut String, r: &ReplicaEntry, devs: &[DevInfo], human_readable: bool) {
+fn print_replica_entry(out: &mut Printbuf, r: &ReplicaEntry, devs: &[DevInfo]) {
     if r.sectors == 0 { return; }
 
     let dur = replicas_durability(r.data_type, r.nr_devs, r.nr_required, &r.devs, devs);
 
-    write!(out, "{:<16}", format!("{}:", accounting::data_type_str(r.data_type))).unwrap();
-    write!(out, "{:<16}", format!("{}/{}", r.nr_required, r.nr_devs)).unwrap();
-    write!(out, "{:<14}", dur.durability).unwrap();
+    accounting::prt_data_type(out, r.data_type);
+    write!(out, ":\t{}/{}\t{}\t[", r.nr_required, r.nr_devs, dur.durability).unwrap();
 
-    write!(out, "[").unwrap();
-    for (i, &dev_idx) in r.devs.iter().enumerate() {
+    prt_dev_list(out, &r.devs, devs);
+    write!(out, "]\t").unwrap();
+
+    out.units_u64(r.sectors as u64 * 512);
+    write!(out, "\r\n").unwrap();
+}
+
+/// Print a device list like [sda sdb sdc].
+fn prt_dev_list(out: &mut Printbuf, dev_list: &[u8], devs: &[DevInfo]) {
+    for (i, &dev_idx) in dev_list.iter().enumerate() {
         if i > 0 { write!(out, " ").unwrap(); }
         if dev_idx == SB_MEMBER_INVALID {
             write!(out, "none").unwrap();
@@ -610,19 +624,15 @@ fn print_replica_entry(out: &mut String, r: &ReplicaEntry, devs: &[DevInfo], hum
             write!(out, "{}", dev_idx).unwrap();
         }
     }
-    write!(out, "] ").unwrap();
-    fmt_size(out, r.sectors as u64, human_readable);
-    writeln!(out).unwrap();
 }
 
 // ──────────────────────────── Device usage ───────────────────────────────────
 
 fn devs_usage_to_text(
-    out: &mut String,
+    out: &mut Printbuf,
     handle: &BcachefsHandle,
     devs: &[DevInfo],
     fields: u32,
-    human_readable: bool,
 ) -> Result<()> {
     // Query dev_leaving accounting if available
     let dev_leaving_map = match handle.query_accounting(1 << 10) {
@@ -658,21 +668,34 @@ fn devs_usage_to_text(
 
     let has_leaving = dev_ctxs.iter().any(|d| d.leaving != 0);
 
-    writeln!(out).unwrap();
+    out.tabstops_reset();
+    out.newline();
 
     if fields & FIELD_DEVICES != 0 {
         // Full per-device breakdown
+        out.tabstop_push(16);
+        out.tabstop_push(20);
+        out.tabstop_push(16);
+        out.tabstop_push(14);
+
         for d in &dev_ctxs {
-            dev_usage_full_to_text(out, d, human_readable);
+            dev_usage_full_to_text(out, d);
         }
     } else {
         // Summary table
-        write!(out, "{:<32}{:<12}{:<8}{:>10}{:>10}{:>6}",
-            "Device label", "Device", "State", "Size", "Used", "Use%").unwrap();
+        out.tabstop_push(32);
+        out.tabstop_push(12);
+        out.tabstop_push(8);
+        out.tabstop_push(10);
+        out.tabstop_push(10);
+        out.tabstop_push(6);
+        out.tabstop_push(10);
+
+        write!(out, "Device label\tDevice\tState\tSize\rUsed\rUse%\r").unwrap();
         if has_leaving {
-            write!(out, "{:>10}", "Leaving").unwrap();
+            write!(out, "Leaving\r").unwrap();
         }
-        writeln!(out).unwrap();
+        out.newline();
 
         for d in &dev_ctxs {
             let u = &d.usage;
@@ -687,33 +710,28 @@ fn devs_usage_to_text(
             let label = d.info.label.as_deref().unwrap_or("(no label)");
             let state = accounting::member_state_str(u.state);
 
-            write!(out, "{:<32}", format!("{} (device {}):", label, d.info.idx)).unwrap();
-            write!(out, "{:<12}", d.info.dev).unwrap();
-            write!(out, "{:<8}", state).unwrap();
+            write!(out, "{} (device {}):\t{}\t{}\t", label, d.info.idx, d.info.dev, state).unwrap();
 
-            let mut s = String::new();
-            fmt_size(&mut s, capacity, human_readable);
-            write!(out, "{:>10}", s).unwrap();
-            s.clear();
-            fmt_size(&mut s, used, human_readable);
-            write!(out, "{:>10}", s).unwrap();
+            out.units_u64(capacity << 9);
+            out.tab_rjust();
+            out.units_u64(used << 9);
 
             let pct = if capacity > 0 { used * 100 / capacity } else { 0 };
-            write!(out, "{:>5}%", pct).unwrap();
+            write!(out, "\r{:02}%\r", pct).unwrap();
 
             if d.leaving > 0 {
-                s.clear();
-                fmt_size(&mut s, d.leaving, human_readable);
-                write!(out, "{:>10}", s).unwrap();
+                out.units_u64(d.leaving << 9);
+                out.tab_rjust();
             }
-            writeln!(out).unwrap();
+
+            out.newline();
         }
     }
 
     Ok(())
 }
 
-fn dev_usage_full_to_text(out: &mut String, d: &DevContext, human_readable: bool) {
+fn dev_usage_full_to_text(out: &mut Printbuf, d: &DevContext) {
     let u = &d.usage;
     let capacity = u.nr_buckets * u.bucket_size as u64;
     let mut used: u64 = 0;
@@ -727,47 +745,40 @@ fn dev_usage_full_to_text(out: &mut String, d: &DevContext, human_readable: bool
     let state = accounting::member_state_str(u.state);
     let pct = if capacity > 0 { used * 100 / capacity } else { 0 };
 
-    writeln!(out, "{} (device {}):   {}   {}   {:02}%",
-        label, d.info.idx, d.info.dev, state, pct).unwrap();
+    write!(out, "{} (device {}):\t{}\r{}\r    {:02}%\n", label, d.info.idx, d.info.dev, state, pct).unwrap();
 
-    writeln!(out, "  {:<16}{:>12}{:>12}{:>14}", "", "data", "buckets", "fragmented").unwrap();
+    out.indent_add(2);
+    write!(out, "\tdata\rbuckets\rfragmented\r\n").unwrap();
 
     for (i, dt) in u.data_types.iter().enumerate() {
-        let type_name = accounting::data_type_str(i as u8);
+        accounting::prt_data_type(out, i as u8);
+        write!(out, ":\t").unwrap();
+
         let sectors = if data_type_is_empty(i as u8) {
             dt.buckets * u.bucket_size as u64
         } else {
             dt.sectors
         };
+        out.units_u64(sectors << 9);
 
-        write!(out, "  {:<16}", format!("{}:", type_name)).unwrap();
-
-        let mut s = String::new();
-        fmt_size(&mut s, sectors, human_readable);
-        write!(out, "{:>12}", s).unwrap();
-
-        write!(out, "{:>12}", dt.buckets).unwrap();
+        write!(out, "\r{}\r", dt.buckets).unwrap();
 
         if dt.fragmented > 0 {
-            s.clear();
-            fmt_size(&mut s, dt.fragmented, human_readable);
-            write!(out, "{:>14}", s).unwrap();
+            out.units_u64(dt.fragmented << 9);
         }
-        writeln!(out).unwrap();
+        write!(out, "\r\n").unwrap();
     }
 
-    write!(out, "  {:<16}", "capacity:").unwrap();
-    let mut s = String::new();
-    fmt_size(&mut s, capacity, human_readable);
-    write!(out, "{:>12}", s).unwrap();
-    writeln!(out, "{:>12}", u.nr_buckets).unwrap();
+    write!(out, "capacity:\t").unwrap();
+    out.units_u64(capacity << 9);
+    write!(out, "\r{}\r\n", u.nr_buckets).unwrap();
 
-    write!(out, "  {:<16}", "bucket size:").unwrap();
-    s.clear();
-    fmt_size(&mut s, u.bucket_size as u64, human_readable);
-    writeln!(out, "{:>12}", s).unwrap();
+    write!(out, "bucket size:\t").unwrap();
+    out.units_u64(u.bucket_size as u64 * 512);
+    write!(out, "\r\n").unwrap();
 
-    writeln!(out).unwrap();
+    out.indent_sub(2);
+    out.newline();
 }
 
 fn dev_leaving_sectors(entries: &[AccountingEntry], dev_idx: u32) -> u64 {
