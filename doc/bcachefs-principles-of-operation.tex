@@ -577,14 +577,89 @@ btree we leave a key that points to the indirect extent in the reflink btree,
 meaning that we now have to do two btree lookups to read from that data instead
 of just one.
 
+\subsubsection{On-disk representation}
+
+In the extents btree, a \texttt{KEY\_TYPE\_reflink\_p} replaces the original
+extent. It contains an index (\texttt{REFLINK\_P\_IDX}, 56 bits) pointing
+into the reflink btree (ID 7), plus \texttt{front\_pad} and
+\texttt{back\_pad} fields. In the reflink btree, a
+\texttt{KEY\_TYPE\_reflink\_v} stores the actual data pointers, CRCs, and
+compression metadata (identical to a regular \texttt{KEY\_TYPE\_extent})
+preceded by a 64-bit reference count.
+
+The pad fields exist because copygc or reconcile may split an indirect extent
+into fragments. Without the pads, fragments outside the pointer's nominal
+range would have their refcounts leaked. The pads remember the full range
+originally referenced so that triggers walk all fragments when updating
+refcounts. If the indirect extent is missing in the live data range (e.g.
+due to corruption), fsck sets the \texttt{REFLINK\_P\_ERROR} flag on the
+pointer; gaps only in the padded region adjust the pad instead.
+
+The \texttt{reflink\_p} also carries a
+\texttt{REFLINK\_P\_MAY\_UPDATE\_OPTIONS} flag that controls whether IO path
+options (compression, checksum type, replicas, targets) may propagate from the
+referencing file to the shared indirect extent. This is a security boundary: a
+reflink copy of data owned by another user must not allow the copier to
+decrease replicas or change checksum settings on data they do not own.
+
+\subsubsection{Creation and lifecycle}
+
+When \texttt{cp --reflink} (or the \texttt{FICLONE} ioctl) creates a reflink,
+the source extent is converted in place. A new \texttt{KEY\_TYPE\_reflink\_v}
+is allocated at the end of the reflink btree (by seeking to
+\texttt{POS\_MAX}), containing the original data pointers and a refcount
+initialized to zero. The source extent is replaced with a
+\texttt{KEY\_TYPE\_reflink\_p}. If the source is already a
+\texttt{reflink\_p}, no conversion is needed. A new \texttt{reflink\_p} is
+then created in the destination file; btree triggers on the inserts increment
+the refcount.
+
+On insertion or deletion of a \texttt{reflink\_p}, the trigger walks the full
+referenced range (including pad) in the reflink btree and increments or
+decrements the refcount on each overlapping \texttt{reflink\_v} fragment,
+expanding the pads if the indirect extent is larger than expected (due to a
+prior split). Writing new data over a \texttt{reflink\_p} requires no special
+logic: the normal btree update inserts a regular \texttt{KEY\_TYPE\_extent},
+the overwrite trigger decrements the refcount, and when a
+\texttt{reflink\_v}'s refcount reaches zero, its trigger converts the key to
+\texttt{KEY\_TYPE\_deleted}, cascading through the normal extent trigger to
+free disk space and remove backpointers.
+
+Reflink is currently a one-way transformation: once an extent becomes
+indirect, it never converts back, even when the refcount drops to 1. The
+\texttt{reflink\_v} trigger fires at refcount 0 to delete the indirect
+extent, but does not de-indirect at refcount 1 because the trigger would
+need to walk transaction updates to find the sole remaining
+\texttt{reflink\_p}, and operations like \texttt{fcollapse} and
+\texttt{finsert} can cause transient refcount fluctuations (1 $\to$ 0
+$\to$ 1) within a single transaction as extents are moved around. With IO
+option propagation, de-indirecting at refcount 1 is becoming a more
+pressing concern, since a lone indirect extent with one reference still
+pays the cost of an extra btree lookup on every read.
+Additionally, \texttt{reflink\_p} keys are not merged during btree
+compaction because a merged pointer could span an unbounded number of
+\texttt{reflink\_v} fragments; merging requires triggers to walk pending
+transaction updates and diff overlapping \texttt{reflink\_p} ranges.
+
+\subsubsection{Interaction with snapshots}
+
+The reflink btree is not snapshot-aware: \texttt{reflink\_v} keys are shared
+across all snapshots. The \texttt{reflink\_p} keys in the extents btree are
+snapshot-aware, so when a file is snapshotted both subvolumes see the same
+\texttt{reflink\_p} keys through normal snapshot visibility. Writing to
+either subvolume creates a new extent in that snapshot and decrements the
+shared refcount; the other snapshot's \texttt{reflink\_p} is unchanged.
+
 \subsection{Inline data extents}
 
 bcachefs supports inline data extents, controlled by the \texttt{inline\_data}
 option (on by default). When the end of a file is being written and is smaller
 than \texttt{min(blocksize/2, 1024)} bytes, it will be written as an inline data
-extent. Inline data extents can also be reflinked (moved to the reflink btree
-with a refcount added): as a todo item we also intend to support compressed
-inline data extents.
+extent. Inline data extents can also be reflinked: the inline data is moved to
+the reflink btree as a \texttt{KEY\_TYPE\_indirect\_inline\_data} (which carries
+a refcount and the inline data bytes) and a \texttt{KEY\_TYPE\_reflink\_p} is
+left in the extents btree, following the same mechanics as regular extent
+reflinks.
 
 \subsection{Subvolumes and snapshots}
 
