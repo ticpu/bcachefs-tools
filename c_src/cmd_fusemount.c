@@ -32,6 +32,8 @@
 #include "init/error.h"
 #include "init/fs.h"
 
+#include "journal/journal.h"
+
 #include <linux/dcache.h>
 #include <linux/fs.h>
 
@@ -844,38 +846,21 @@ err:
 	free(buf);
 }
 
-#if 0
-/*
- * FUSE flush is essentially the close() call, however it is not guaranteed
- * that one flush happens per open/create.
- *
- * It doesn't have to do anything, and is mostly relevant for NFS-style
- * filesystems where close has some relationship to caching.
- */
 static void bcachefs_fuse_flush(fuse_req_t req, fuse_ino_t inum,
 				struct fuse_file_info *fi)
 {
-	struct bch_fs *c = fuse_req_userdata(req);
-}
-
-static void bcachefs_fuse_release(fuse_req_t req, fuse_ino_t inum,
-				  struct fuse_file_info *fi)
-{
-	struct bch_fs *c = fuse_req_userdata(req);
+	fuse_reply_err(req, 0);
 }
 
 static void bcachefs_fuse_fsync(fuse_req_t req, fuse_ino_t inum, int datasync,
 				struct fuse_file_info *fi)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
-}
 
-static void bcachefs_fuse_opendir(fuse_req_t req, fuse_ino_t inum,
-				  struct fuse_file_info *fi)
-{
-	struct bch_fs *c = fuse_req_userdata(req);
+	int ret = bch2_journal_flush(&c->journal);
+
+	fuse_reply_err(req, -ret);
 }
-#endif
 
 struct fuse_dir_context {
 	struct dir_context	ctx;
@@ -1145,10 +1130,8 @@ static const struct fuse_lowlevel_ops bcachefs_fuse_ops = {
 	.open		= bcachefs_fuse_open,
 	.read		= bcachefs_fuse_read,
 	.write		= bcachefs_fuse_write,
-	//.flush	= bcachefs_fuse_flush,
-	//.release	= bcachefs_fuse_release,
-	//.fsync	= bcachefs_fuse_fsync,
-	//.opendir	= bcachefs_fuse_opendir,
+	.flush		= bcachefs_fuse_flush,
+	.fsync		= bcachefs_fuse_fsync,
 	.readdir	= bcachefs_fuse_readdir,
 	//.readdirplus	= bcachefs_fuse_readdirplus,
 	//.releasedir	= bcachefs_fuse_releasedir,
