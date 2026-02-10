@@ -1085,12 +1085,150 @@ static const char *xattr_type_to_prefix(unsigned type)
 	return NULL;
 }
 
+#define BCACHEFS_XATTR_PREFIX		"user.bcachefs."
+#define BCACHEFS_XATTR_PREFIX_LEN	(sizeof(BCACHEFS_XATTR_PREFIX) - 1)
+#define BCACHEFS_EFFECTIVE_PREFIX	"user.bcachefs_effective."
+#define BCACHEFS_EFFECTIVE_PREFIX_LEN	(sizeof(BCACHEFS_EFFECTIVE_PREFIX) - 1)
+
+static int opt_to_inode_opt(int id)
+{
+	switch (id) {
+#define x(name, ...)				\
+	case Opt_##name: return Inode_opt_##name;
+	BCH_INODE_OPTS()
+#undef  x
+	default:
+		return -1;
+	}
+}
+
+static int bcachefs_fuse_xattr_get(struct bch_fs *c, subvol_inum inum,
+				   const char *name, char *buf, size_t size,
+				   bool effective)
+{
+	int opt_id = bch2_opt_lookup(name);
+	if (opt_id < 0 || !bch2_opt_is_inode_opt(opt_id))
+		return -EINVAL;
+
+	int inode_opt_id = opt_to_inode_opt(opt_id);
+	if (inode_opt_id < 0)
+		return -EINVAL;
+
+	struct bch_inode_unpacked bi;
+	int ret = bch2_inode_find_by_inum(c, inum, &bi);
+	if (ret)
+		return ret;
+
+	if (!effective &&
+	    !(bi.bi_fields_set & (1U << inode_opt_id)))
+		return -ENODATA;
+
+	struct bch_opts opts = bch2_inode_opts_to_opts(&bi);
+	if (!bch2_opt_defined_by_id(&opts, opt_id))
+		return -ENODATA;
+
+	const struct bch_option *opt = bch2_opt_table + opt_id;
+	u64 v = bch2_opt_get_by_id(&opts, opt_id);
+
+	CLASS(printbuf, out)();
+	bch2_opt_to_text(&out, c, c->disk_sb.sb, opt, v, 0);
+
+	if (out.allocation_failure)
+		return -ENOMEM;
+
+	if (buf) {
+		if ((size_t)out.pos > size)
+			return -ERANGE;
+		memcpy(buf, out.buf, out.pos);
+	}
+
+	return out.pos;
+}
+
+static int bcachefs_fuse_xattr_set(struct bch_fs *c, subvol_inum inum,
+				   const char *name, const char *value,
+				   size_t size)
+{
+	int opt_id = bch2_opt_lookup(name);
+	if (opt_id < 0 || !bch2_opt_is_inode_opt(opt_id))
+		return -EINVAL;
+
+	int inode_opt_id = opt_to_inode_opt(opt_id);
+	if (inode_opt_id < 0)
+		return -EINVAL;
+
+	const struct bch_option *opt = bch2_opt_table + opt_id;
+	bool defined = value != NULL;
+	u64 v = 0;
+
+	if (value) {
+		char *valbuf = malloc(size + 1);
+		if (!valbuf)
+			return -ENOMEM;
+		memcpy(valbuf, value, size);
+		valbuf[size] = '\0';
+
+		int ret = bch2_opt_parse(c, opt, valbuf, &v, NULL);
+		free(valbuf);
+		if (ret)
+			return ret;
+
+		ret = bch2_opt_hook_pre_set(c, NULL, inum.inum, opt_id, v, true);
+		if (ret)
+			return ret;
+	}
+
+	u64 store_v = defined ? v + 1 : 0;
+
+	CLASS(btree_trans, trans)(c);
+	int ret = commit_do(trans, NULL, NULL, 0, ({
+		CLASS(btree_iter_uninit, iter)(trans);
+		struct bch_inode_unpacked inode_u;
+		ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
+		if (ret)
+			goto set_err;
+
+		if (inode_opt_id == Inode_opt_casefold && defined) {
+			ret = bch2_inode_set_casefold(trans, inum, &inode_u, v);
+			if (ret)
+				goto set_err;
+		} else {
+			if (defined)
+				inode_u.bi_fields_set |= 1U << inode_opt_id;
+			else
+				inode_u.bi_fields_set &= ~(1U << inode_opt_id);
+			bch2_inode_opt_set(&inode_u, inode_opt_id, store_v);
+		}
+
+		inode_u.bi_ctime = bch2_current_time(c);
+set_err:
+		ret ?: bch2_inode_write(trans, &iter, &inode_u);
+	}));
+
+	if (!ret && defined)
+		bch2_opt_hook_post_set(c, NULL, inum.inum, opt_id, v);
+
+	return ret;
+}
+
 static void bcachefs_fuse_setxattr(fuse_req_t req, fuse_ino_t ino,
 				   const char *name, const char *value,
 				   size_t size, int flags)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
 	subvol_inum inum = map_root_ino(ino);
+
+	if (!strncmp(name, BCACHEFS_EFFECTIVE_PREFIX, BCACHEFS_EFFECTIVE_PREFIX_LEN)) {
+		fuse_reply_err(req, EOPNOTSUPP);
+		return;
+	}
+
+	if (!strncmp(name, BCACHEFS_XATTR_PREFIX, BCACHEFS_XATTR_PREFIX_LEN)) {
+		int ret = bcachefs_fuse_xattr_set(c, inum,
+				name + BCACHEFS_XATTR_PREFIX_LEN, value, size);
+		fuse_reply_err(req, -ret);
+		return;
+	}
 
 	unsigned type;
 	const char *short_name;
@@ -1114,6 +1252,28 @@ static void bcachefs_fuse_getxattr(fuse_req_t req, fuse_ino_t ino,
 {
 	struct bch_fs *c = fuse_req_userdata(req);
 	subvol_inum inum = map_root_ino(ino);
+
+	bool effective = !strncmp(name, BCACHEFS_EFFECTIVE_PREFIX,
+				  BCACHEFS_EFFECTIVE_PREFIX_LEN);
+	if (effective || !strncmp(name, BCACHEFS_XATTR_PREFIX,
+				  BCACHEFS_XATTR_PREFIX_LEN)) {
+		const char *opt_name = name + (effective
+			? BCACHEFS_EFFECTIVE_PREFIX_LEN
+			: BCACHEFS_XATTR_PREFIX_LEN);
+		char buf[256];
+		int ret = bcachefs_fuse_xattr_get(c, inum, opt_name,
+					size ? buf : NULL, size ? sizeof(buf) : 0,
+					effective);
+		if (ret < 0)
+			fuse_reply_err(req, -ret);
+		else if (size == 0)
+			fuse_reply_xattr(req, ret);
+		else if ((size_t)ret > size)
+			fuse_reply_err(req, ERANGE);
+		else
+			fuse_reply_buf(req, buf, ret);
+		return;
+	}
 
 	unsigned type;
 	const char *short_name;
@@ -1214,6 +1374,30 @@ static void bcachefs_fuse_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size)
 		0;
 	}));
 
+	if (!ret) {
+		struct bch_inode_unpacked bi;
+		ret = bch2_inode_find_by_inum(c, inum, &bi);
+		if (!ret) {
+			for (unsigned i = 0; i < Inode_opt_nr && !ret; i++) {
+				if (!(bi.bi_fields_set & (1U << i)))
+					continue;
+
+				size_t entry_len = BCACHEFS_XATTR_PREFIX_LEN +
+						   strlen(bch2_inode_opts[i]) + 1;
+				if (buf) {
+					if (used + entry_len > size) {
+						ret = -ERANGE;
+						break;
+					}
+					snprintf(buf + used, entry_len,
+						 "%s%s", BCACHEFS_XATTR_PREFIX,
+						 bch2_inode_opts[i]);
+				}
+				used += entry_len;
+			}
+		}
+	}
+
 	if (ret) {
 		fuse_reply_err(req, -ret);
 	} else if (size == 0) {
@@ -1230,6 +1414,18 @@ static void bcachefs_fuse_removexattr(fuse_req_t req, fuse_ino_t ino,
 {
 	struct bch_fs *c = fuse_req_userdata(req);
 	subvol_inum inum = map_root_ino(ino);
+
+	if (!strncmp(name, BCACHEFS_EFFECTIVE_PREFIX, BCACHEFS_EFFECTIVE_PREFIX_LEN)) {
+		fuse_reply_err(req, EOPNOTSUPP);
+		return;
+	}
+
+	if (!strncmp(name, BCACHEFS_XATTR_PREFIX, BCACHEFS_XATTR_PREFIX_LEN)) {
+		int ret = bcachefs_fuse_xattr_set(c, map_root_ino(ino),
+				name + BCACHEFS_XATTR_PREFIX_LEN, NULL, 0);
+		fuse_reply_err(req, -ret);
+		return;
+	}
 
 	unsigned type;
 	const char *short_name;
