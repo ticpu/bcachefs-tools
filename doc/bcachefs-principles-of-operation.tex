@@ -425,15 +425,38 @@ bcachefs supports Reed-Solomon erasure coding, the same algorithm used by
 most RAID5/6 implementations. Erasure coding is a per-inode option
 (\texttt{erasure\_code}), so it can be enabled on specific directories via
 \texttt{set-file-option} without affecting the rest of the filesystem. The
-desired redundancy is taken from the \texttt{data\_replicas} option; erasure
-coding of metadata is not supported.
+desired redundancy is taken from the \texttt{data\_replicas} option:
+\texttt{data\_replicas=2} yields one parity block (RAID-5 style),
+\texttt{data\_replicas=3} yields two (RAID-6 style), and
+\texttt{data\_replicas=1} disables erasure coding entirely. Parity is limited
+to at most two blocks. Erasure coding of metadata is not supported.
+
+Each block in a stripe is one bucket on one device. Stripe width is determined
+dynamically: all eligible devices in the target group are used, up to a maximum
+of 16 blocks per stripe. Eligible devices must be read-write, have nonzero
+durability, and share the same bucket size (the most common bucket size among
+candidates is chosen; devices with a different bucket size are excluded). The
+minimum is \texttt{redundancy + 2} devices (3 for RAID-5, 4 for RAID-6). With
+$n$ eligible devices, a stripe has $n - \mathrm{redundancy}$ data blocks and
+\texttt{redundancy} parity blocks, maximizing storage efficiency. There is no
+configuration to limit stripe width to a subset of available devices.
+
+Stripe fragmentation is tracked in the LRU btree. When all data blocks in a
+stripe become empty (sector count zero), the stripe is automatically deleted.
+Partially empty stripes are candidates for reuse: new stripe creation scans
+the fragmentation LRU for a stripe with matching parameters (same disk label,
+algorithm, and redundancy), copies the non-empty blocks into the new stripe,
+and fills the remaining slots with fresh data. This consolidation recovers
+space without a full copygc pass. Changing the \texttt{erasure\_code} option
+at runtime triggers reconcile to add or remove EC protection on existing data.
 
 In conventional RAID, the ``write hole'' is a significant problem: a small write
 within a stripe requires updating the P and Q (parity) blocks, and since those
 writes cannot be done atomically, a crash can leave parity inconsistent,
 corrupting reconstruct reads for unrelated data in the same stripe. ZFS avoids
 this by making every write a new stripe, but the resulting fragmentation hurts
-performance: metadata grows and IO becomes excessively fragmented.
+performance: reads of fragmented data are bounded by the latency of the slowest
+fragment, driving median latency toward tail latency.
 
 bcachefs takes advantage of copy-on-write to avoid both problems. Since
 updating stripes in place is the root cause, we simply never do it. And since
@@ -468,11 +491,12 @@ requesting EC will only be placed in a bucket already tagged for stripe
 membership, and non-EC writes will never use such buckets. This means a bug in
 stripe creation, parity computation, or extent updating is structurally scoped
 to EC-enabled data: non-EC extents never carry \texttt{stripe\_ptr} entries
-and are never read through EC reconstruction paths. If stripe creation fails
-partway (e.g.\ a crash between writing parity and updating extents), the extra
-replicas from the staging phase remain valid; the reconcile subsystem detects
-the incomplete state and retries. Btree nodes are never placed in EC buckets;
-this is explicitly checked and flagged as a filesystem inconsistency.
+and are never read through EC reconstruction paths. Btree nodes are never
+placed in EC buckets; this is explicitly checked and flagged as a filesystem
+inconsistency. If stripe creation fails partway (e.g.\ a crash between
+writing parity and updating extents), the extra replicas from the staging
+phase remain valid; the reconcile subsystem detects the incomplete state and
+retries.
 
 \subsubsection{Device labels and targets}
 
