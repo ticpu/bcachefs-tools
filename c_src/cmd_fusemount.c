@@ -28,14 +28,18 @@
 #include "fs/dirent.h"
 #include "fs/namei.h"
 #include "fs/inode.h"
+#include "fs/xattr.h"
 
 #include "init/error.h"
 #include "init/fs.h"
 
 #include "journal/journal.h"
 
+#include "snapshots/subvolume.h"
+
 #include <linux/dcache.h>
 #include <linux/fs.h>
+#include <linux/xattr.h>
 
 #include "src/rust_to_c.h"
 
@@ -1045,33 +1049,205 @@ static void bcachefs_fuse_statfs(fuse_req_t req, fuse_ino_t inum)
 	fuse_reply_statfs(req, &statbuf);
 }
 
-#if 0
-static void bcachefs_fuse_setxattr(fuse_req_t req, fuse_ino_t inum,
+struct xattr_ns {
+	const char	*prefix;
+	size_t		prefix_len;
+	unsigned	type;
+};
+
+static const struct xattr_ns xattr_namespaces[] = {
+	{ XATTR_USER_PREFIX,     XATTR_USER_PREFIX_LEN,     KEY_TYPE_XATTR_INDEX_USER },
+	{ XATTR_TRUSTED_PREFIX,  XATTR_TRUSTED_PREFIX_LEN,  KEY_TYPE_XATTR_INDEX_TRUSTED },
+	{ XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN, KEY_TYPE_XATTR_INDEX_SECURITY },
+	{ XATTR_SYSTEM_PREFIX,   XATTR_SYSTEM_PREFIX_LEN,   KEY_TYPE_XATTR_INDEX_POSIX_ACL_ACCESS },
+};
+
+static int parse_xattr_name(const char *full_name, unsigned *type, const char **short_name)
+{
+	for (unsigned i = 0; i < ARRAY_SIZE(xattr_namespaces); i++) {
+		if (!strncmp(full_name, xattr_namespaces[i].prefix,
+			     xattr_namespaces[i].prefix_len)) {
+			*type = xattr_namespaces[i].type;
+			*short_name = full_name + xattr_namespaces[i].prefix_len;
+			return 0;
+		}
+	}
+	return -EOPNOTSUPP;
+}
+
+static const char *xattr_type_to_prefix(unsigned type)
+{
+	for (unsigned i = 0; i < ARRAY_SIZE(xattr_namespaces); i++)
+		if (xattr_namespaces[i].type == type)
+			return xattr_namespaces[i].prefix;
+	return NULL;
+}
+
+static void bcachefs_fuse_setxattr(fuse_req_t req, fuse_ino_t ino,
 				   const char *name, const char *value,
 				   size_t size, int flags)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
+	subvol_inum inum = map_root_ino(ino);
+
+	unsigned type;
+	const char *short_name;
+	int ret = parse_xattr_name(name, &type, &short_name);
+	if (ret) {
+		fuse_reply_err(req, -ret);
+		return;
+	}
+
+	struct bch_inode_unpacked inode_u;
+	CLASS(btree_trans, trans)(c);
+	ret = commit_do(trans, NULL, NULL, 0,
+		bch2_xattr_set(trans, inum, &inode_u,
+			       short_name, value, size, type, flags));
+
+	fuse_reply_err(req, -ret);
 }
 
-static void bcachefs_fuse_getxattr(fuse_req_t req, fuse_ino_t inum,
+static void bcachefs_fuse_getxattr(fuse_req_t req, fuse_ino_t ino,
 				   const char *name, size_t size)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
+	subvol_inum inum = map_root_ino(ino);
 
-	fuse_reply_xattr(req, );
+	unsigned type;
+	const char *short_name;
+	int ret = parse_xattr_name(name, &type, &short_name);
+	if (ret) {
+		fuse_reply_err(req, -ret);
+		return;
+	}
+
+	struct bch_inode_unpacked bi;
+	ret = bch2_inode_find_by_inum(c, inum, &bi);
+	if (ret) {
+		fuse_reply_err(req, -ret);
+		return;
+	}
+
+	struct bch_hash_info hash_info;
+	ret = bch2_hash_info_init(c, &bi, &hash_info);
+	if (ret) {
+		fuse_reply_err(req, -ret);
+		return;
+	}
+
+	struct xattr_search_key search = X_SEARCH(type, short_name, strlen(short_name));
+
+	CLASS(btree_trans, trans)(c);
+	CLASS(btree_iter_uninit, iter)(trans);
+
+	struct bkey_s_c k;
+	ret = lockrestart_do(trans, ({
+		k = bch2_hash_lookup(trans, &iter, bch2_xattr_hash_desc, &hash_info,
+				     inum, &search, 0);
+		bkey_err(k);
+	}));
+
+	if (ret) {
+		if (bch2_err_matches(ret, ENOENT))
+			ret = -ENODATA;
+		fuse_reply_err(req, -ret);
+		return;
+	}
+
+	struct bkey_s_c_xattr xattr = bkey_s_c_to_xattr(k);
+	unsigned val_len = le16_to_cpu(xattr.v->x_val_len);
+
+	if (size == 0) {
+		fuse_reply_xattr(req, val_len);
+	} else if (size < val_len) {
+		fuse_reply_err(req, ERANGE);
+	} else {
+		fuse_reply_buf(req, xattr_val(xattr.v), val_len);
+	}
 }
 
-static void bcachefs_fuse_listxattr(fuse_req_t req, fuse_ino_t inum, size_t size)
+static void bcachefs_fuse_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
+	subvol_inum inum = map_root_ino(ino);
+	size_t used = 0;
+	char *buf = NULL;
+
+	if (size) {
+		buf = calloc(1, size);
+		if (!buf) {
+			fuse_reply_err(req, ENOMEM);
+			return;
+		}
+	}
+
+	CLASS(btree_trans, trans)(c);
+	int ret = for_each_btree_key_in_subvolume_max(trans, iter, BTREE_ID_xattrs,
+				POS(inum.inum, 0),
+				POS(inum.inum, U64_MAX),
+				inum.subvol, 0, k, ({
+		if (k.k->type != KEY_TYPE_xattr)
+			continue;
+
+		struct bkey_s_c_xattr xattr = bkey_s_c_to_xattr(k);
+		const char *prefix = xattr_type_to_prefix(xattr.v->x_type);
+		if (!prefix)
+			continue;
+
+		size_t prefix_len = strlen(prefix);
+		size_t entry_len = prefix_len + xattr.v->x_name_len + 1;
+
+		if (buf) {
+			if (used + entry_len > size) {
+				ret = -ERANGE;
+				break;
+			}
+			memcpy(buf + used, prefix, prefix_len);
+			memcpy(buf + used + prefix_len,
+			       xattr.v->x_name_and_value,
+			       xattr.v->x_name_len);
+			buf[used + prefix_len + xattr.v->x_name_len] = '\0';
+		}
+		used += entry_len;
+		0;
+	}));
+
+	if (ret) {
+		fuse_reply_err(req, -ret);
+	} else if (size == 0) {
+		fuse_reply_xattr(req, used);
+	} else {
+		fuse_reply_buf(req, buf, used);
+	}
+
+	free(buf);
 }
 
-static void bcachefs_fuse_removexattr(fuse_req_t req, fuse_ino_t inum,
+static void bcachefs_fuse_removexattr(fuse_req_t req, fuse_ino_t ino,
 				      const char *name)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
+	subvol_inum inum = map_root_ino(ino);
+
+	unsigned type;
+	const char *short_name;
+	int ret = parse_xattr_name(name, &type, &short_name);
+	if (ret) {
+		fuse_reply_err(req, -ret);
+		return;
+	}
+
+	struct bch_inode_unpacked inode_u;
+	CLASS(btree_trans, trans)(c);
+	ret = commit_do(trans, NULL, NULL, 0,
+		bch2_xattr_set(trans, inum, &inode_u,
+			       short_name, NULL, 0, type, XATTR_REPLACE));
+
+	if (bch2_err_matches(ret, ENOENT))
+		ret = -ENODATA;
+
+	fuse_reply_err(req, -ret);
 }
-#endif
 
 static void bcachefs_fuse_create(fuse_req_t req, fuse_ino_t dir_ino,
 				 const char *name, mode_t mode,
@@ -1137,10 +1313,10 @@ static const struct fuse_lowlevel_ops bcachefs_fuse_ops = {
 	//.releasedir	= bcachefs_fuse_releasedir,
 	//.fsyncdir	= bcachefs_fuse_fsyncdir,
 	.statfs		= bcachefs_fuse_statfs,
-	//.setxattr	= bcachefs_fuse_setxattr,
-	//.getxattr	= bcachefs_fuse_getxattr,
-	//.listxattr	= bcachefs_fuse_listxattr,
-	//.removexattr	= bcachefs_fuse_removexattr,
+	.setxattr	= bcachefs_fuse_setxattr,
+	.getxattr	= bcachefs_fuse_getxattr,
+	.listxattr	= bcachefs_fuse_listxattr,
+	.removexattr	= bcachefs_fuse_removexattr,
 	.create		= bcachefs_fuse_create,
 
 	/* posix locks: */
