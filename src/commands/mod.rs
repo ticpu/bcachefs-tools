@@ -13,6 +13,7 @@ pub mod top;
 
 pub use completions::completions;
 pub use attr::cmd_setattr;
+pub use attr::cmd_reflink_option_propagate;
 pub use counters::cmd_reset_counters;
 pub use device::{
     cmd_device_online, cmd_device_offline, cmd_device_remove, cmd_device_evacuate,

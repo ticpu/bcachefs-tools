@@ -178,6 +178,7 @@ fn main() -> ExitCode {
         },
         "reset-counters" => commands::cmd_reset_counters(args[1..].to_vec()).report(),
         "set-file-option" => commands::cmd_setattr(args[1..].to_vec()).report(),
+        "reflink-option-propagate" => commands::cmd_reflink_option_propagate(args[1..].to_vec()).report(),
         _ => c_command(args, symlink_cmd),
     }
 }

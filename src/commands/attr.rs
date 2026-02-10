@@ -8,6 +8,8 @@ use bch_bindgen::c;
 use rustix::fs::{XattrFlags, setxattr, removexattr};
 
 const BCHFS_IOC_REINHERIT_ATTRS: libc::c_ulong = 0x8008bc40;
+const BCHFS_IOC_SET_REFLINK_P_MAY_UPDATE_OPTS: libc::c_ulong = 0xbc41;
+const BCHFS_IOC_PROPAGATE_REFLINK_P_OPTS: libc::c_ulong = 0xbc42;
 const OPT_INODE: u32 = 4; // BIT(2)
 
 fn inode_opt_names() -> Vec<String> {
@@ -164,4 +166,75 @@ pub fn cmd_setattr(argv: Vec<String>) -> Result<()> {
         do_setattr(path, &opts, remove_all)?;
     }
     Ok(())
+}
+
+pub fn cmd_reflink_option_propagate(argv: Vec<String>) -> Result<()> {
+    let has_help = argv.iter().any(|a| a == "-h" || a == "--help");
+    let set_may_update = argv.iter().any(|a| a == "--set-may-update");
+    let files: Vec<&String> = argv[1..].iter()
+        .filter(|a| !a.starts_with('-'))
+        .collect();
+
+    if has_help || files.is_empty() {
+        println!("bcachefs reflink-option-propagate - propagate IO options to reflinked extents");
+        println!("Usage: bcachefs reflink-option-propagate [OPTIONS] <files>\n");
+        println!("Propagates each file's current IO options to its extents, including");
+        println!("indirect (reflinked) extents.\n");
+        println!("Options:");
+        println!("      --set-may-update         Enable option propagation on old reflink_p");
+        println!("                               extents that predate the may_update_options");
+        println!("                               flag. Requires CAP_SYS_ADMIN. Only needed");
+        println!("                               once per file for filesystems with reflinks");
+        println!("                               created before the flag was introduced.");
+        println!("  -h, --help                   Display this help and exit");
+        if has_help {
+            return Ok(());
+        }
+        return Err(anyhow!("Please supply one or more files"));
+    }
+
+    let mut errors = false;
+    for path in &files {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{}: open error: {}", path, e);
+                errors = true;
+                continue;
+            }
+        };
+
+        let fd = file.as_raw_fd();
+
+        if set_may_update {
+            let ret = unsafe {
+                libc::ioctl(fd, BCHFS_IOC_SET_REFLINK_P_MAY_UPDATE_OPTS)
+            };
+            if ret < 0 {
+                eprintln!("{}: set may_update_opts: {}", path, std::io::Error::last_os_error());
+                errors = true;
+                continue;
+            }
+        }
+
+        let ret = unsafe {
+            libc::ioctl(fd, BCHFS_IOC_PROPAGATE_REFLINK_P_OPTS)
+        };
+        if ret < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EPERM) {
+                eprintln!("{}: file has reflink_p extents without may_update_options set;\n\
+                           rerun as root with --set-may-update", path);
+            } else {
+                eprintln!("{}: propagate reflink opts: {}", path, e);
+            }
+            errors = true;
+        }
+    }
+
+    if errors {
+        Err(anyhow!("some files had errors"))
+    } else {
+        Ok(())
+    }
 }
