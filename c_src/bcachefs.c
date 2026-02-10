@@ -98,6 +98,7 @@ void bcachefs_usage(void)
 	     "\n"
 	     "Commands for operating on files in a bcachefs filesystem:\n"
 	     "  set-file-option          Set various attributes on files or directories\n"
+	     "  reflink-option-propagate Propagate IO options to reflinked extents\n"
 	     "\n"
 	     "Debug:\n"
 	     "These commands work on offline, unmounted filesystems\n"
