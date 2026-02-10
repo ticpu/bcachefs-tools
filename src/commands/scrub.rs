@@ -4,7 +4,7 @@ use std::process;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 use bch_bindgen::c::{
     bch_data_type, bch_ioctl_data, bch_ioctl_data_event_ret, bch_ioctl_data_progress,
 };
@@ -109,7 +109,7 @@ pub fn scrub(argv: Vec<String>) -> Result<()> {
     };
 
     let handle = BcachefsHandle::open(&cli.filesystem)
-        .map_err(|e| anyhow!("Failed to open filesystem '{}': {}", cli.filesystem, e))?;
+        .with_context(|| format!("opening filesystem '{}'", cli.filesystem))?;
 
     let sysfs_path = sysfs_path_from_fd(handle.sysfs_fd())?;
     let devices = fs_get_devices(&sysfs_path)?;

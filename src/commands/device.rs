@@ -4,7 +4,7 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bch_bindgen::c::{
     bch_data_type::*,
     bch_member_state::*,
@@ -21,7 +21,7 @@ use crate::wrappers::sysfs::bcachefs_kernel_version;
 /// Open a filesystem by block device path and return its handle + device index.
 fn open_dev(path: &str) -> Result<(BcachefsHandle, u32)> {
     let handle = BcachefsHandle::open(path)
-        .map_err(|e| anyhow!("Failed to open filesystem for '{}': {}", path, e))?;
+        .with_context(|| format!("opening filesystem for '{}'", path))?;
     let dev_idx = handle.dev_idx();
     if dev_idx < 0 {
         return Err(anyhow!("'{}' does not appear to be a block device member", path));
@@ -37,7 +37,7 @@ fn resolve_dev(handle: &BcachefsHandle, dev_str: &str) -> Result<u32> {
     }
 
     let dev_handle = BcachefsHandle::open(dev_str)
-        .map_err(|e| anyhow!("Error opening '{}': {}", dev_str, e))?;
+        .with_context(|| format!("opening '{}'", dev_str))?;
 
     if handle.uuid() != dev_handle.uuid() {
         return Err(anyhow!("{} does not appear to be a member of this filesystem", dev_str));
@@ -55,7 +55,7 @@ fn resolve_dev(handle: &BcachefsHandle, dev_str: &str) -> Result<u32> {
 fn open_dev_by_path_or_index(device: &str, fs_path: Option<&str>) -> Result<(BcachefsHandle, u32)> {
     if let Some(fs_path) = fs_path {
         let handle = BcachefsHandle::open(fs_path)
-            .map_err(|e| anyhow!("Failed to open filesystem '{}': {}", fs_path, e))?;
+            .with_context(|| format!("opening filesystem '{}'", fs_path))?;
         let dev_idx = resolve_dev(&handle, device)?;
         Ok((handle, dev_idx))
     } else if device.parse::<u32>().is_err() {
@@ -76,11 +76,11 @@ pub fn cmd_device_online(argv: Vec<String>) -> Result<()> {
     let cli = OnlineCli::parse_from(argv);
 
     let handle = BcachefsHandle::open(&cli.device)
-        .map_err(|e| anyhow!("Failed to open filesystem for '{}': {}", cli.device, e))?;
+        .with_context(|| format!("opening filesystem for '{}'", cli.device))?;
 
     let dev_path = path_to_cstr(&cli.device);
     handle.disk_online(&dev_path)
-        .map_err(|e| anyhow!("Failed to online device '{}': {}", cli.device, e))
+        .with_context(|| format!("onlining device '{}'", cli.device))
 }
 
 #[derive(Parser, Debug)]
@@ -100,7 +100,7 @@ pub fn cmd_device_offline(argv: Vec<String>) -> Result<()> {
 
     let flags = if cli.force { BCH_FORCE_IF_DEGRADED } else { 0 };
     handle.disk_offline(dev_idx, flags)
-        .map_err(|e| anyhow!("Failed to offline device '{}': {}", cli.device, e))
+        .with_context(|| format!("offlining device '{}'", cli.device))
 }
 
 #[derive(Parser, Debug)]
@@ -136,7 +136,7 @@ pub fn cmd_device_remove(argv: Vec<String>) -> Result<()> {
         &cli.device, cli.path.as_deref())?;
 
     handle.disk_remove(dev_idx, flags)
-        .map_err(|e| anyhow!("Failed to remove device '{}': {}", cli.device, e))
+        .with_context(|| format!("removing device '{}'", cli.device))
 }
 
 fn parse_member_state(s: &str) -> Result<u32> {
@@ -159,7 +159,7 @@ fn parse_human_size(s: &str) -> Result<u64> {
 
 fn block_device_size(dev: &str) -> Result<u64> {
     let f = std::fs::File::open(dev)
-        .map_err(|e| anyhow!("error opening {}: {}", dev, e))?;
+        .with_context(|| format!("opening {}", dev))?;
     use std::os::unix::io::AsRawFd;
     let mut size: u64 = 0;
     // BLKGETSIZE64 = _IOR(0x12, 114, size_t)
@@ -205,7 +205,7 @@ pub fn cmd_device_set_state(argv: Vec<String>) -> Result<()> {
         &cli.device, cli.path.as_deref())?;
 
     handle.disk_set_state(dev_idx, new_state, flags)
-        .map_err(|e| anyhow!("Failed to set device state: {}", e))
+        .context("setting device state")
 }
 
 #[derive(Parser, Debug)]
@@ -235,7 +235,7 @@ pub fn cmd_device_resize(argv: Vec<String>) -> Result<bool> {
     let size_sectors = size_bytes >> 9;
 
     let usage = handle.dev_usage(dev_idx)
-        .map_err(|e| anyhow!("Failed to query device usage: {}", e))?;
+        .context("querying device usage")?;
     let nbuckets = size_sectors / usage.bucket_size as u64;
 
     if nbuckets < usage.nr_buckets {
@@ -244,7 +244,7 @@ pub fn cmd_device_resize(argv: Vec<String>) -> Result<bool> {
 
     println!("resizing {} to {} buckets", cli.device, nbuckets);
     handle.disk_resize(dev_idx, nbuckets)
-        .map_err(|e| anyhow!("Failed to resize device: {}", e))?;
+        .context("resizing device")?;
     Ok(true)
 }
 
@@ -272,12 +272,12 @@ pub fn cmd_device_resize_journal(argv: Vec<String>) -> Result<bool> {
     let size_sectors = size_bytes >> 9;
 
     let usage = handle.dev_usage(dev_idx)
-        .map_err(|e| anyhow!("Failed to query device usage: {}", e))?;
+        .context("querying device usage")?;
     let nbuckets = size_sectors / usage.bucket_size as u64;
 
     println!("resizing journal on {} to {} buckets", cli.device, nbuckets);
     handle.disk_resize_journal(dev_idx, nbuckets)
-        .map_err(|e| anyhow!("Failed to resize journal: {}", e))?;
+        .context("resizing journal")?;
     Ok(true)
 }
 
@@ -313,21 +313,21 @@ pub fn cmd_device_evacuate(argv: Vec<String>) -> Result<()> {
     let (handle, dev_idx) = open_dev(&cli.device)?;
 
     let usage = handle.dev_usage(dev_idx)
-        .map_err(|e| anyhow!("Failed to query device usage: {}", e))?;
+        .context("querying device usage")?;
 
     if usage.state == BCH_MEMBER_STATE_rw as u8 {
         println!("Setting {} readonly", cli.device);
         handle.disk_set_state(dev_idx, BCH_MEMBER_STATE_ro as u32, BCH_FORCE_IF_DEGRADED)
-            .map_err(|e| anyhow!("Failed to set device readonly: {}", e))?;
+            .context("setting device readonly")?;
     }
 
     println!("Setting {} evacuating", cli.device);
     handle.disk_set_state(dev_idx, BCH_MEMBER_STATE_evacuating as u32, BCH_FORCE_IF_DEGRADED)
-        .map_err(|e| anyhow!("Failed to set device evacuating: {}", e))?;
+        .context("setting device evacuating")?;
 
     loop {
         let usage = handle.dev_usage(dev_idx)
-            .map_err(|e| anyhow!("Failed to query device usage: {}", e))?;
+            .context("querying device usage")?;
 
         let mut data_sectors: u64 = 0;
         for (i, dt) in usage.data_types.iter().enumerate() {

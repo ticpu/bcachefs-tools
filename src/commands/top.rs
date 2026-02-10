@@ -6,7 +6,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 use bch_bindgen::c::{bch_counters_flags, bch_ioctl_query_counters};
 use bch_bindgen::c::bch_persistent_counters::BCH_COUNTER_NR;
 use clap::Parser;
@@ -273,7 +273,7 @@ pub fn top(argv: Vec<String>) -> Result<()> {
 
     let fs_arg = cli.filesystem.as_deref().unwrap_or(".");
     let handle = BcachefsHandle::open(fs_arg)
-        .map_err(|e| anyhow!("Failed to open filesystem '{}': {}", fs_arg, e))?;
+        .with_context(|| format!("opening filesystem '{}'", fs_arg))?;
 
     run_interactive(handle, cli.human_readable)
 }

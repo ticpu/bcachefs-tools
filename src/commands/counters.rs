@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bch_bindgen::c;
 use bch_bindgen::c::bch_degraded_actions;
 use bch_bindgen::c::bch_persistent_counters::BCH_COUNTER_NR;
@@ -58,7 +58,7 @@ pub fn cmd_reset_counters(argv: Vec<String>) -> Result<()> {
     opt_set!(fs_opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
 
     let fs = Fs::open(&devs, fs_opts)
-        .map_err(|e| anyhow!("Error opening filesystem: {}", e))?;
+        .context("opening filesystem")?;
 
     unsafe {
         let c = fs.raw;
