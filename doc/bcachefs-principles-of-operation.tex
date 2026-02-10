@@ -1713,7 +1713,7 @@ Every journal write (\texttt{struct jset}) contains a list of entries:
 
 \subsection{Btrees}
 
-bcachefs uses 27 separate btrees for different data types, each identified by a
+bcachefs uses 28 separate btrees for different data types, each identified by a
 numeric ID. Below is the complete list:
 
 \begin{longtable}{r l p{3.2in}}
@@ -1746,6 +1746,7 @@ numeric ID. Below is the complete list:
 24 & reconcile\_work\_phys & Physical reconcile work queue \\
 25 & reconcile\_hipri\_phys & Physical high priority reconcile work \\
 26 & bucket\_to\_stripe   & Bucket to stripe multi-mapping \\
+27 & stripe\_backpointers & Stripe backpointers for repair on invalid devices (write-buffered) \\
 \end{longtable}
 
 Btrees marked as ``snapshot-aware'' include a snapshot ID in every key position,
