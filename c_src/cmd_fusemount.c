@@ -32,6 +32,7 @@
 #include "init/fs.h"
 
 #include <linux/dcache.h>
+#include <linux/fs.h>
 
 #include "src/rust_to_c.h"
 
@@ -326,14 +327,50 @@ static void bcachefs_fuse_rename(fuse_req_t req,
 		 "bcachefs_fuse_rename(%llu, %s, %llu, %s, %x)\n",
 		 src_dir.inum, srcname, dst_dir.inum, dstname, flags);
 
-	/* XXX handle overwrites */
+	if (flags & ~(RENAME_NOREPLACE|RENAME_EXCHANGE)) {
+		fuse_reply_err(req, EINVAL);
+		return;
+	}
+
+	enum bch_rename_mode mode;
+
+	if (flags & RENAME_EXCHANGE) {
+		mode = BCH_RENAME_EXCHANGE;
+	} else {
+		struct bch_inode_unpacked dir_u;
+		ret = bch2_inode_find_by_inum(c, dst_dir, &dir_u);
+		if (ret) {
+			fuse_reply_err(req, -ret);
+			return;
+		}
+
+		struct bch_hash_info hash_info;
+		ret = bch2_hash_info_init(c, &dir_u, &hash_info);
+		if (ret) {
+			fuse_reply_err(req, -ret);
+			return;
+		}
+
+		subvol_inum dst_inum;
+		ret = bch2_dirent_lookup(c, dst_dir, &hash_info, &dst_name, &dst_inum);
+		if (!ret) {
+			if (flags & RENAME_NOREPLACE) {
+				fuse_reply_err(req, EEXIST);
+				return;
+			}
+			mode = BCH_RENAME_OVERWRITE;
+		} else {
+			mode = BCH_RENAME;
+		}
+	}
+
 	ret = bch2_trans_commit_do(c, NULL, NULL, 0,
 		bch2_rename_trans(trans,
 				  src_dir, &src_dir_u,
 				  dst_dir, &dst_dir_u,
 				  &src_inode_u, &dst_inode_u,
 				  &src_name, &dst_name,
-				  BCH_RENAME));
+				  mode));
 
 	fuse_reply_err(req, -ret);
 }
