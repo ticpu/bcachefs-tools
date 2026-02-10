@@ -38,6 +38,7 @@
 #include "snapshots/subvolume.h"
 
 #include <linux/dcache.h>
+#include <linux/falloc.h>
 #include <linux/fs.h>
 #include <linux/xattr.h>
 
@@ -937,7 +938,8 @@ static int fuse_filldir(struct dir_context *_ctx,
 	return 0;
 }
 
-static bool handle_dots(struct fuse_dir_context *ctx, fuse_ino_t dir)
+static bool handle_dots(struct fuse_dir_context *ctx, fuse_ino_t dir,
+			fuse_ino_t parent)
 {
 	if (ctx->ctx.pos == 0) {
 		if (fuse_filldir(&ctx->ctx, ".", 1, ctx->ctx.pos,
@@ -948,7 +950,7 @@ static bool handle_dots(struct fuse_dir_context *ctx, fuse_ino_t dir)
 
 	if (ctx->ctx.pos == 1) {
 		if (fuse_filldir(&ctx->ctx, "..", 2, ctx->ctx.pos,
-				 /*TODO: parent*/ 1, DT_DIR) < 0)
+				 parent, DT_DIR) < 0)
 			return false;
 		ctx->ctx.pos = 2;
 	}
@@ -985,7 +987,7 @@ static void bcachefs_fuse_readdir(fuse_req_t req, fuse_ino_t dir_ino,
 		goto reply;
 	}
 
-	if (!handle_dots(&ctx, dir.inum))
+	if (!handle_dots(&ctx, dir.inum, unmap_root_ino(bi.bi_dir)))
 		goto reply;
 
 	struct bch_hash_info dir_hash;
@@ -1273,21 +1275,40 @@ err:
 	fuse_reply_err(req, -ret);
 }
 
-#if 0
-static void bcachefs_fuse_write_buf(fuse_req_t req, fuse_ino_t inum,
-				    struct fuse_bufvec *bufv, off_t off,
-				    struct fuse_file_info *fi)
-{
-	struct bch_fs *c = fuse_req_userdata(req);
-}
-
-static void bcachefs_fuse_fallocate(fuse_req_t req, fuse_ino_t inum, int mode,
+static void bcachefs_fuse_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
 				    off_t offset, off_t length,
 				    struct fuse_file_info *fi)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
+	subvol_inum inum = map_root_ino(ino);
+
+	if (mode & ~FALLOC_FL_KEEP_SIZE) {
+		fuse_reply_err(req, EOPNOTSUPP);
+		return;
+	}
+
+	u64 end = offset + length;
+
+	CLASS(btree_trans, trans)(c);
+	int ret = commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+		CLASS(btree_iter_uninit, iter)(trans);
+		struct bch_inode_unpacked inode_u;
+		ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
+		if (ret)
+			goto err;
+
+		if (!(mode & FALLOC_FL_KEEP_SIZE) && end > inode_u.bi_size) {
+			inode_u.bi_size = end;
+			inode_u.bi_mtime = bch2_current_time(c);
+			inode_u.bi_ctime = bch2_current_time(c);
+		}
+err:
+		ret ?:
+		bch2_inode_write(trans, &iter, &inode_u);
+	}));
+
+	fuse_reply_err(req, -ret);
 }
-#endif
 
 static const struct fuse_lowlevel_ops bcachefs_fuse_ops = {
 	.init		= bcachefs_fuse_init,
@@ -1324,8 +1345,7 @@ static const struct fuse_lowlevel_ops bcachefs_fuse_ops = {
 	.getlk		= bcachefs_fuse_getlk,
 	.setlk		= bcachefs_fuse_setlk,
 #endif
-	//.write_buf	= bcachefs_fuse_write_buf,
-	//.fallocate	= bcachefs_fuse_fallocate,
+	.fallocate	= bcachefs_fuse_fallocate,
 
 };
 
