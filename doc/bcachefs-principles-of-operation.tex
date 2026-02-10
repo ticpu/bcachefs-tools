@@ -600,7 +600,11 @@ The \texttt{reflink\_p} also carries a
 options (compression, checksum type, replicas, targets) may propagate from the
 referencing file to the shared indirect extent. This is a security boundary: a
 reflink copy of data owned by another user must not allow the copier to
-decrease replicas or change checksum settings on data they do not own.
+decrease replicas or change checksum settings on data they do not own. At
+creation time, the source file's \texttt{reflink\_p} gets this flag set, but
+the destination's does not (the VFS layer does not yet pass down the
+permission context needed to determine whether the copier has write access to
+the source).
 
 \subsubsection{Creation and lifecycle}
 
@@ -640,6 +644,36 @@ Additionally, \texttt{reflink\_p} keys are not merged during btree
 compaction because a merged pointer could span an unbounded number of
 \texttt{reflink\_v} fragments; merging requires triggers to walk pending
 transaction updates and diff overlapping \texttt{reflink\_p} ranges.
+
+\subsubsection{IO option propagation}
+
+A \texttt{reflink\_v} has no backpointer to its owning inode, so it cannot
+look up per-inode IO options at read time. Instead, the indirect extent
+embeds a \texttt{bch\_extent\_reconcile} entry that stores the desired IO
+options (compression, checksum type, replicas, targets) alongside
+\texttt{*\_from\_inode} flags recording which options came from a per-inode
+setting rather than the filesystem default. At creation time no reconcile
+entry is added; the data is simply copied verbatim from the source extent.
+
+When reconcile scans the extents btree and encounters a \texttt{reflink\_p}
+with \texttt{REFLINK\_P\_MAY\_UPDATE\_OPTIONS} set, it follows through to
+the corresponding \texttt{reflink\_v} keys in the reflink btree and updates
+their embedded reconcile entries with the referencing inode's current
+options. If the on-disk data does not match (e.g. the inode now requests
+zstd compression but the data is uncompressed), the reconcile entry's
+\texttt{need\_rb} bits are set and the data is scheduled for background
+rewrite. Without the flag, reconcile does not propagate that
+\texttt{reflink\_p}'s inode options to the indirect extent.
+
+The \texttt{reflink\_v} can only hold one set of IO options at a time. Since
+only the source file's \texttt{reflink\_p} currently gets the
+\texttt{MAY\_UPDATE\_OPTIONS} flag, there is no conflict when multiple files
+reference the same indirect extent: the source file's options take
+precedence, and other referencing files cannot influence the indirect
+extent's IO path behavior. The read path always uses the CRC and compression
+metadata stored in the \texttt{reflink\_v}'s extent entries (reflecting how
+the data was actually written), regardless of the referencing file's current
+options; the referencing inode's options only affect promote decisions.
 
 \subsubsection{Interaction with snapshots}
 
