@@ -58,9 +58,7 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "dump" => c::cmd_dump(argc, argv),
             "undump" => c::cmd_undump(argc, argv),
             "format" => c::cmd_format(argc, argv),
-            // fs subcommand dispatch is in Rust; only "usage" still routes here
-            // argv is ["bcachefs", "usage", ...]; skip "usage" for cmd_fs_usage
-            "fs" => c::cmd_fs_usage(argc - 1, argv.add(1)),
+            // fs subcommand dispatch is fully in Rust now
             "fsck" => c::cmd_fsck(argc, argv),
             "recovery-pass" => c::cmd_recovery_pass(argc, argv),
             "image" => c::image_cmds(argc, argv),
@@ -165,7 +163,7 @@ fn main() -> ExitCode {
         "fs" => match args.get(2).map(|s| s.as_str()) {
             Some("timestats") => commands::timestats(args[2..].to_vec()).report(),
             Some("top") => commands::top(args[2..].to_vec()).report(),
-            Some("usage") => c_command(args, symlink_cmd),
+            Some("usage") => commands::fs_usage::fs_usage(args[2..].to_vec()).report(),
             _ => {
                 println!("bcachefs fs - manage a running filesystem");
                 println!("Usage: bcachefs fs <usage|top|timestats> [OPTION]...\n");

@@ -4,6 +4,7 @@ pub mod attr;
 pub mod completions;
 pub mod counters;
 pub mod device;
+pub mod fs_usage;
 pub mod list;
 pub mod mount;
 pub mod opts;
