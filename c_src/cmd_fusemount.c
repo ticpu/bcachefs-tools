@@ -21,6 +21,7 @@
 
 #include "btree/iter.h"
 
+#include "data/io_misc.h"
 #include "data/read.h"
 #include "data/write.h"
 
@@ -189,8 +190,20 @@ static void bcachefs_fuse_setattr(fuse_req_t req, fuse_ino_t ino,
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_setattr(%llu, %x)\n", inum.inum, to_set);
 
+	int ret = 0;
+
+	if (to_set & FUSE_SET_ATTR_SIZE) {
+		u64 i_sectors_delta = 0;
+		ret = bch2_truncate(c, inum, attr->st_size, &i_sectors_delta);
+		if (ret) {
+			fuse_reply_err(req, -ret);
+			return;
+		}
+		to_set &= ~FUSE_SET_ATTR_SIZE;
+	}
+
 	CLASS(btree_trans, trans)(c);
-	int ret = commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+	ret = commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
 		u64 now = bch2_current_time(c);
 
 		CLASS(btree_iter_uninit, iter)(trans);
@@ -204,8 +217,6 @@ static void bcachefs_fuse_setattr(fuse_req_t req, fuse_ino_t ino,
 			inode_u.bi_uid	= attr->st_uid;
 		if (to_set & FUSE_SET_ATTR_GID)
 			inode_u.bi_gid	= attr->st_gid;
-		if (to_set & FUSE_SET_ATTR_SIZE)
-			inode_u.bi_size	= attr->st_size;
 		if (to_set & FUSE_SET_ATTR_ATIME)
 			inode_u.bi_atime = timespec_to_bch2_time(c, attr->st_atim);
 		if (to_set & FUSE_SET_ATTR_MTIME)
@@ -214,7 +225,7 @@ static void bcachefs_fuse_setattr(fuse_req_t req, fuse_ino_t ino,
 			inode_u.bi_atime = now;
 		if (to_set & FUSE_SET_ATTR_MTIME_NOW)
 			inode_u.bi_mtime = now;
-		/* TODO: CTIME? */
+		inode_u.bi_ctime = now;
 err:
 		ret ?:
 		bch2_inode_write(trans, &iter, &inode_u);
@@ -230,12 +241,11 @@ err:
 
 static int do_create(struct bch_fs *c, subvol_inum dir,
 		     const char *name, mode_t mode, dev_t rdev,
+		     uid_t uid, gid_t gid,
 		     struct bch_inode_unpacked *new_inode)
 {
 	struct qstr qstr = QSTR(name);
 	struct bch_inode_unpacked dir_u;
-	uid_t uid = 0;
-	gid_t gid = 0;
 
 	bch2_inode_init_early(c, new_inode);
 
@@ -253,13 +263,14 @@ static void bcachefs_fuse_mknod(fuse_req_t req, fuse_ino_t dir_ino,
 {
 	subvol_inum dir = map_root_ino(dir_ino);
 	struct bch_fs *c = fuse_req_userdata(req);
+	const struct fuse_ctx *ctx = fuse_req_ctx(req);
 	struct bch_inode_unpacked new_inode;
 	int ret;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_mknod(%llu, %s, %x, %x)\n",
 		 dir.inum, name, mode, (u32) rdev);
 
-	ret = do_create(c, dir, name, mode, rdev, &new_inode);
+	ret = do_create(c, dir, name, mode, rdev, ctx->uid, ctx->gid, &new_inode);
 	if (ret)
 		goto err;
 
@@ -724,6 +735,7 @@ static void bcachefs_fuse_symlink(fuse_req_t req, const char *link,
 {
 	subvol_inum dir = map_root_ino(dir_ino);
 	struct bch_fs *c = fuse_req_userdata(req);
+	const struct fuse_ctx *ctx = fuse_req_ctx(req);
 	struct bch_inode_unpacked new_inode;
 	size_t link_len = strlen(link);
 	int ret;
@@ -731,7 +743,7 @@ static void bcachefs_fuse_symlink(fuse_req_t req, const char *link,
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_symlink(%s, %llu, %s)\n",
 		 link, dir.inum, name);
 
-	ret = do_create(c, dir, name, S_IFLNK|S_IRWXUGO, 0, &new_inode);
+	ret = do_create(c, dir, name, S_IFLNK|S_IRWXUGO, 0, ctx->uid, ctx->gid, &new_inode);
 	if (ret)
 		goto err;
 
@@ -1061,13 +1073,14 @@ static void bcachefs_fuse_create(fuse_req_t req, fuse_ino_t dir_ino,
 {
 	subvol_inum dir = map_root_ino(dir_ino);
 	struct bch_fs *c = fuse_req_userdata(req);
+	const struct fuse_ctx *ctx = fuse_req_ctx(req);
 	struct bch_inode_unpacked new_inode;
 	int ret;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_create(%llu, %s, %x)\n",
 		 dir.inum, name, mode);
 
-	ret = do_create(c, dir, name, mode, 0, &new_inode);
+	ret = do_create(c, dir, name, mode, 0, ctx->uid, ctx->gid, &new_inode);
 	if (ret)
 		goto err;
 
