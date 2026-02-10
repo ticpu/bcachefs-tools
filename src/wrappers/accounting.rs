@@ -3,6 +3,7 @@ use std::ffi::CStr;
 use bch_bindgen::c;
 
 use super::handle::BcachefsHandle;
+use super::printbuf::Printbuf;
 use super::ioctl::bch_ioc_w;
 use super::sysfs::bcachefs_kernel_version;
 
@@ -264,30 +265,24 @@ fn parse_accounting_entries(data: &[u8]) -> Vec<AccountingEntry> {
     entries
 }
 
-/// Format a data type enum value as a string via bch2_prt_data_type.
-pub fn data_type_str(t: u8) -> String {
-    let mut buf = c::printbuf::new();
+/// Print a data type directly into a Printbuf via bch2_prt_data_type.
+pub fn prt_data_type(out: &mut Printbuf, t: u8) {
     unsafe {
-        c::bch2_prt_data_type(&mut buf, std::mem::transmute::<u32, c::bch_data_type>(t as u32));
-        CStr::from_ptr(buf.buf).to_string_lossy().to_string()
+        c::bch2_prt_data_type(out.as_raw(), std::mem::transmute::<u32, c::bch_data_type>(t as u32));
     }
 }
 
-/// Format a compression type enum value as a string via bch2_prt_compression_type.
-pub fn compression_type_str(t: u8) -> String {
-    let mut buf = c::printbuf::new();
+/// Print a compression type directly into a Printbuf via bch2_prt_compression_type.
+pub fn prt_compression_type(out: &mut Printbuf, t: u8) {
     unsafe {
-        c::bch2_prt_compression_type(&mut buf, std::mem::transmute::<u32, c::bch_compression_type>(t as u32));
-        CStr::from_ptr(buf.buf).to_string_lossy().to_string()
+        c::bch2_prt_compression_type(out.as_raw(), std::mem::transmute::<u32, c::bch_compression_type>(t as u32));
     }
 }
 
-/// Format a reconcile accounting type as a string via bch2_prt_reconcile_accounting_type.
-pub fn reconcile_type_str(t: u8) -> String {
-    let mut buf = c::printbuf::new();
+/// Print a reconcile accounting type directly into a Printbuf.
+pub fn prt_reconcile_type(out: &mut Printbuf, t: u8) {
     unsafe {
-        c::bch2_prt_reconcile_accounting_type(&mut buf, std::mem::transmute::<u32, c::bch_reconcile_accounting_type>(t as u32));
-        CStr::from_ptr(buf.buf).to_string_lossy().to_string()
+        c::bch2_prt_reconcile_accounting_type(out.as_raw(), std::mem::transmute::<u32, c::bch_reconcile_accounting_type>(t as u32));
     }
 }
 
