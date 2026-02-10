@@ -134,6 +134,7 @@ check, modify and correct any inconsistencies in the bcachefs filesystem.
 %{_sbindir}/mkfs.bcachefs
 %{_mandir}/man8/bcachefs.8*
 %{_udevrulesdir}/64-bcachefs.rules
+%{_datadir}/bash-completion/completions/bcachefs
 
 %if %{with fuse}
 # ----------------------------------------------------------------------------
