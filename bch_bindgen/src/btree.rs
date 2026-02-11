@@ -169,11 +169,13 @@ impl<'t> BtreeIter<'t> {
             Result<Option<BkeySC<'i>>, BchError> {
         unsafe {
             if flags.contains(BtreeIterFlags::SLOTS) {
-                bkey_s_c_to_result(c::bch2_btree_iter_peek_max(&mut self.raw, end))
-            } else if bkey_le(self.raw.pos, end) {
-                bkey_s_c_to_result(c::bch2_btree_iter_peek_slot(&mut self.raw))
+                if bkey_le(self.raw.pos, end) {
+                    bkey_s_c_to_result(c::bch2_btree_iter_peek_slot(&mut self.raw))
+                } else {
+                    Ok(None)
+                }
             } else {
-                Ok(None)
+                bkey_s_c_to_result(c::bch2_btree_iter_peek_max(&mut self.raw, end))
             }
         }
     }

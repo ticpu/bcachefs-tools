@@ -98,7 +98,7 @@ impl<'a, 'b> BkeySC<'a> {
                 KEY_TYPE_subvolume => subvolume(transmute(self.v)),
                 KEY_TYPE_snapshot => snapshot(transmute(self.v)),
                 KEY_TYPE_inode_v2 => inode_v2(transmute(self.v)),
-                KEY_TYPE_alloc_v3 => inode_v3(transmute(self.v)),
+                KEY_TYPE_alloc_v3 => alloc_v3(transmute(self.v)),
                 KEY_TYPE_set => set,
                 KEY_TYPE_lru => lru(transmute(self.v)),
                 KEY_TYPE_alloc_v4 => alloc_v4(transmute(self.v)),
