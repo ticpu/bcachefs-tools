@@ -302,13 +302,112 @@ fn replicas_durability(
     DurabilityDegraded { durability, minus_degraded }
 }
 
+/// Durability x degraded matrix: matrix[durability][degraded] = sectors
+type DurabilityMatrix = Vec<Vec<u64>>;
+
+fn durability_matrix_add(matrix: &mut DurabilityMatrix, durability: u32, degraded: u32, sectors: u64) {
+    while matrix.len() <= durability as usize {
+        matrix.push(Vec::new());
+    }
+    let row = &mut matrix[durability as usize];
+    while row.len() <= degraded as usize {
+        row.push(0);
+    }
+    row[degraded as usize] += sectors;
+}
+
+fn durability_matrix_to_text(out: &mut Printbuf, matrix: &DurabilityMatrix) {
+    let max_degraded = matrix.iter().map(|r| r.len()).max().unwrap_or(0);
+    if max_degraded == 0 { return; }
+
+    out.tabstops_reset();
+    out.tabstop_push(8);
+    out.tab();
+    for i in 0..max_degraded {
+        out.tabstop_push(12);
+        if i == 0 {
+            write!(out, "undegraded\r").unwrap();
+        } else {
+            write!(out, "-{}x\r", i).unwrap();
+        }
+    }
+    out.newline();
+
+    for (dur, row) in matrix.iter().enumerate() {
+        if row.is_empty() { continue; }
+        write!(out, "{}x:\t", dur).unwrap();
+        for val in row {
+            if *val != 0 {
+                out.units_sectors(*val);
+            }
+            out.tab_rjust();
+        }
+        out.newline();
+    }
+}
+
+/// EC entries grouped by stripe config: (nr_data, nr_parity) → [degraded] = sectors
+struct EcConfig {
+    nr_data:    u8,
+    nr_parity:  u8,
+    degraded:   Vec<u64>,  // [degraded_level] = sectors
+}
+
+fn ec_config_add(configs: &mut Vec<EcConfig>, nr_required: u8, nr_devs: u8, degraded: u32, sectors: u64) {
+    let nr_parity = nr_devs - nr_required;
+    let cfg = configs.iter_mut()
+        .find(|c| c.nr_data == nr_required && c.nr_parity == nr_parity);
+    let cfg = match cfg {
+        Some(c) => c,
+        None => {
+            configs.push(EcConfig { nr_data: nr_required, nr_parity, degraded: Vec::new() });
+            configs.last_mut().unwrap()
+        }
+    };
+    while cfg.degraded.len() <= degraded as usize {
+        cfg.degraded.push(0);
+    }
+    cfg.degraded[degraded as usize] += sectors;
+}
+
+fn ec_configs_to_text(out: &mut Printbuf, configs: &mut [EcConfig]) {
+    configs.sort_by_key(|c| (c.nr_data, c.nr_parity));
+
+    let max_degraded = configs.iter().map(|c| c.degraded.len()).max().unwrap_or(0);
+    if max_degraded == 0 { return; }
+
+    out.tabstops_reset();
+    out.tabstop_push(12);
+    out.tab();
+    for i in 0..max_degraded {
+        out.tabstop_push(12);
+        if i == 0 {
+            write!(out, "undegraded\r").unwrap();
+        } else {
+            write!(out, "-{}x\r", i).unwrap();
+        }
+    }
+    out.newline();
+
+    for cfg in configs.iter() {
+        write!(out, "{}+{}:\t", cfg.nr_data, cfg.nr_parity).unwrap();
+        for &val in &cfg.degraded {
+            if val != 0 {
+                out.units_sectors(val);
+            }
+            out.tab_rjust();
+        }
+        out.newline();
+    }
+}
+
 fn replicas_summary_to_text(
     out: &mut Printbuf,
     sorted: &[&AccountingEntry],
     devs: &[DevInfo],
 ) {
-    // Build durability x degraded matrix
-    let mut matrix: Vec<Vec<u64>> = Vec::new(); // [durability][degraded] = sectors
+    let mut replicated: DurabilityMatrix = Vec::new();
+    let mut ec_configs: Vec<EcConfig> = Vec::new();
     let mut cached: u64 = 0;
     let mut reserved: u64 = 0;
 
@@ -326,52 +425,27 @@ fn replicas_summary_to_text(
                 let d = replicas_durability(*nr_devs, *nr_required, dev_list, devs);
                 let degraded = d.durability - d.minus_degraded;
 
-                while matrix.len() <= d.durability as usize {
-                    matrix.push(Vec::new());
+                if *nr_required > 1 {
+                    ec_config_add(&mut ec_configs, *nr_required, *nr_devs, degraded, entry.counter(0));
+                } else {
+                    durability_matrix_add(&mut replicated, d.durability, degraded, entry.counter(0));
                 }
-                let row = &mut matrix[d.durability as usize];
-                while row.len() <= degraded as usize {
-                    row.push(0);
-                }
-                row[degraded as usize] += entry.counter(0);
             }
             _ => {}
         }
     }
 
-    write!(out, "\nData by durability desired and amount degraded:\n").unwrap();
+    let has_ec = !ec_configs.is_empty();
 
-    let max_degraded = matrix.iter().map(|r| r.len()).max().unwrap_or(0);
+    write!(out, "\n").unwrap();
+    if has_ec {
+        write!(out, "Replicated:\n").unwrap();
+    }
+    durability_matrix_to_text(out, &replicated);
 
-    if max_degraded > 0 {
-        // Header
-        out.tabstops_reset();
-        out.tabstop_push(8);
-        out.tab();
-        for i in 0..max_degraded {
-            out.tabstop_push(12);
-            if i == 0 {
-                write!(out, "undegraded\r").unwrap();
-            } else {
-                write!(out, "-{}x\r", i).unwrap();
-            }
-        }
-        out.newline();
-
-        // Rows
-        for (dur, row) in matrix.iter().enumerate() {
-            if row.is_empty() { continue; }
-
-            write!(out, "{}x:\t", dur).unwrap();
-
-            for val in row {
-                if *val != 0 {
-                    out.units_sectors(*val);
-                }
-                out.tab_rjust();
-            }
-            out.newline();
-        }
+    if has_ec {
+        write!(out, "\nErasure coded (data+parity):\n").unwrap();
+        ec_configs_to_text(out, &mut ec_configs);
     }
 
     if cached > 0 {
@@ -465,7 +539,7 @@ fn devs_usage_to_text(
             out.units_sectors(used);
 
             let pct = if capacity > 0 { used * 100 / capacity } else { 0 };
-            write!(out, "\r{:02}%\r", pct).unwrap();
+            write!(out, "\r{:>2}%\r", pct).unwrap();
 
             if d.leaving > 0 {
                 out.units_sectors(d.leaving);
@@ -488,7 +562,7 @@ fn dev_usage_full_to_text(out: &mut Printbuf, d: &DevContext) {
     let state = accounting::member_state_str(u.state);
     let pct = if capacity > 0 { used * 100 / capacity } else { 0 };
 
-    write!(out, "{} (device {}):\t{}\r{}\r    {:02}%\n", label, d.info.idx, d.info.dev, state, pct).unwrap();
+    write!(out, "{} (device {}):\t{}\r{}\r    {:>2}%\n", label, d.info.idx, d.info.dev, state, pct).unwrap();
 
     out.indent_add(2);
     write!(out, "\tdata\rbuckets\rfragmented\r\n").unwrap();
