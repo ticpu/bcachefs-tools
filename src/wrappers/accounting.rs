@@ -97,17 +97,17 @@ fn bpos_to_disk_accounting_pos(p: &c::bpos) -> DiskAccountingPos {
             compression_type: unsafe { std::mem::transmute(raw[1] as u32) },
         },
         BCH_DISK_ACCOUNTING_snapshot => {
-            // __packed __u32 id, stored big-endian in the swabbed bytes
-            let id = u32::from_be_bytes([raw[1], raw[2], raw[3], raw[4]]);
+            // After memcpy_swab, multi-byte fields are in native byte order
+            let id = u32::from_ne_bytes([raw[1], raw[2], raw[3], raw[4]]);
             DiskAccountingPos::Snapshot { id }
         }
         BCH_DISK_ACCOUNTING_btree => {
-            let id = u32::from_be_bytes([raw[1], raw[2], raw[3], raw[4]]);
+            let id = u32::from_ne_bytes([raw[1], raw[2], raw[3], raw[4]]);
             DiskAccountingPos::Btree { id }
         }
         BCH_DISK_ACCOUNTING_rebalance_work => DiskAccountingPos::RebalanceWork,
         BCH_DISK_ACCOUNTING_inum => {
-            let inum = u64::from_be_bytes([
+            let inum = u64::from_ne_bytes([
                 raw[1], raw[2], raw[3], raw[4],
                 raw[5], raw[6], raw[7], raw[8],
             ]);
@@ -117,7 +117,7 @@ fn bpos_to_disk_accounting_pos(p: &c::bpos) -> DiskAccountingPos {
             work_type: unsafe { std::mem::transmute(raw[1] as u32) },
         },
         BCH_DISK_ACCOUNTING_dev_leaving => {
-            let dev = u32::from_be_bytes([raw[1], raw[2], raw[3], raw[4]]);
+            let dev = u32::from_ne_bytes([raw[1], raw[2], raw[3], raw[4]]);
             DiskAccountingPos::DevLeaving { dev }
         }
         _ => DiskAccountingPos::Unknown(raw[0]),
