@@ -88,8 +88,8 @@ Rather than blocking on lock contention, when a transaction encounters a
 potential deadlock it drops all locks and restarts from the beginning. Deadlock
 detection is integrated into the lock acquisition path: before sleeping on a
 contended lock, the transaction checks for lock cycles and aborts if one is
-found. This restart-based approach avoids
-deadlocks entirely and keeps worst-case latency bounded, at the cost of
+found. This restart-based approach avoids deadlocks entirely and keeps
+worst-case latency bounded, at the cost of
 requiring all transaction code to be idempotent and prepared for restarts at any
 point. This idempotency requirement has a profound consequence for reliability:
 since every operation can be safely interrupted and restarted, the filesystem is
@@ -129,9 +129,14 @@ depended on.
 During btree node reads, bcachefs detects this situation: bsets (sorted key
 arrays within a node) whose journal sequence number is newer than the last
 successfully written journal entry indicate the btree node was written to disk
-but the corresponding journal entry was not. These sequences are blacklisted: recorded in the
-superblock so that they are never replayed, and the bsets referencing them are
-ignored until the btree node is next rewritten.
+but the corresponding journal entry was not. These sequences are blacklisted
+in the superblock (\texttt{bch\_sb\_field\_journal\_seq\_blacklist}), and
+bsets referencing them are ignored until the btree node is next rewritten.
+After an unclean shutdown, a padding of 64 sequence numbers past the last
+journal entry read is also blacklisted, to cover in-flight btree writes.
+Blacklisted sequences are never reused---the 64-bit counter simply skips
+past them. Blacklist entries are garbage collected once no btree node on disk
+references them.
 
 \subsubsection{Recovery passes}
 
@@ -161,9 +166,9 @@ depends on context:
 Recovery is split into two phases around the transition to read-write mode.
 Early passes run in-memory only, accumulating delayed metadata writes: reading
 btrees into memory, verifying btree topology, and reconstructing allocation
-state. Once the allocator and journal
-are initialized, the filesystem transitions to read-write and journal replay
-runs - followed by the heavier validation and repair passes that need to write.
+state. Once the allocator and journal are initialized, the filesystem
+transitions to read-write and journal replay runs - followed by the heavier
+validation and repair passes that need to write.
 
 The filesystem can schedule new recovery passes at any time, including during
 other recovery passes or normal operation, as soon as it notices something needs
@@ -498,9 +503,9 @@ buckets are written, the stripe key is committed to the stripes btree, and then
 the extra replicas are dropped from each extent individually. The effect is
 similar to full data journalling, producing an ideal on-disk layout. Since
 device write caches are only flushed on journal commit, the allocator can
-immediately return
-the extra-replica buckets to the write point for reuse, so the overhead of this
-full data journalling approach is negligible in practice.
+immediately return the extra-replica buckets to the write point for reuse,
+so the overhead of this full data journalling approach is negligible in
+practice.
 
 Erasure coding involves several btrees: the stripes btree (ID 6) stores stripe
 metadata and parity checksums, the \texttt{bucket\_to\_stripe} btree (ID 26)
@@ -1140,18 +1145,18 @@ $ getfattr -d -m '^bcachefs_effective\.' filename
 \end{verbatim} \end{quote}
 
 Options may be set via the extended attribute interface, but it is preferable to
-use the \texttt{bcachefs set-file-option} command as it will correctly propagate options
-recursively.
+use the \texttt{bcachefs set-file-option} command as it will correctly
+propagate options recursively.
 
 \subsection{Inode number sharding}
 
 On systems with many CPUs, inode number allocation can become a contention
 point: every file creation needs a new inode number, and a single global cursor
 serializes all CPUs. The \texttt{shard\_inode\_numbers\_bits} option (0-8,
-set at format time to the log2 of the number of online CPUs if not
-specified) partitions the inode number
-space by CPU ID, giving each CPU its own allocation range. This eliminates
-cross-CPU contention at the cost of non-sequential inode numbers.
+set at format time to the log2 of the number of online CPUs if not specified)
+partitions the inode number space by CPU ID, giving each CPU its own
+allocation range. This eliminates cross-CPU contention at the cost of
+non-sequential inode numbers.
 
 \subsection{Error actions}
 The \texttt{errors} option controls how the filesystem responds to metadata
