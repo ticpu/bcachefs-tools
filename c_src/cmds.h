@@ -17,8 +17,6 @@ int cmd_set_option(int argc, char *argv[]);
 
 int image_cmds(int argc, char *argv[]);
 
-int cmd_fs_usage(int argc, char *argv[]);
-
 int device_cmds(int argc, char *argv[]);
 
 int reconcile_cmds(int argc, char *argv[]);
