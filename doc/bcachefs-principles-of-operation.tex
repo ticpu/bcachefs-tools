@@ -1138,11 +1138,13 @@ overriding the filesystem-wide defaults. The per-inode options are:
 \texttt{inodes\_32bit}. Note that \texttt{casefold} and \texttt{inodes\_32bit}
 can only be toggled on empty directories.
 
-Options set on inodes (files and directories) are automatically inherited by
-their descendants, and inodes also record whether a given option was explicitly
-set or inherited from their parent. When renaming a directory would cause
-inherited attributes to change we fail the rename with -EXDEV, causing userspace
-to do the rename file by file so that inherited attributes stay consistent.
+Each inode stores its own copy of these options so that reads never need to
+walk parent directories. Each option has a separate ``defined'' flag that
+records whether the option was explicitly set on this inode; options without
+this flag are propagated from the parent directory on inode creation and rename.
+When renaming a directory would cause inherited attributes to change we fail the
+rename with -EXDEV, causing userspace to do the rename file by file so that
+inherited attributes stay consistent.
 
 Inode options are available as extended attributes. The options that have been
 explicitly set are available under the \texttt{bcachefs} namespace, and the
