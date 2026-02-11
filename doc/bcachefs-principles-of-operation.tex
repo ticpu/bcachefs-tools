@@ -47,7 +47,12 @@ The core of the architecture is a very high performance and very low latency b+
 tree, which also is not a conventional b+ tree but more of hybrid, taking
 concepts from compacting data structures: btree nodes are very large, log
 structured, and compacted (resorted) as necessary in memory. This means our b+
-trees are very shallow compared to other filesystems.
+trees are very shallow compared to other filesystems. Other COW filesystems use
+the Linux page cache for metadata, which limits them to 4K btree nodes; bcachefs
+manages its own btree node cache, so we can use 128K--256K nodes and tune
+reclaim independently of the page cache. At petabyte scale with spinning disks,
+deep btrees with 4K nodes mean more seeks per lookup and level-2 nodes too large
+to stay resident under page cache pressure.
 
 What this means for the end user is that since we require very few seeks or disk
 reads, filesystem latency is extremely good - especially cache cold filesystem
@@ -186,7 +191,12 @@ invalidate cached data and reuse disk space was a core design requirement. To
 make this possible the allocator divides the disk up into buckets, typically
 512k to 2M but possibly larger or smaller. Buckets and data pointers have
 generation numbers: we can reuse a bucket with cached data in it without finding
-and deleting all the data pointers by incrementing the generation number.
+and deleting all the data pointers by incrementing the generation number. The
+generation number mechanism was originally created for invalidating cached data,
+but it turned out to be valuable well beyond that: it makes bootstrapping
+allocation information during journal replay much more tractable, and it makes
+it possible to repair certain kinds of corruption that would be unrecoverable
+otherwise.
 
 In keeping with the copy-on-write theme of avoiding update in place wherever
 possible, we never rewrite or overwrite data within a bucket - when we allocate
