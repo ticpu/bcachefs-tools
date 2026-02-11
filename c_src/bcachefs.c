@@ -76,6 +76,8 @@ void bcachefs_usage(void)
 	     "  subvolume create         Create a new subvolume\n"
 	     "  subvolume delete         Delete an existing subvolume\n"
 	     "  subvolume snapshot       Create a snapshot\n"
+	     "  subvolume list           List subvolumes\n"
+	     "  subvolume list-snapshots List snapshots and their disk usage\n"
 	     "\n"
 	     "Commands for managing filesystem data:\n"
 	     "  reconcile status         Show status of background data processing\n"
