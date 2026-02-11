@@ -831,7 +831,11 @@ creation and a method for recursively listing subvolumes.
 bcachefs supports conventional user/group/project quotas. Quotas do not
 currently apply to snapshot subvolumes, because if a file changes ownership in
 the snapshot it would be ambiguous as to what quota data within that file
-should be charged to.
+should be charged to. Quota accounting resolves every inode through the master
+subvolume only, charging sectors and inode counts to the uid/gid/project
+recorded there. Writes to snapshot subvolumes bypass quota enforcement entirely.
+If there is no master subvolume for a snapshot tree, quota accounting for that
+tree is skipped.
 
 When a directory has a project ID set it is inherited automatically by
 descendants on creation and rename. When renaming a directory would cause the
