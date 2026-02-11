@@ -23,8 +23,12 @@ enum Field {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "usage", about = "Display detailed filesystem usage")]
+#[command(name = "usage", about = "Display detailed filesystem usage", disable_help_flag = true)]
 pub struct Cli {
+    /// Print help
+    #[arg(long = "help", action = clap::ArgAction::Help)]
+    _help: (),
+
     /// Comma-separated list of fields
     #[arg(short = 'f', long = "fields", value_delimiter = ',', value_enum)]
     fields: Vec<Field>,

@@ -132,8 +132,12 @@ fn fmt_counter(val: u64, sectors: bool, human_readable: bool) -> String {
 // CLI
 
 #[derive(Parser, Debug)]
-#[command(about = "Display runtime performance info")]
+#[command(about = "Display runtime performance info", disable_help_flag = true)]
 pub struct Cli {
+    /// Print help
+    #[arg(long = "help", action = clap::ArgAction::Help)]
+    _help: (),
+
     /// Human-readable units
     #[arg(short, long)]
     human_readable: bool,
