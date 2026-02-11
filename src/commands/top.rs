@@ -128,7 +128,6 @@ fn fmt_counter(val: u64, sectors: bool, human_readable: bool) -> String {
     }
 }
 
-
 // CLI
 
 #[derive(Parser, Debug)]

@@ -273,9 +273,9 @@ fn fs_usage_v1_to_text(
 
 // ──────────────────────────── Replicas summary ──────────────────────────────
 
-struct DurabilityDegraded {
+struct Durability {
     durability: u32,
-    minus_degraded: u32,
+    degraded: u32,
 }
 
 fn replicas_durability(
@@ -283,7 +283,7 @@ fn replicas_durability(
     nr_required: u8,
     dev_list: &[u8],
     devs: &[DevInfo],
-) -> DurabilityDegraded {
+) -> Durability {
     let mut durability: u32 = 0;
     let mut degraded: u32 = 0;
 
@@ -301,9 +301,7 @@ fn replicas_durability(
         durability = (nr_devs - nr_required + 1) as u32;
     }
 
-    let minus_degraded = durability.saturating_sub(degraded);
-
-    DurabilityDegraded { durability, minus_degraded }
+    Durability { durability, degraded }
 }
 
 /// Durability x degraded matrix: matrix[durability][degraded] = sectors
@@ -427,12 +425,11 @@ fn replicas_summary_to_text(
                 }
 
                 let d = replicas_durability(*nr_devs, *nr_required, dev_list, devs);
-                let degraded = d.durability - d.minus_degraded;
 
                 if *nr_required > 1 {
-                    ec_config_add(&mut ec_configs, *nr_required, *nr_devs, degraded, entry.counter(0));
+                    ec_config_add(&mut ec_configs, *nr_required, *nr_devs, d.degraded, entry.counter(0));
                 } else {
-                    durability_matrix_add(&mut replicated, d.durability, degraded, entry.counter(0));
+                    durability_matrix_add(&mut replicated, d.durability, d.degraded, entry.counter(0));
                 }
             }
             _ => {}

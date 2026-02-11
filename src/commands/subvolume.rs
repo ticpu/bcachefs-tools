@@ -370,7 +370,6 @@ fn format_time(sec: i64, _nsec: u32) -> String {
     }
 }
 
-
 fn snapshot_parent_str(fd: &OwnedFd, parent: u32) -> String {
     if parent == 0 {
         return String::new();

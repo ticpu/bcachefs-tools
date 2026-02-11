@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use bch_bindgen::bcachefs::bch_sb_handle;
+use bch_bindgen::bcachefs::{bch_key, bch_sb_handle};
 use bch_bindgen::c;
 use bch_bindgen::fs::Fs;
 use bch_bindgen::opt_set;
@@ -74,15 +74,7 @@ pub fn cmd_unlock(argv: Vec<String>) -> Result<()> {
     bail!("incorrect passphrase limit reached");
 }
 
-// ---- set-passphrase ----
-
-#[derive(Parser, Debug)]
-#[command(about = "Change passphrase on an existing (unmounted) filesystem")]
-pub struct SetPassphraseCli {
-    /// Devices (colon-separated or multiple arguments)
-    #[arg(required = true)]
-    devices: Vec<String>,
-}
+// ---- shared helpers for set/remove-passphrase ----
 
 fn parse_device_list(args: &[String]) -> Vec<PathBuf> {
     if args.len() == 1 && args[0].contains(':') {
@@ -105,44 +97,56 @@ unsafe fn fs_sb_handle(fs: &Fs) -> &bch_sb_handle {
     &(*fs.raw).disk_sb
 }
 
-pub fn cmd_set_passphrase(argv: Vec<String>) -> Result<()> {
-    let cli = SetPassphraseCli::parse_from(argv);
-    let devs = parse_device_list(&cli.devices);
-    let fs = open_nostart(&devs)?;
-
+/// Open filesystem, verify encryption is enabled, and verify the current passphrase.
+/// Returns the open filesystem and the decrypted raw key.
+fn open_and_verify(devs: &[PathBuf]) -> Result<(Fs, bch_key)> {
+    let fs = open_nostart(devs)?;
     let sb_handle = unsafe { fs_sb_handle(&fs) };
 
-    let crypt = sb_handle.sb().crypt();
-    if crypt.is_none() {
+    if sb_handle.sb().crypt().is_none() {
         bail!("Filesystem does not have encryption enabled");
     }
-    let crypt = crypt.unwrap();
 
-    // Get current key by prompting for the old passphrase
     let uuid = sb_handle.sb().uuid();
     let old_passphrase = Passphrase::new_from_prompt(&uuid)
         .context("reading current passphrase")?;
-    let (_passphrase_key, sb_key) = old_passphrase.check(sb_handle)
+    let (_, sb_key) = old_passphrase.check(sb_handle)
         .context("verifying current passphrase")?;
 
-    // Read new passphrase (prompted twice)
+    Ok((fs, sb_key.key))
+}
+
+/// Write a new encrypted key to the crypt superblock field.
+unsafe fn set_crypt_key(fs: &Fs, key: c::bch_encrypted_key) {
+    let sb_ptr = (*fs.raw).disk_sb.sb;
+    let crypt_ptr = c::bch2_sb_field_get_id(sb_ptr, c::bch_sb_field_type::BCH_SB_FIELD_crypt)
+        as *mut c::bch_sb_field_crypt;
+    (*crypt_ptr).key = key;
+}
+
+// ---- set-passphrase ----
+
+#[derive(Parser, Debug)]
+#[command(about = "Change passphrase on an existing (unmounted) filesystem")]
+pub struct SetPassphraseCli {
+    /// Devices (colon-separated or multiple arguments)
+    #[arg(required = true)]
+    devices: Vec<String>,
+}
+
+pub fn cmd_set_passphrase(argv: Vec<String>) -> Result<()> {
+    let cli = SetPassphraseCli::parse_from(argv);
+    let (fs, raw_key) = open_and_verify(&parse_device_list(&cli.devices))?;
+
     let new_passphrase = Passphrase::new_from_prompt_twice()
         .context("reading new passphrase")?;
 
-    // Re-encrypt the key with the new passphrase
-    let encrypted_key = new_passphrase.encrypt_key(sb_handle, crypt, &sb_key.key);
+    let sb_handle = unsafe { fs_sb_handle(&fs) };
+    let encrypted_key = new_passphrase.encrypt_key(sb_handle, &raw_key);
 
-    // Write the encrypted key to the crypt field
-    let sb_ptr = unsafe { (*fs.raw).disk_sb.sb };
-    let crypt_ptr = unsafe {
-        c::bch2_sb_field_get_id(sb_ptr, c::bch_sb_field_type::BCH_SB_FIELD_crypt)
-            as *mut c::bch_sb_field_crypt
-    };
-    unsafe { (*crypt_ptr).key = encrypted_key };
-
-    // Revoke old key from keyring and write superblock to all devices
     unsafe {
-        c::bch2_revoke_key(sb_ptr);
+        set_crypt_key(&fs, encrypted_key);
+        c::bch2_revoke_key((*fs.raw).disk_sb.sb);
         c::bch2_write_super(fs.raw);
     }
 
@@ -161,35 +165,10 @@ pub struct RemovePassphraseCli {
 
 pub fn cmd_remove_passphrase(argv: Vec<String>) -> Result<()> {
     let cli = RemovePassphraseCli::parse_from(argv);
-    let devs = parse_device_list(&cli.devices);
-    let fs = open_nostart(&devs)?;
+    let (fs, raw_key) = open_and_verify(&parse_device_list(&cli.devices))?;
 
-    let sb_handle = unsafe { fs_sb_handle(&fs) };
-
-    if sb_handle.sb().crypt().is_none() {
-        bail!("Filesystem does not have encryption enabled");
-    }
-
-    // Get current key by prompting for the old passphrase
-    let uuid = sb_handle.sb().uuid();
-    let old_passphrase = Passphrase::new_from_prompt(&uuid)
-        .context("reading current passphrase")?;
-    let (_passphrase_key, sb_key) = old_passphrase.check(sb_handle)
-        .context("verifying current passphrase")?;
-
-    // Store the key unencrypted (no passphrase)
-    let plaintext_key = unencrypted_key(&sb_key.key);
-
-    // Write the plaintext key to the crypt field
-    let sb_ptr = unsafe { (*fs.raw).disk_sb.sb };
-    let crypt_ptr = unsafe {
-        c::bch2_sb_field_get_id(sb_ptr, c::bch_sb_field_type::BCH_SB_FIELD_crypt)
-            as *mut c::bch_sb_field_crypt
-    };
-    unsafe { (*crypt_ptr).key = plaintext_key };
-
-    // Write superblock to all devices
     unsafe {
+        set_crypt_key(&fs, unencrypted_key(&raw_key));
         c::bch2_write_super(fs.raw);
     }
 

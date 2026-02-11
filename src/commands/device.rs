@@ -167,9 +167,9 @@ fn parse_human_size(s: &str) -> Result<u64> {
 }
 
 fn block_device_size(dev: &str) -> Result<u64> {
+    use std::os::unix::io::AsRawFd;
     let f = std::fs::File::open(dev)
         .with_context(|| format!("opening {}", dev))?;
-    use std::os::unix::io::AsRawFd;
     let mut size: u64 = 0;
     // BLKGETSIZE64 = _IOR(0x12, 114, size_t)
     const BLKGETSIZE64: libc::c_ulong = 0x80081272;

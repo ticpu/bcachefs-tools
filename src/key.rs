@@ -183,7 +183,7 @@ impl Passphrase {
     pub fn new(uuid: &Uuid) -> Result<Self> {
         match get_stdin_type() {
             StdinType::Terminal => Self::new_from_prompt(uuid),
-            StdinType::DevNull => Self::new_from_askpassword(uuid).unwrap_or_else(|err| Err(err)),
+            StdinType::DevNull => Self::new_from_askpassword(uuid)?,
             StdinType::Other => Self::new_from_stdin(),
         }
     }
@@ -285,9 +285,9 @@ impl Passphrase {
     pub fn encrypt_key(
         &self,
         sb: &bch_sb_handle,
-        crypt: &bch_sb_field_crypt,
         key: &bch_key,
     ) -> bch_encrypted_key {
+        let crypt = sb.sb().crypt().expect("called on encrypted fs");
         let mut new_key = bch_encrypted_key {
             magic: u64::from_le_bytes(*BCH_KEY_MAGIC),
             key: *key,

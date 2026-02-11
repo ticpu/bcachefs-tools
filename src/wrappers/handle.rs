@@ -330,10 +330,10 @@ pub(crate) struct DevUsageType {
 }
 
 fn print_errmsg(err_buf: &[u8]) {
-    let len = err_buf.iter().position(|&b| b == 0).unwrap_or(err_buf.len());
-    if len > 0 {
-        let msg = String::from_utf8_lossy(&err_buf[..len]);
-        eprintln!("ioctl error: {}", msg);
+    if let Ok(msg) = CStr::from_bytes_until_nul(err_buf) {
+        if !msg.is_empty() {
+            eprintln!("ioctl error: {}", msg.to_string_lossy());
+        }
     }
 }
 
