@@ -1803,10 +1803,12 @@ allowing different snapshot versions to coexist within the same btree. Some
 btrees are ``write-buffered'': updates are batched in memory and flushed
 periodically rather than applied directly to btree nodes, reducing write
 amplification for high-frequency per-IO metadata (backpointers, LRU timestamps,
-accounting counters). Flushing sorts the entire batch, deduplicates redundant
-updates, then walks btree nodes in order for efficient bulk insertion; this
-sort-merge-sweep is inherently single-threaded, making its efficiency critical
-for multithreaded workloads.
+accounting counters). Write-buffered updates are unordered and
+eventually-consistent: the btree does not reflect pending updates until the
+next flush, and flushing sorts by key position, discarding temporal ordering.
+Flushing deduplicates redundant updates, then walks btree nodes in order for
+efficient bulk insertion; this sort-merge-sweep is inherently single-threaded,
+making its efficiency critical for multithreaded workloads.
 
 \subsection{Btree keys}
 
@@ -1818,7 +1820,7 @@ for multithreaded workloads.
 	\item \texttt{KEY\_TYPE\_whiteout} \\
 		Blocks visibility of ancestor snapshot versions of a key.
 	\item \texttt{KEY\_TYPE\_error} \\
-		Marks a region as containing unrecoverable errors.
+		Marks an extent as containing unrecoverable errors.
 	\item \texttt{KEY\_TYPE\_cookie} \\
 		Used by reconcile to track option changes via incrementing
 		version numbers in the \texttt{reconcile\_scan} btree.
