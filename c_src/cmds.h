@@ -22,10 +22,6 @@ int device_cmds(int argc, char *argv[]);
 int reconcile_cmds(int argc, char *argv[]);
 int data_cmds(int argc, char *argv[]);
 
-int cmd_unlock(int argc, char *argv[]);
-int cmd_set_passphrase(int argc, char *argv[]);
-int cmd_remove_passphrase(int argc, char *argv[]);
-
 int cmd_fsck(int argc, char *argv[]);
 int cmd_recovery_pass(int argc, char *argv[]);
 

@@ -5,6 +5,7 @@ pub mod completions;
 pub mod counters;
 pub mod device;
 pub mod fs_usage;
+pub mod key;
 pub mod list;
 pub mod mount;
 pub mod opts;
@@ -21,6 +22,7 @@ pub use device::{
     cmd_device_online, cmd_device_offline, cmd_device_remove, cmd_device_evacuate,
     cmd_device_set_state, cmd_device_resize, cmd_device_resize_journal,
 };
+pub use key::{cmd_unlock, cmd_set_passphrase, cmd_remove_passphrase};
 pub use list::list;
 pub use mount::mount;
 pub use scrub::scrub;
@@ -88,14 +90,11 @@ pub fn build_cli() -> Command {
             .about("Run a specific recovery pass"))
         .subcommand(Command::new("set-fs-option")
             .about("Set a filesystem option"))
-        .subcommand(Command::new("set-passphrase")
-            .about("Set passphrase on an encrypted filesystem"))
-        .subcommand(Command::new("remove-passphrase")
-            .about("Remove passphrase from an encrypted filesystem"))
+        .subcommand(key::SetPassphraseCli::command().name("set-passphrase"))
+        .subcommand(key::RemovePassphraseCli::command().name("remove-passphrase"))
         .subcommand(Command::new("show-super")
             .about("Print superblock information to stdout"))
-        .subcommand(Command::new("unlock")
-            .about("Unlock an encrypted filesystem"));
+        .subcommand(key::UnlockCli::command().name("unlock"));
 
     cmd
 }

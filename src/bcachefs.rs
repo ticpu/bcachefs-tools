@@ -68,15 +68,15 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "migrate-superblock" => c::cmd_migrate_superblock(argc, argv),
             "mkfs" => c::cmd_format(argc, argv),
             "reconcile" => c::reconcile_cmds(argc, argv),
-            "remove-passphrase" => c::cmd_remove_passphrase(argc, argv),
+            // remove-passphrase handled in Rust dispatch
             // reset-counters handled in Rust dispatch
             "set-fs-option" => c::cmd_set_option(argc, argv),
-            "set-passphrase" => c::cmd_set_passphrase(argc, argv),
+            // set-passphrase handled in Rust dispatch
             // set-file-option handled in Rust dispatch
             "show-super" => c::cmd_show_super(argc, argv),
             "recover-super" => c::cmd_recover_super(argc, argv),
             "strip-alloc" => c::cmd_strip_alloc(argc, argv),
-            "unlock" => c::cmd_unlock(argc, argv),
+            // unlock handled in Rust dispatch
             #[cfg(feature = "fuse")]
             "fusemount" => c::cmd_fusemount(argc, argv),
 
@@ -174,9 +174,12 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        "remove-passphrase" => commands::cmd_remove_passphrase(args[1..].to_vec()).report(),
         "reset-counters" => commands::cmd_reset_counters(args[1..].to_vec()).report(),
         "set-file-option" => commands::cmd_setattr(args[1..].to_vec()).report(),
+        "set-passphrase" => commands::cmd_set_passphrase(args[1..].to_vec()).report(),
         "reflink-option-propagate" => commands::cmd_reflink_option_propagate(args[1..].to_vec()).report(),
+        "unlock" => commands::cmd_unlock(args[1..].to_vec()).report(),
         _ => c_command(args, symlink_cmd),
     }
 }

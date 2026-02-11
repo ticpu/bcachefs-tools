@@ -13,7 +13,7 @@ use log::{debug, error, info};
 use crate::device_scan;
 
 use crate::{
-    key::{KeyHandle, Passphrase, UnlockPolicy},
+    key::{KeyHandle, Keyring, Passphrase, UnlockPolicy},
     logging,
 };
 
@@ -128,12 +128,12 @@ fn handle_unlock(cli: &Cli, sb: &bch_sb_handle) -> Result<KeyHandle> {
     }
 
     if let Some(path) = cli.passphrase_file.as_deref() {
-        return Passphrase::new_from_file(path).and_then(|p| KeyHandle::new(sb, &p));
+        return Passphrase::new_from_file(path).and_then(|p| KeyHandle::new(sb, &p, Keyring::User));
     }
 
     let uuid = sb.sb().uuid();
     KeyHandle::new_from_search(&uuid)
-        .or_else(|_| Passphrase::new(&uuid).and_then(|p| KeyHandle::new(sb, &p)))
+        .or_else(|_| Passphrase::new(&uuid).and_then(|p| KeyHandle::new(sb, &p, Keyring::User)))
 }
 
 fn cmd_mount_inner(cli: &Cli) -> Result<()> {
