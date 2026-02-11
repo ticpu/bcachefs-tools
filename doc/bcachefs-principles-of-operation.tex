@@ -209,7 +209,18 @@ are partially empty (because the data they contained was overwritten) - copy GC
 evacuates buckets that are mostly empty by writing the data they contain to new
 buckets. This also means that we need to reserve space on the device for the
 copy GC reserve when formatting - 8\% by default (configurable from 5\% to
-21\%).
+21\%). A fragmentation LRU btree tracks bucket fill levels so that copygc can
+find the most fragmented buckets directly instead of scanning the entire alloc
+btree.
+
+The allocator originally used in-memory bucket arrays and dedicated scanning
+threads to maintain free lists, discard lists, and eviction heaps. These were
+replaced by btree-based data structures: a freespace btree, a discard btree,
+and an LRU btree. The scanning threads are gone entirely; the code that
+replaces them is transactional btree code, much of it trigger-based, which is
+far easier to debug and reason about. The old threads were also prone to
+excessive CPU usage when the filesystem was nearly full; the btree approach
+eliminated those corner cases.
 
 There are some advantages to structuring the allocator this way, besides being
 able to support cached data:
@@ -232,9 +243,11 @@ able to support cached data:
 
 	\item The same algorithms are intended to be used for managing SMR
 		(shingled magnetic recording) and zoned hard drives directly,
-		avoiding the translation layer in the drive. Bucket sizes can
-		already be configured to match SMR zone sizes, but dedicated
-		zoned device support is not yet implemented.
+		avoiding the translation layer in the drive. Buckets map
+		naturally to zones: when we allocate a bucket, we write to it
+		once in an append-only fashion, then never write to it again
+		until we discard and reuse the whole thing --- exactly the
+		semantics a zoned device requires.
 \end{itemize}
 
 \subsection{Backpointers}
@@ -406,7 +419,12 @@ $\to$ LUKS $\to$ bcachefs.
 bcachefs supports gzip, lz4 and zstd compression. As with data checksumming, we
 compress entire extents, not individual disk blocks - this gives us better
 compression ratios than other filesystems, at the cost of reduced small random
-read performance.
+read performance. Compression algorithms are fundamentally able to find more
+redundancy when fed more data at once; compressing at 4K page granularity
+also creates painful alignment issues, because rounding compressed output
+back up to block alignment loses much of the compression ratio. Per-extent
+granularity also simplifies the IO path: everything works in terms of
+extents, and there is nothing smaller than an extent to write code to handle.
 
 Data can also be compressed or recompressed with a different algorithm in the
 background by the reconcile subsystem, if the \texttt{background\_compression}
@@ -1064,6 +1082,13 @@ and desired options. The reconcile thread processes work in priority order:
 high-priority metadata first (under-replicated or evacuating), then high-priority
 data, then normal metadata (moving stray metadata to \texttt{metadata\_target}),
 then normal data, then pending retries (only after device configuration changes).
+The \texttt{reconcile\_pending} btree solves the long-standing ``rebalance
+spinning'' problem, where the old rebalance thread would burn CPU retrying
+moves that could not complete (e.g.\ because the target was full). A practical
+consequence: you can create a single-device filesystem with
+\texttt{replicas=2}, and all data will be marked as degraded with 1x
+availability; when a second device is added, reconcile automatically
+replicates everything to 2x without further user intervention.
 
 The \texttt{bcachefs reconcile status} command shows current reconcile
 progress, and \texttt{bcachefs reconcile wait} blocks until reconcile
@@ -1621,7 +1646,12 @@ variable length sections:
 	\item \texttt{BCH\_SB\_FIELD\_errors} \\
 		Persistent error log: records errors detected during operation
 		or fsck so they survive across mounts and can trigger repair
-		passes on the next mount.
+		passes on the next mount. Users typically only report issues
+		when a filesystem breaks to the point where they can no longer
+		use it; errors that fsck silently fixes often go unreported.
+		Persistent error counters ensure that even self-healed errors
+		are visible in bug reports, so the underlying bugs can be found
+		and fixed.
 
 	\item \texttt{BCH\_SB\_FIELD\_ext} \\
 		Extended superblock data: tracks which recovery passes are
