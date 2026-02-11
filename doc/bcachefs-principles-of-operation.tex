@@ -925,14 +925,28 @@ process.
 \subsection{Fsck}
 
 The \texttt{bcachefs fsck} subcommand (also available as \texttt{fsck.bcachefs})
-can run fsck in userspace, in the kernel at mount time, or online on a mounted
-filesystem, selecting the mode automatically or via command line options. The
-in-kernel offline mode is useful when an older bcachefs-tools binary cannot
-understand a newer filesystem format but the kernel module can. In all cases
-the exact same fsck implementation runs - the recovery passes described above.
-Running in userspace allows stopping with ctrl-c and prompting for fixes;
-\texttt{bcachefs fsck -y} auto-fixes, \texttt{-n} runs read-only. When running
-fsck at mount time via \texttt{-o fsck}, use \texttt{-o fix\_errors} to auto-fix.
+can run fsck in userspace (\texttt{-K}), in the kernel at mount time
+(\texttt{-k}), or online on a mounted filesystem, selecting the mode
+automatically or via command line options. The in-kernel offline mode is useful
+when an older bcachefs-tools binary cannot handle the filesystem version. In
+all cases the exact same fsck implementation runs - the recovery passes
+described above. Running in userspace allows stopping with ctrl-c and prompting
+for fixes; \texttt{bcachefs fsck -y} auto-fixes, \texttt{-n} runs read-only.
+
+The \texttt{-o nochanges} mount option disallows any writes to the underlying
+devices, pinning dirty data in memory if journal replay is necessary. This is
+the primary tool for safe inspection of a damaged filesystem: it allows
+recovery to run and metadata to be read without risking further damage. It is
+also used for testing on-disk format upgrades (\texttt{-o version\_upgrade})
+before committing to them. \texttt{bcachefs fsck -n} implies
+\texttt{-o nochanges}; \texttt{bcachefs fsck -ny} can be used to test
+filesystem repair in dry-run mode.
+
+When running fsck at mount time via \texttt{-o fsck}, use
+\texttt{-o fix\_errors} to auto-fix. Before committing to a repair, test it
+with \texttt{-o ro,nochanges,fsck,fix\_errors} first: this runs the full repair
+in memory without writing to disk, allowing the filesystem to be mounted and
+its contents verified before repeating without \texttt{nochanges}.
 
 Online fsck runs the validation passes that are marked as safe for concurrent
 use (\texttt{PASS\_ONLINE}) on a mounted, read-write filesystem. Since version
@@ -944,15 +958,6 @@ remount, or taking the filesystem offline. Errors that are not safe to
 auto-repair cause the filesystem to go emergency read-only, with a message
 suggesting to run fsck and report the issue to developers so it can be marked
 for self-healing in future versions.
-
-The \texttt{-o nochanges} mount option disallows any writes to the underlying
-devices, pinning dirty data in memory if journal replay is necessary. This is
-the primary tool for safe inspection of a damaged filesystem: it allows
-recovery to run and metadata to be read without risking further damage. It is
-also used for testing on-disk format upgrades (\texttt{-o version\_upgrade})
-before committing to them. \texttt{bcachefs fsck -n} implies
-\texttt{-o nochanges}; \texttt{bcachefs fsck -ny} can be used to test
-filesystem repair in dry-run mode.
 
 \subsection{Status of data}
 
