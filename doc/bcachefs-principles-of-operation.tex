@@ -269,7 +269,9 @@ is partially overwritten, multiple smaller extents may share ownership of the
 same physical block. Erasure code stripes also get backpointers because they
 co-own data with the extents they protect --- even after an extent is deleted,
 the stripe may still need the data for EC reconstruction until the stripe itself
-is reclaimed.
+is reclaimed. Stripe backpointers are flagged with
+\texttt{BACKPOINTER\_STRIPE\_PTR} and routed to the separate
+\texttt{stripe\_backpointers} btree.
 
 Backpointers enable efficient answers to the question ``what data lives in this
 bucket?'' without scanning the entire extents btree. This is essential for device
@@ -1795,7 +1797,7 @@ numeric ID. Below is the complete list:
 24 & reconcile\_work\_phys & Physical reconcile work queue \\
 25 & reconcile\_hipri\_phys & Physical high priority reconcile work \\
 26 & bucket\_to\_stripe   & Bucket to stripe multi-mapping \\
-27 & stripe\_backpointers & Stripe backpointers for repair on invalid devices (write-buffered) \\
+27 & stripe\_backpointers & Backpointers keyed by stripe index and block number, for repair on invalid devices (write-buffered) \\
 \end{longtable}
 
 Btrees marked as ``snapshot-aware'' include a snapshot ID in every key position,
