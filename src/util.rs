@@ -3,6 +3,10 @@ use std::io;
 use anyhow::Result;
 use crossterm::{cursor, execute, terminal};
 
+pub fn fmt_sectors_human(sectors: u64) -> String {
+    fmt_bytes_human(sectors << 9)
+}
+
 pub fn fmt_bytes_human(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "K", "M", "G", "T", "P"];
     if bytes == 0 { return "0B".to_string() }

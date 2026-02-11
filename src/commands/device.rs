@@ -6,15 +6,15 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use bch_bindgen::c::{
-    bch_data_type::*,
     bch_member_state::*,
     bcachefs_metadata_version::bcachefs_metadata_version_reconcile,
     BCH_FORCE_IF_DATA_LOST, BCH_FORCE_IF_DEGRADED, BCH_FORCE_IF_METADATA_LOST,
 };
 use bch_bindgen::path_to_cstr;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
-use crate::util::fmt_bytes_human;
+use crate::util::fmt_sectors_human;
+use crate::wrappers::accounting::{data_type_is_empty, data_type_is_hidden};
 use crate::wrappers::handle::BcachefsHandle;
 use crate::wrappers::sysfs::bcachefs_kernel_version;
 
@@ -139,13 +139,22 @@ pub fn cmd_device_remove(argv: Vec<String>) -> Result<()> {
         .with_context(|| format!("removing device '{}'", cli.device))
 }
 
-fn parse_member_state(s: &str) -> Result<u32> {
-    match s {
-        "rw"         => Ok(BCH_MEMBER_STATE_rw as u32),
-        "ro"         => Ok(BCH_MEMBER_STATE_ro as u32),
-        "evacuating" => Ok(BCH_MEMBER_STATE_evacuating as u32),
-        "spare"      => Ok(BCH_MEMBER_STATE_spare as u32),
-        _ => Err(anyhow!("invalid device state '{}' (expected: rw, ro, evacuating, spare)", s)),
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum MemberState {
+    Rw,
+    Ro,
+    Evacuating,
+    Spare,
+}
+
+impl MemberState {
+    fn as_u32(self) -> u32 {
+        match self {
+            MemberState::Rw         => BCH_MEMBER_STATE_rw as u32,
+            MemberState::Ro         => BCH_MEMBER_STATE_ro as u32,
+            MemberState::Evacuating => BCH_MEMBER_STATE_evacuating as u32,
+            MemberState::Spare      => BCH_MEMBER_STATE_spare as u32,
+        }
     }
 }
 
@@ -182,8 +191,9 @@ pub struct SetStateCli {
     #[arg(short = 'F', long)]
     force_if_data_lost: bool,
 
-    /// Device state: rw, ro, evacuating, spare
-    new_state: String,
+    /// Device state
+    #[arg(value_enum)]
+    new_state: MemberState,
 
     /// Device path or numeric device index
     device: String,
@@ -195,7 +205,7 @@ pub struct SetStateCli {
 pub fn cmd_device_set_state(argv: Vec<String>) -> Result<()> {
     let cli = SetStateCli::parse_from(argv);
 
-    let new_state = parse_member_state(&cli.new_state)?;
+    let new_state = cli.new_state.as_u32();
     let mut flags = if cli.force { BCH_FORCE_IF_DEGRADED } else { 0 };
     if cli.force_if_data_lost {
         flags |= BCH_FORCE_IF_DEGRADED | BCH_FORCE_IF_DATA_LOST | BCH_FORCE_IF_METADATA_LOST;
@@ -281,17 +291,6 @@ pub fn cmd_device_resize_journal(argv: Vec<String>) -> Result<bool> {
     Ok(true)
 }
 
-fn data_type_is_empty(t: u32) -> bool {
-    t == BCH_DATA_free as u32 ||
-    t == BCH_DATA_need_gc_gens as u32 ||
-    t == BCH_DATA_need_discard as u32
-}
-
-fn data_type_is_hidden(t: u32) -> bool {
-    t == BCH_DATA_sb as u32 ||
-    t == BCH_DATA_journal as u32
-}
-
 #[derive(Parser, Debug)]
 #[command(about = "Migrate data off a device")]
 pub struct EvacuateCli {
@@ -329,14 +328,12 @@ pub fn cmd_device_evacuate(argv: Vec<String>) -> Result<()> {
         let usage = handle.dev_usage(dev_idx)
             .context("querying device usage")?;
 
-        let mut data_sectors: u64 = 0;
-        for (i, dt) in usage.data_types.iter().enumerate() {
-            if !data_type_is_empty(i as u32) && !data_type_is_hidden(i as u32) {
-                data_sectors += dt.sectors;
-            }
-        }
+        let data_sectors: u64 = usage.iter_typed()
+            .filter(|(t, _)| !data_type_is_empty(*t) && !data_type_is_hidden(*t))
+            .map(|(_, dt)| dt.sectors)
+            .sum();
 
-        print!("\x1b[2K\r{}", fmt_bytes_human(data_sectors << 9));
+        print!("\x1b[2K\r{}", fmt_sectors_human(data_sectors));
         io::stdout().flush().ok();
 
         if data_sectors == 0 {

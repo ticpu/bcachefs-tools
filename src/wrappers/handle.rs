@@ -299,6 +299,29 @@ pub(crate) struct DevUsage {
     pub data_types: Vec<DevUsageType>,
 }
 
+impl DevUsage {
+    /// Iterate data types with their typed enum key.
+    pub fn iter_typed(&self) -> impl Iterator<Item = (bch_data_type, &DevUsageType)> {
+        self.data_types.iter().enumerate().map(|(i, dt)| {
+            let t: bch_data_type = unsafe { std::mem::transmute(i as u32) };
+            (t, dt)
+        })
+    }
+
+    /// Total capacity in sectors.
+    pub fn capacity_sectors(&self) -> u64 {
+        self.nr_buckets * self.bucket_size as u64
+    }
+
+    /// Used sectors (all data types except unstriped).
+    pub fn used_sectors(&self) -> u64 {
+        self.iter_typed()
+            .filter(|(t, _)| *t != bch_data_type::BCH_DATA_unstriped)
+            .map(|(_, dt)| dt.sectors)
+            .sum()
+    }
+}
+
 /// Per-data-type usage on a device.
 pub(crate) struct DevUsageType {
     pub buckets: u64,

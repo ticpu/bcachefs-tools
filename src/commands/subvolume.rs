@@ -8,7 +8,7 @@ use bch_bindgen::c::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::util::fmt_bytes_human;
+use crate::util::fmt_sectors_human;
 use crate::wrappers::handle::BcachefsHandle;
 use crate::wrappers::ioctl::bch_ioc_wr;
 
@@ -370,9 +370,6 @@ fn format_time(sec: i64, _nsec: u32) -> String {
     }
 }
 
-fn human_readable_size(sectors: u64) -> String {
-    fmt_bytes_human(sectors * 512)
-}
 
 fn snapshot_parent_str(fd: &OwnedFd, parent: u32) -> String {
     if parent == 0 {
@@ -446,7 +443,7 @@ fn print_flat(dir: &Path, recursive: bool, show_snapshots: bool,
         let flags_display = if f.is_empty() { "-".to_string() } else { f };
         let size = sizes.as_ref()
             .and_then(|s| s.get(&e.subvolid))
-            .map(|&s| human_readable_size(s))
+            .map(|&s| fmt_sectors_human(s))
             .unwrap_or_default();
 
         if show_snapshots {
@@ -493,7 +490,7 @@ fn print_tree_recursive(dir: &Path, prefix: &str, show_snapshots: bool,
         let f = flags_str(e.flags);
         if !f.is_empty() { annotations.push(f); }
         if let Some(&sectors) = sizes.as_ref().and_then(|s| s.get(&e.subvolid)) {
-            annotations.push(human_readable_size(sectors));
+            annotations.push(fmt_sectors_human(sectors));
         }
         let otime = format_time(e.otime_sec, e.otime_nsec);
         if otime != "-" { annotations.push(otime); }
@@ -540,7 +537,7 @@ fn collect_subvol_json(dir: &Path, recursive: bool, show_snapshots: bool, readon
             obj["flags"] = serde_json::json!(f);
         }
         if let Some(&sectors) = sizes.as_ref().and_then(|s| s.get(&e.subvolid)) {
-            obj["size"] = serde_json::json!(human_readable_size(sectors));
+            obj["size"] = serde_json::json!(fmt_sectors_human(sectors));
             obj["sectors"] = serde_json::json!(sectors);
         }
         if recursive {
@@ -576,7 +573,7 @@ fn snapshot_node_label(id: u32, node: &SnapshotNode, names: &HashMap<u32, String
     let name = names.get(&id)
         .cloned()
         .unwrap_or_else(|| "(shared)".to_string());
-    let mut label = format!("{} [{}]", name, human_readable_size(node.sectors));
+    let mut label = format!("{} [{}]", name, fmt_sectors_human(node.sectors));
     let f = flags_str(node.flags);
     if !f.is_empty() {
         label.push_str(&format!(" ({})", f));
@@ -683,8 +680,8 @@ fn print_snapshot_flat(dir: &Path, readonly: bool, sort: Option<SortBy>) -> Resu
         let flags_display = if f.is_empty() { "-".to_string() } else { f };
         println!("{:<24} {:<8} {:<12} {:<12} {}",
             path, n.subvol,
-            human_readable_size(n.sectors),
-            human_readable_size(*cumulative),
+            fmt_sectors_human(n.sectors),
+            fmt_sectors_human(*cumulative),
             flags_display);
     }
 
@@ -703,7 +700,7 @@ fn print_snapshot_json(dir: &Path) -> Result<()> {
             "children": n.children.iter().filter(|&&c| c != 0).collect::<Vec<_>>(),
             "subvol":   n.subvol,
             "sectors":  n.sectors,
-            "size":     human_readable_size(n.sectors),
+            "size":     fmt_sectors_human(n.sectors),
         });
         let f = flags_str(n.flags);
         if !f.is_empty() {

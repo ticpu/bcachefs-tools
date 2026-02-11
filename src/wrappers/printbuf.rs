@@ -32,6 +32,14 @@ impl Printbuf {
         unsafe { c::bch2_printbuf_tabstops_reset(&mut self.0) };
     }
 
+    /// Reset tabstops and set new ones from a slice of column widths.
+    pub fn tabstops(&mut self, widths: &[u32]) {
+        self.tabstops_reset();
+        for &w in widths {
+            self.tabstop_push(w);
+        }
+    }
+
     pub fn indent_add(&mut self, spaces: u32) {
         unsafe { c::bch2_printbuf_indent_add(&mut self.0, spaces) };
     }
@@ -61,6 +69,11 @@ impl Printbuf {
     /// the `human_readable_units` flag on the printbuf.
     pub fn units_u64(&mut self, v: u64) {
         unsafe { c::bch2_prt_units_u64(&mut self.0, v) };
+    }
+
+    /// Print a sector count as bytes (sectors << 9).
+    pub fn units_sectors(&mut self, sectors: u64) {
+        self.units_u64(sectors << 9);
     }
 
     pub fn set_human_readable(&mut self, v: bool) {

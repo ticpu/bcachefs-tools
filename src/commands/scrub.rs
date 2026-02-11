@@ -10,7 +10,7 @@ use bch_bindgen::c::{
 };
 use clap::Parser;
 
-use crate::util::fmt_bytes_human;
+use crate::util::{fmt_bytes_human, fmt_sectors_human};
 use crate::wrappers::handle::BcachefsHandle;
 use crate::wrappers::ioctl::bch_ioc_w;
 use crate::wrappers::sysfs::{fs_get_devices, sysfs_path_from_fd};
@@ -79,10 +79,10 @@ impl ScrubDev {
 
         format!("{:<16} {:>12} {:>12} {:>12} {:>12} {:>6}  {}",
             self.name,
-            fmt_bytes_human(self.done << 9),
-            fmt_bytes_human(self.corrected << 9),
-            fmt_bytes_human(self.uncorrected << 9),
-            fmt_bytes_human(self.total << 9),
+            fmt_sectors_human(self.done),
+            fmt_sectors_human(self.corrected),
+            fmt_sectors_human(self.uncorrected),
+            fmt_sectors_human(self.total),
             pct,
             status)
     }

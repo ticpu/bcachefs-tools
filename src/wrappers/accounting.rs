@@ -7,8 +7,11 @@ use super::printbuf::Printbuf;
 use super::ioctl::bch_ioc_w;
 use super::sysfs::bcachefs_kernel_version;
 
-/// Version below which bpos needs byte-swapping for accounting keys.
-const VERSION_DISK_ACCOUNTING_BIG_ENDIAN: u64 = (1 << 10) | 15; // BCH_VERSION(1, 15) = 1039
+use c::bcachefs_metadata_version::*;
+
+pub use c::bch_data_type;
+pub use c::bch_compression_type;
+pub use c::bch_reconcile_accounting_type;
 
 /// Decoded accounting key type.
 #[derive(Debug)]
@@ -16,32 +19,20 @@ const VERSION_DISK_ACCOUNTING_BIG_ENDIAN: u64 = (1 << 10) | 15; // BCH_VERSION(1
 pub enum DiskAccountingPos {
     NrInodes,
     PersistentReserved { nr_replicas: u8 },
-    Replicas { data_type: u8, nr_devs: u8, nr_required: u8, devs: Vec<u8> },
-    DevDataType { dev: u8, data_type: u8 },
-    Compression { compression_type: u8 },
+    Replicas { data_type: bch_data_type, nr_devs: u8, nr_required: u8, devs: Vec<u8> },
+    DevDataType { dev: u8, data_type: bch_data_type },
+    Compression { compression_type: bch_compression_type },
     Snapshot { id: u32 },
     Btree { id: u32 },
     RebalanceWork,
     Inum { inum: u64 },
-    ReconcileWork { work_type: u8 },
+    ReconcileWork { work_type: bch_reconcile_accounting_type },
     DevLeaving { dev: u32 },
     Unknown(u8),
 }
 
-/// Accounting type discriminants (must match BCH_DISK_ACCOUNTING_TYPES enum).
-mod acct_type {
-    pub const NR_INODES: u8           = 0;
-    pub const PERSISTENT_RESERVED: u8 = 1;
-    pub const REPLICAS: u8            = 2;
-    pub const DEV_DATA_TYPE: u8       = 3;
-    pub const COMPRESSION: u8         = 4;
-    pub const SNAPSHOT: u8            = 5;
-    pub const BTREE: u8              = 6;
-    pub const REBALANCE_WORK: u8     = 7;
-    pub const INUM: u8               = 8;
-    pub const RECONCILE_WORK: u8     = 9;
-    pub const DEV_LEAVING: u8        = 10;
-}
+use c::disk_accounting_type;
+use disk_accounting_type::*;
 
 /// A single accounting entry from the ioctl.
 #[derive(Debug)]
@@ -83,53 +74,53 @@ fn bpos_to_disk_accounting_pos(p: &c::bpos) -> DiskAccountingPos {
     // memcpy_swab: reverse all 20 bytes
     raw.reverse();
 
-    // Now raw[0] is the accounting type
-    let acct_type = raw[0];
+    // Now raw[0] is the accounting type discriminant
+    let ty: disk_accounting_type = unsafe { std::mem::transmute(raw[0] as u32) };
 
-    match acct_type {
-        acct_type::NR_INODES => DiskAccountingPos::NrInodes,
-        acct_type::PERSISTENT_RESERVED => DiskAccountingPos::PersistentReserved {
+    match ty {
+        BCH_DISK_ACCOUNTING_nr_inodes => DiskAccountingPos::NrInodes,
+        BCH_DISK_ACCOUNTING_persistent_reserved => DiskAccountingPos::PersistentReserved {
             nr_replicas: raw[1],
         },
-        acct_type::REPLICAS => {
-            let data_type = raw[1];
+        BCH_DISK_ACCOUNTING_replicas => {
+            let data_type: bch_data_type = unsafe { std::mem::transmute(raw[1] as u32) };
             let nr_devs = raw[2];
             let nr_required = raw[3];
             let devs = raw[4..4 + nr_devs as usize].to_vec();
             DiskAccountingPos::Replicas { data_type, nr_devs, nr_required, devs }
         }
-        acct_type::DEV_DATA_TYPE => DiskAccountingPos::DevDataType {
+        BCH_DISK_ACCOUNTING_dev_data_type => DiskAccountingPos::DevDataType {
             dev: raw[1],
-            data_type: raw[2],
+            data_type: unsafe { std::mem::transmute(raw[2] as u32) },
         },
-        acct_type::COMPRESSION => DiskAccountingPos::Compression {
-            compression_type: raw[1],
+        BCH_DISK_ACCOUNTING_compression => DiskAccountingPos::Compression {
+            compression_type: unsafe { std::mem::transmute(raw[1] as u32) },
         },
-        acct_type::SNAPSHOT => {
+        BCH_DISK_ACCOUNTING_snapshot => {
             // __packed __u32 id, stored big-endian in the swabbed bytes
             let id = u32::from_be_bytes([raw[1], raw[2], raw[3], raw[4]]);
             DiskAccountingPos::Snapshot { id }
         }
-        acct_type::BTREE => {
+        BCH_DISK_ACCOUNTING_btree => {
             let id = u32::from_be_bytes([raw[1], raw[2], raw[3], raw[4]]);
             DiskAccountingPos::Btree { id }
         }
-        acct_type::REBALANCE_WORK => DiskAccountingPos::RebalanceWork,
-        acct_type::INUM => {
+        BCH_DISK_ACCOUNTING_rebalance_work => DiskAccountingPos::RebalanceWork,
+        BCH_DISK_ACCOUNTING_inum => {
             let inum = u64::from_be_bytes([
                 raw[1], raw[2], raw[3], raw[4],
                 raw[5], raw[6], raw[7], raw[8],
             ]);
             DiskAccountingPos::Inum { inum }
         }
-        acct_type::RECONCILE_WORK => DiskAccountingPos::ReconcileWork {
-            work_type: raw[1],
+        BCH_DISK_ACCOUNTING_reconcile_work => DiskAccountingPos::ReconcileWork {
+            work_type: unsafe { std::mem::transmute(raw[1] as u32) },
         },
-        acct_type::DEV_LEAVING => {
+        BCH_DISK_ACCOUNTING_dev_leaving => {
             let dev = u32::from_be_bytes([raw[1], raw[2], raw[3], raw[4]]);
             DiskAccountingPos::DevLeaving { dev }
         }
-        _ => DiskAccountingPos::Unknown(acct_type),
+        _ => DiskAccountingPos::Unknown(raw[0]),
     }
 }
 
@@ -205,19 +196,11 @@ impl BcachefsHandle {
 fn parse_accounting_entries(data: &[u8]) -> Vec<AccountingEntry> {
     let mut entries = Vec::new();
     let kernel_version = bcachefs_kernel_version();
-    let need_swab = kernel_version > 0 && kernel_version < VERSION_DISK_ACCOUNTING_BIG_ENDIAN;
-
-    let u64s = |slice: &[u8], off: usize| -> u64 {
-        let b = &slice[off..off + 8];
-        u64::from_ne_bytes(b.try_into().unwrap())
-    };
+    let need_swab = kernel_version > 0
+        && kernel_version < bcachefs_metadata_version_disk_accounting_big_endian as u64;
 
     let mut offset = 0;
     while offset < data.len() {
-        // First byte of bkey is u64s
-        if offset >= data.len() {
-            break;
-        }
         let key_u64s = data[offset] as usize;
         if key_u64s == 0 {
             break;
@@ -258,11 +241,12 @@ fn parse_accounting_entries(data: &[u8]) -> Vec<AccountingEntry> {
         // bch_accounting has just a bch_val (0 bytes), then d[]
         // So counters start at u64 offset BKEY_U64S
         let nr_counters = key_u64s - BKEY_U64S;
-        let mut counters = Vec::with_capacity(nr_counters);
-        for i in 0..nr_counters {
-            let c_offset = (BKEY_U64S + i) * 8;
-            counters.push(u64s(entry_data, c_offset));
-        }
+        let counters: Vec<u64> = (0..nr_counters)
+            .map(|i| {
+                let off = (BKEY_U64S + i) * 8;
+                u64::from_ne_bytes(entry_data[off..off + 8].try_into().unwrap())
+            })
+            .collect();
 
         entries.push(AccountingEntry { pos, bpos, counters });
         offset += entry_bytes;
@@ -271,25 +255,31 @@ fn parse_accounting_entries(data: &[u8]) -> Vec<AccountingEntry> {
     entries
 }
 
+use bch_data_type::*;
+
+/// Free/empty data types — not counted as "used" space.
+pub fn data_type_is_empty(t: bch_data_type) -> bool {
+    matches!(t, BCH_DATA_free | BCH_DATA_need_gc_gens | BCH_DATA_need_discard)
+}
+
+/// Internal/hidden data types — not user-visible (superblock, journal).
+pub fn data_type_is_hidden(t: bch_data_type) -> bool {
+    matches!(t, BCH_DATA_sb | BCH_DATA_journal)
+}
+
 /// Print a data type directly into a Printbuf via bch2_prt_data_type.
-pub fn prt_data_type(out: &mut Printbuf, t: u8) {
-    unsafe {
-        c::bch2_prt_data_type(out.as_raw(), std::mem::transmute::<u32, c::bch_data_type>(t as u32));
-    }
+pub fn prt_data_type(out: &mut Printbuf, t: bch_data_type) {
+    unsafe { c::bch2_prt_data_type(out.as_raw(), t) }
 }
 
 /// Print a compression type directly into a Printbuf via bch2_prt_compression_type.
-pub fn prt_compression_type(out: &mut Printbuf, t: u8) {
-    unsafe {
-        c::bch2_prt_compression_type(out.as_raw(), std::mem::transmute::<u32, c::bch_compression_type>(t as u32));
-    }
+pub fn prt_compression_type(out: &mut Printbuf, t: bch_compression_type) {
+    unsafe { c::bch2_prt_compression_type(out.as_raw(), t) }
 }
 
 /// Print a reconcile accounting type directly into a Printbuf.
-pub fn prt_reconcile_type(out: &mut Printbuf, t: u8) {
-    unsafe {
-        c::bch2_prt_reconcile_accounting_type(out.as_raw(), std::mem::transmute::<u32, c::bch_reconcile_accounting_type>(t as u32));
-    }
+pub fn prt_reconcile_type(out: &mut Printbuf, t: bch_reconcile_accounting_type) {
+    unsafe { c::bch2_prt_reconcile_accounting_type(out.as_raw(), t) }
 }
 
 /// Get a btree ID name string.
@@ -301,7 +291,9 @@ pub fn btree_id_str(id: u32) -> String {
 
 /// Get a member state string.
 pub fn member_state_str(state: u8) -> &'static str {
-    let ptr = unsafe { c::bch2_member_states[state as usize] };
+    // bch2_member_states is declared as extern [] so bindgen emits a
+    // zero-length array; index via raw pointer to avoid bounds panic.
+    let ptr = unsafe { *c::bch2_member_states.as_ptr().add(state as usize) };
     if ptr.is_null() {
         "unknown"
     } else {

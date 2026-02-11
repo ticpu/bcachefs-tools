@@ -43,6 +43,7 @@ pub fn bcachefs_kernel_version() -> u64 {
 }
 
 /// Info about a device in a mounted bcachefs filesystem, read from sysfs.
+#[derive(Clone)]
 pub struct DevInfo {
     pub idx:        u32,
     pub dev:        String,
