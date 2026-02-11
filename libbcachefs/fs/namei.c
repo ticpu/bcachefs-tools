@@ -10,6 +10,8 @@
 #include "fs/namei.h"
 #include "fs/xattr.h"
 
+#include "init/fs.h"
+
 #include "snapshots/subvolume.h"
 
 #include <linux/posix_acl.h>
@@ -50,7 +52,7 @@ int bch2_create_trans(struct btree_trans *trans,
 
 	try(bch2_subvolume_get_snapshot(trans, dir.subvol, &snapshot));
 
-	try(bch2_inode_peek(trans, &dir_iter, dir_u, dir, BTREE_ITER_intent|BTREE_ITER_with_updates));
+	try(bch2_inode_peek(trans, &dir_iter, dir_u, dir, BTREE_ITER_intent));
 
 	if (!(flags & BCH_CREATE_SNAPSHOT)) {
 		/* Normal create path - allocate a new inode: */
@@ -141,7 +143,7 @@ int bch2_create_trans(struct btree_trans *trans,
 					   name,
 					   dir_target,
 					   &dir_offset,
-					   STR_HASH_must_create|BTREE_ITER_with_updates));
+					   STR_HASH_must_create));
 		try(bch2_inode_write(trans, &dir_iter, dir_u));
 
 		new_inode->bi_dir		= dir_u->bi_inum;
@@ -213,9 +215,8 @@ int bch2_link_trans(struct btree_trans *trans,
 }
 
 int bch2_unlink_trans(struct btree_trans *trans,
-		      subvol_inum dir,
-		      struct bch_inode_unpacked *dir_u,
-		      struct bch_inode_unpacked *inode_u,
+		      subvol_inum dir, struct bch_inode_unpacked *dir_u,
+		      subvol_inum inode, struct bch_inode_unpacked *inode_u,
 		      const struct qstr *name,
 		      bool deleting_subvol)
 {
@@ -233,6 +234,20 @@ int bch2_unlink_trans(struct btree_trans *trans,
 	subvol_inum inum;
 	try(bch2_dirent_lookup_trans(trans, &dirent_iter, dir, &dir_hash,
 				     name, &inum, BTREE_ITER_intent));
+
+	if ((inode.subvol || inode.inum) &&
+	    !subvol_inum_eq(inode, inum)) {
+		CLASS(bch_log_msg, msg)(c);
+		prt_printf(&msg.m, "vfs did bad unlink: wanted inum %llu:%llu, got %llu:%llu\n",
+			   inode.subvol, inode.inum,
+			   inum.subvol, inum.inum);
+		prt_printf(&msg.m, "vfs d_name %s\n", name->name);
+		prt_printf(&msg.m, "path ");
+		try(bch2_inum_to_path(trans, inode, &msg.m));
+		bch2_fs_emergency_read_only(c, &msg.m);
+
+		msg.m.suppress = !bch2_count_fsck_err(c, vfs_unlink_got_wrong_inum, &msg.m);
+	}
 
 	try(bch2_inode_peek(trans, &inode_iter, inode_u, inum, BTREE_ITER_intent));
 
@@ -523,6 +538,8 @@ DEFINE_DARRAY(subvol_inum);
 
 static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 				      u32 subvol, u64 inum, u32 snapshot,
+				      u32 stop_subvol,
+				      unsigned flags,
 				      struct printbuf *path)
 {
 	struct bch_fs *c = trans->c;
@@ -538,8 +555,7 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 					BTREE_ID_inodes,
 					POS(0, inum),
 					SPOS(0, inum, U32_MAX),
-					BTREE_ITER_all_snapshots|
-					BTREE_ITER_with_updates, k, ret) {
+					BTREE_ITER_all_snapshots, k, ret) {
 				if (bkey_is_inode(k.k)) {
 					snapshot = k.k->p.snapshot;
 					break;
@@ -561,13 +577,14 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 		try(darray_push(&inums, n));
 
 		struct bch_inode_unpacked inode;
-		ret = bch2_inode_find_by_inum_snapshot(trans, inum, snapshot, &inode,
-						       BTREE_ITER_with_updates);
+		ret = bch2_inode_find_by_inum_snapshot(trans, inum, snapshot, &inode, 0);
 		if (ret)
 			break;
 
-		if (inode.bi_subvol == BCACHEFS_ROOT_SUBVOL &&
-		    inode.bi_inum == BCACHEFS_ROOT_INO)
+		if (stop_subvol
+		    ? inode.bi_subvol == stop_subvol
+		    : (inode.bi_subvol == BCACHEFS_ROOT_SUBVOL &&
+		       inode.bi_inum == BCACHEFS_ROOT_INO))
 			break;
 
 		if (!inode.bi_dir && !inode.bi_dir_offset) {
@@ -575,7 +592,6 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 			break;
 		}
 
-		inum = inode.bi_dir;
 		if (inode.bi_parent_subvol) {
 			subvol = inode.bi_parent_subvol;
 			ret = bch2_subvolume_get_snapshot(trans, inode.bi_parent_subvol, &snapshot);
@@ -584,8 +600,7 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 		}
 
 		CLASS(btree_iter, d_iter)(trans, BTREE_ID_dirents,
-					  SPOS(inode.bi_dir, inode.bi_dir_offset, snapshot),
-					  BTREE_ITER_with_updates);
+					  SPOS(inode.bi_dir, inode.bi_dir_offset, snapshot), 0);
 		struct bkey_s_c_dirent d = bch2_bkey_get_typed(&d_iter, dirent);
 		ret = bkey_err(d.s_c);
 		if (ret)
@@ -594,11 +609,13 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 		struct qstr dirent_name = bch2_dirent_get_name(d);
 
 		prt_bytes_reversed(path, dirent_name.name, dirent_name.len);
-
 		prt_char(path, '/');
+
+		inum = inode.bi_dir;
 	}
 
-	if (ret && !bch2_err_matches(ret, BCH_ERR_transaction_restart)) {
+	if (ret && !bch2_err_matches(ret, BCH_ERR_transaction_restart) &&
+	    !(flags & INUM_TO_PATH_FAIL_ON_ERR)) {
 		prt_printf_reversed(path, "(%s: disconnected at %llu.%u)",
 				    bch2_err_str(ret), inum, snapshot);
 		ret = 0;
@@ -609,11 +626,13 @@ static int bch2_inum_to_path_reversed(struct btree_trans *trans,
 
 static int __bch2_inum_to_path(struct btree_trans *trans,
 			       u32 subvol, u64 inum, u32 snapshot,
+			       u32 stop_subvol, unsigned flags,
 			       struct printbuf *path)
 {
 	struct printbuf_restore restore = printbuf_state_save(path);
 	unsigned orig_pos = path->pos;
-	int ret = bch2_inum_to_path_reversed(trans, subvol, inum, snapshot, path);
+	int ret = bch2_inum_to_path_reversed(trans, subvol, inum, snapshot,
+					     stop_subvol, flags, path);
 	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
 		printbuf_state_restore(path, restore); /* Don't leave garbage output */
 	else {
@@ -628,14 +647,23 @@ int bch2_inum_to_path(struct btree_trans *trans,
 		      subvol_inum inum,
 		      struct printbuf *path)
 {
-	return __bch2_inum_to_path(trans, inum.subvol, inum.inum, 0, path);
+	return __bch2_inum_to_path(trans, inum.subvol, inum.inum, 0, 0, 0, path);
+}
+
+int bch2_inum_to_path_in_subvol(struct btree_trans *trans,
+				subvol_inum inum,
+				u32 stop_subvol,
+				unsigned flags,
+				struct printbuf *path)
+{
+	return __bch2_inum_to_path(trans, inum.subvol, inum.inum, 0, stop_subvol, flags, path);
 }
 
 int bch2_inum_snapshot_to_path(struct btree_trans *trans, u64 inum, u32 snapshot,
 			       snapshot_id_list *snapshot_overwrites,
 			       struct printbuf *path)
 {
-	return __bch2_inum_to_path(trans, 0, inum, snapshot, path);
+	return __bch2_inum_to_path(trans, 0, inum, snapshot, 0, 0, path);
 }
 
 /* fsck */
@@ -797,8 +825,7 @@ static int bch2_propagate_has_case_insensitive(struct btree_trans *trans, subvol
 	while (true) {
 		CLASS(btree_iter_uninit, iter)(trans);
 		struct bch_inode_unpacked inode;
-		try(bch2_inode_peek(trans, &iter, &inode, inum,
-				      BTREE_ITER_intent|BTREE_ITER_with_updates));
+		try(bch2_inode_peek(trans, &iter, &inode, inum, 0));
 
 		if (inode.bi_flags & BCH_INODE_has_case_insensitive)
 			break;

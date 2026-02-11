@@ -1,0 +1,609 @@
+use std::fmt::Write as FmtWrite;
+
+use anyhow::{anyhow, Result};
+use bch_bindgen::c;
+use clap::Parser;
+
+use crate::wrappers::accounting::{self, AccountingEntry, DiskAccountingPos, data_type_is_empty};
+use crate::wrappers::handle::{BcachefsHandle, DevUsage};
+use crate::wrappers::printbuf::Printbuf;
+use crate::wrappers::sysfs::{self, DevInfo, bcachefs_kernel_version};
+
+use c::bch_data_type::*;
+use c::disk_accounting_type::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "snake_case")]
+enum Field {
+    Replicas,
+    Btree,
+    Compression,
+    RebalanceWork,
+    Devices,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "usage", about = "Display detailed filesystem usage", disable_help_flag = true)]
+pub struct Cli {
+    /// Print help
+    #[arg(long = "help", action = clap::ArgAction::Help)]
+    _help: (),
+
+    /// Comma-separated list of fields
+    #[arg(short = 'f', long = "fields", value_delimiter = ',', value_enum)]
+    fields: Vec<Field>,
+
+    /// Print all accounting fields
+    #[arg(short = 'a', long = "all")]
+    all: bool,
+
+    /// Human-readable units
+    #[arg(short = 'h', long = "human-readable")]
+    human_readable: bool,
+
+    /// Filesystem mountpoints
+    #[arg(default_value = ".")]
+    mountpoints: Vec<String>,
+}
+
+pub fn fs_usage(argv: Vec<String>) -> Result<()> {
+    let cli = Cli::try_parse_from(argv)?;
+
+    let fields: Vec<Field> = if cli.all {
+        vec![Field::Replicas, Field::Btree, Field::Compression,
+             Field::RebalanceWork, Field::Devices]
+    } else if cli.fields.is_empty() {
+        vec![Field::RebalanceWork]
+    } else {
+        cli.fields
+    };
+
+    for path in &cli.mountpoints {
+        let mut out = Printbuf::new();
+        out.set_human_readable(cli.human_readable);
+        fs_usage_to_text(&mut out, path, &fields)?;
+        print!("{}", out);
+    }
+
+    Ok(())
+}
+
+fn fmt_uuid(uuid: &[u8; 16]) -> String {
+    uuid::Uuid::from_bytes(*uuid).hyphenated().to_string()
+}
+
+struct DevContext {
+    info: DevInfo,
+    usage: DevUsage,
+    leaving: u64,
+}
+
+fn fs_usage_to_text(out: &mut Printbuf, path: &str, fields: &[Field]) -> Result<()> {
+    let handle = BcachefsHandle::open(path)
+        .map_err(|e| anyhow!("opening filesystem '{}': {}", path, e))?;
+
+    let sysfs_path = sysfs::sysfs_path_from_fd(handle.sysfs_fd())?;
+    let devs = sysfs::fs_get_devices(&sysfs_path)?;
+
+    fs_usage_v1_to_text(out, &handle, &devs, fields)
+        .map_err(|e| anyhow!("query_accounting ioctl failed (kernel too old?): {}", e))?;
+
+    devs_usage_to_text(out, &handle, &devs, fields)?;
+
+    Ok(())
+}
+
+fn fs_usage_v1_to_text(
+    out: &mut Printbuf,
+    handle: &BcachefsHandle,
+    devs: &[DevInfo],
+    fields: &[Field],
+) -> Result<(), errno::Errno> {
+    let has = |f: Field| -> bool { fields.contains(&f) };
+
+    let mut accounting_types: u32 =
+        (1 << BCH_DISK_ACCOUNTING_replicas as u32) |
+        (1 << BCH_DISK_ACCOUNTING_persistent_reserved as u32);
+
+    if has(Field::Compression) {
+        accounting_types |= 1 << BCH_DISK_ACCOUNTING_compression as u32;
+    }
+    if has(Field::Btree) {
+        accounting_types |= 1 << BCH_DISK_ACCOUNTING_btree as u32;
+    }
+    if has(Field::RebalanceWork) {
+        let version_reconcile =
+            c::bcachefs_metadata_version::bcachefs_metadata_version_reconcile as u64;
+        if bcachefs_kernel_version() < version_reconcile {
+            accounting_types |= 1 << BCH_DISK_ACCOUNTING_rebalance_work as u32;
+        } else {
+            accounting_types |= 1 << BCH_DISK_ACCOUNTING_reconcile_work as u32;
+            accounting_types |= 1 << BCH_DISK_ACCOUNTING_dev_leaving as u32;
+        }
+    }
+
+    let result = handle.query_accounting(accounting_types)?;
+
+    // Sort entries by bpos
+    let mut sorted: Vec<&AccountingEntry> = result.entries.iter().collect();
+    sorted.sort_by(|a, b| a.bpos.cmp(&b.bpos));
+
+    // Header
+    write!(out, "Filesystem: {}\n", fmt_uuid(&handle.uuid())).unwrap();
+
+    out.tabstops(&[20, 16]);
+
+    write!(out, "Size:\t").unwrap();
+    out.units_sectors(result.capacity);
+    write!(out, "\r\n").unwrap();
+
+    write!(out, "Used:\t").unwrap();
+    out.units_sectors(result.used);
+    write!(out, "\r\n").unwrap();
+
+    write!(out, "Online reserved:\t").unwrap();
+    out.units_sectors(result.online_reserved);
+    write!(out, "\r\n").unwrap();
+
+    // Replicas summary
+    replicas_summary_to_text(out, &sorted, devs);
+
+    // Detailed replicas
+    if has(Field::Replicas) {
+        out.tabstops(&[16, 16, 14, 14, 14]);
+        write!(out, "\nData type\tRequired/total\tDurability\tDevices\n").unwrap();
+
+        for entry in &sorted {
+            match &entry.pos {
+                DiskAccountingPos::PersistentReserved { nr_replicas } => {
+                    let sectors = entry.counter(0);
+                    if sectors == 0 { continue; }
+                    write!(out, "reserved:\t1/{}\t[] ", nr_replicas).unwrap();
+                    out.units_sectors(sectors);
+                    write!(out, "\r\n").unwrap();
+                }
+                DiskAccountingPos::Replicas { data_type, nr_devs, nr_required, devs: dev_list } => {
+                    let sectors = entry.counter(0);
+                    if sectors == 0 { continue; }
+
+                    let dur = replicas_durability(*nr_devs, *nr_required, dev_list, devs);
+
+                    accounting::prt_data_type(out, *data_type);
+                    write!(out, ":\t{}/{}\t{}\t[", nr_required, nr_devs, dur.durability).unwrap();
+
+                    prt_dev_list(out, dev_list, devs);
+                    write!(out, "]\t").unwrap();
+
+                    out.units_sectors(sectors);
+                    write!(out, "\r\n").unwrap();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Compression
+    if has(Field::Compression) {
+        let compr: Vec<_> = sorted.iter()
+            .filter(|e| matches!(e.pos, DiskAccountingPos::Compression { .. }))
+            .collect();
+        if !compr.is_empty() {
+            write!(out, "\nCompression:\n").unwrap();
+            out.tabstops(&[12, 16, 16, 24]);
+            write!(out, "type\tcompressed\runcompressed\raverage extent size\r\n").unwrap();
+
+            for entry in &compr {
+                if let DiskAccountingPos::Compression { compression_type } = &entry.pos {
+                    accounting::prt_compression_type(out, *compression_type);
+                    out.tab();
+
+                    let nr_extents = entry.counter(0);
+                    let sectors_uncompressed = entry.counter(1);
+                    let sectors_compressed = entry.counter(2);
+
+                    out.units_sectors(sectors_compressed);
+                    out.tab_rjust();
+                    out.units_sectors(sectors_uncompressed);
+                    out.tab_rjust();
+
+                    let avg = if nr_extents > 0 {
+                        (sectors_uncompressed << 9) / nr_extents
+                    } else { 0 };
+                    out.units_u64(avg);
+                    write!(out, "\r\n").unwrap();
+                }
+            }
+        }
+    }
+
+    // Btree usage
+    if has(Field::Btree) {
+        let btrees: Vec<_> = sorted.iter()
+            .filter(|e| matches!(e.pos, DiskAccountingPos::Btree { .. }))
+            .collect();
+        if !btrees.is_empty() {
+            write!(out, "\nBtree usage:\n").unwrap();
+            out.tabstops(&[12, 16]);
+            for entry in &btrees {
+                if let DiskAccountingPos::Btree { id } = &entry.pos {
+                    write!(out, "{}:\t", accounting::btree_id_str(*id)).unwrap();
+                    out.units_sectors(entry.counter(0));
+                    write!(out, "\r\n").unwrap();
+                }
+            }
+        }
+    }
+
+    // Rebalance / reconcile work
+    if has(Field::RebalanceWork) {
+        let rebalance: Vec<_> = sorted.iter()
+            .filter(|e| matches!(e.pos, DiskAccountingPos::RebalanceWork))
+            .collect();
+        if !rebalance.is_empty() {
+            write!(out, "\nPending rebalance work:\n").unwrap();
+            for entry in &rebalance {
+                out.units_sectors(entry.counter(0));
+                out.newline();
+            }
+        }
+
+        let reconcile: Vec<_> = sorted.iter()
+            .filter(|e| matches!(e.pos, DiskAccountingPos::ReconcileWork { .. }))
+            .collect();
+        if !reconcile.is_empty() {
+            out.tabstops(&[32, 12, 12]);
+            write!(out, "\nPending reconcile:\tdata\rmetadata\r\n").unwrap();
+            for entry in &reconcile {
+                if let DiskAccountingPos::ReconcileWork { work_type } = &entry.pos {
+                    accounting::prt_reconcile_type(out, *work_type);
+                    write!(out, ":").unwrap();
+                    out.tab();
+                    out.units_sectors(entry.counter(0));
+                    out.tab_rjust();
+                    out.units_sectors(entry.counter(1));
+                    out.tab_rjust();
+                    out.newline();
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ──────────────────────────── Replicas summary ──────────────────────────────
+
+struct Durability {
+    durability: u32,
+    degraded: u32,
+}
+
+fn replicas_durability(
+    nr_devs: u8,
+    nr_required: u8,
+    dev_list: &[u8],
+    devs: &[DevInfo],
+) -> Durability {
+    let mut durability: u32 = 0;
+    let mut degraded: u32 = 0;
+
+    for &dev_idx in dev_list {
+        let dev = devs.iter().find(|d| d.idx == dev_idx as u32);
+        let dev_durability = dev.map_or(1, |d| d.durability);
+
+        if dev.is_none() {
+            degraded += dev_durability;
+        }
+        durability += dev_durability;
+    }
+
+    if nr_required > 1 {
+        durability = (nr_devs - nr_required + 1) as u32;
+    }
+
+    Durability { durability, degraded }
+}
+
+/// Durability x degraded matrix: matrix[durability][degraded] = sectors
+type DurabilityMatrix = Vec<Vec<u64>>;
+
+fn durability_matrix_add(matrix: &mut DurabilityMatrix, durability: u32, degraded: u32, sectors: u64) {
+    while matrix.len() <= durability as usize {
+        matrix.push(Vec::new());
+    }
+    let row = &mut matrix[durability as usize];
+    while row.len() <= degraded as usize {
+        row.push(0);
+    }
+    row[degraded as usize] += sectors;
+}
+
+fn durability_matrix_to_text(out: &mut Printbuf, matrix: &DurabilityMatrix) {
+    let max_degraded = matrix.iter().map(|r| r.len()).max().unwrap_or(0);
+    if max_degraded == 0 { return; }
+
+    out.tabstops_reset();
+    out.tabstop_push(8);
+    out.tab();
+    for i in 0..max_degraded {
+        out.tabstop_push(12);
+        if i == 0 {
+            write!(out, "undegraded\r").unwrap();
+        } else {
+            write!(out, "-{}x\r", i).unwrap();
+        }
+    }
+    out.newline();
+
+    for (dur, row) in matrix.iter().enumerate() {
+        if row.is_empty() { continue; }
+        write!(out, "{}x:\t", dur).unwrap();
+        for val in row {
+            if *val != 0 {
+                out.units_sectors(*val);
+            }
+            out.tab_rjust();
+        }
+        out.newline();
+    }
+}
+
+/// EC entries grouped by stripe config: (nr_data, nr_parity) → [degraded] = sectors
+struct EcConfig {
+    nr_data:    u8,
+    nr_parity:  u8,
+    degraded:   Vec<u64>,  // [degraded_level] = sectors
+}
+
+fn ec_config_add(configs: &mut Vec<EcConfig>, nr_required: u8, nr_devs: u8, degraded: u32, sectors: u64) {
+    let nr_parity = nr_devs - nr_required;
+    let cfg = configs.iter_mut()
+        .find(|c| c.nr_data == nr_required && c.nr_parity == nr_parity);
+    let cfg = match cfg {
+        Some(c) => c,
+        None => {
+            configs.push(EcConfig { nr_data: nr_required, nr_parity, degraded: Vec::new() });
+            configs.last_mut().unwrap()
+        }
+    };
+    while cfg.degraded.len() <= degraded as usize {
+        cfg.degraded.push(0);
+    }
+    cfg.degraded[degraded as usize] += sectors;
+}
+
+fn ec_configs_to_text(out: &mut Printbuf, configs: &mut [EcConfig]) {
+    configs.sort_by_key(|c| (c.nr_data, c.nr_parity));
+
+    let max_degraded = configs.iter().map(|c| c.degraded.len()).max().unwrap_or(0);
+    if max_degraded == 0 { return; }
+
+    out.tabstops_reset();
+    out.tabstop_push(12);
+    out.tab();
+    for i in 0..max_degraded {
+        out.tabstop_push(12);
+        if i == 0 {
+            write!(out, "undegraded\r").unwrap();
+        } else {
+            write!(out, "-{}x\r", i).unwrap();
+        }
+    }
+    out.newline();
+
+    for cfg in configs.iter() {
+        write!(out, "{}+{}:\t", cfg.nr_data, cfg.nr_parity).unwrap();
+        for &val in &cfg.degraded {
+            if val != 0 {
+                out.units_sectors(val);
+            }
+            out.tab_rjust();
+        }
+        out.newline();
+    }
+}
+
+fn replicas_summary_to_text(
+    out: &mut Printbuf,
+    sorted: &[&AccountingEntry],
+    devs: &[DevInfo],
+) {
+    let mut replicated: DurabilityMatrix = Vec::new();
+    let mut ec_configs: Vec<EcConfig> = Vec::new();
+    let mut cached: u64 = 0;
+    let mut reserved: u64 = 0;
+
+    for entry in sorted {
+        match &entry.pos {
+            DiskAccountingPos::PersistentReserved { .. } => {
+                reserved += entry.counter(0);
+            }
+            DiskAccountingPos::Replicas { data_type, nr_devs, nr_required, devs: dev_list } => {
+                if *data_type == BCH_DATA_cached {
+                    cached += entry.counter(0);
+                    continue;
+                }
+
+                let d = replicas_durability(*nr_devs, *nr_required, dev_list, devs);
+
+                if *nr_required > 1 {
+                    ec_config_add(&mut ec_configs, *nr_required, *nr_devs, d.degraded, entry.counter(0));
+                } else {
+                    durability_matrix_add(&mut replicated, d.durability, d.degraded, entry.counter(0));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let has_ec = !ec_configs.is_empty();
+
+    write!(out, "\n").unwrap();
+    if has_ec {
+        write!(out, "Replicated:\n").unwrap();
+    }
+    durability_matrix_to_text(out, &replicated);
+
+    if has_ec {
+        write!(out, "\nErasure coded (data+parity):\n").unwrap();
+        ec_configs_to_text(out, &mut ec_configs);
+    }
+
+    if cached > 0 {
+        write!(out, "cached:\t").unwrap();
+        out.units_sectors(cached);
+        write!(out, "\r\n").unwrap();
+    }
+    if reserved > 0 {
+        write!(out, "reserved:\t").unwrap();
+        out.units_sectors(reserved);
+        write!(out, "\r\n").unwrap();
+    }
+}
+
+/// Print a device list like [sda sdb sdc].
+fn prt_dev_list(out: &mut Printbuf, dev_list: &[u8], devs: &[DevInfo]) {
+    for (i, &dev_idx) in dev_list.iter().enumerate() {
+        if i > 0 { write!(out, " ").unwrap(); }
+        if dev_idx == c::BCH_SB_MEMBER_INVALID as u8 {
+            write!(out, "none").unwrap();
+        } else if let Some(d) = devs.iter().find(|d| d.idx == dev_idx as u32) {
+            write!(out, "{}", d.dev).unwrap();
+        } else {
+            write!(out, "{}", dev_idx).unwrap();
+        }
+    }
+}
+
+// ──────────────────────────── Device usage ───────────────────────────────────
+
+fn devs_usage_to_text(
+    out: &mut Printbuf,
+    handle: &BcachefsHandle,
+    devs: &[DevInfo],
+    fields: &[Field],
+) -> Result<()> {
+    let has = |f: Field| -> bool { fields.contains(&f) };
+
+    // Query dev_leaving accounting if available
+    let dev_leaving_map = match handle.query_accounting(1 << BCH_DISK_ACCOUNTING_dev_leaving as u32) {
+        Ok(result) => result.entries,
+        Err(_) => Vec::new(),
+    };
+
+    let mut dev_ctxs: Vec<DevContext> = Vec::new();
+    for dev in devs {
+        let usage = handle.dev_usage(dev.idx)
+            .map_err(|e| anyhow!("getting usage for device {}: {}", dev.idx, e))?;
+        let leaving = dev_leaving_sectors(&dev_leaving_map, dev.idx);
+        dev_ctxs.push(DevContext { info: dev.clone(), usage, leaving });
+    }
+
+    // Sort by label, then dev name, then idx
+    dev_ctxs.sort_by(|a, b| {
+        a.info.label.cmp(&b.info.label)
+            .then(a.info.dev.cmp(&b.info.dev))
+            .then(a.info.idx.cmp(&b.info.idx))
+    });
+
+    let has_leaving = dev_ctxs.iter().any(|d| d.leaving != 0);
+
+    out.newline();
+
+    if has(Field::Devices) {
+        // Full per-device breakdown
+        out.tabstops(&[16, 20, 16, 14]);
+
+        for d in &dev_ctxs {
+            dev_usage_full_to_text(out, d);
+        }
+    } else {
+        // Summary table
+        out.tabstops(&[32, 12, 8, 10, 10, 6, 10]);
+
+        write!(out, "Device label\tDevice\tState\tSize\rUsed\rUse%\r").unwrap();
+        if has_leaving {
+            write!(out, "Leaving\r").unwrap();
+        }
+        out.newline();
+
+        for d in &dev_ctxs {
+            let capacity = d.usage.capacity_sectors();
+            let used = d.usage.used_sectors();
+            let label = d.info.label.as_deref().unwrap_or("(no label)");
+            let state = accounting::member_state_str(d.usage.state);
+
+            write!(out, "{} (device {}):\t{}\t{}\t", label, d.info.idx, d.info.dev, state).unwrap();
+
+            out.units_sectors(capacity);
+            out.tab_rjust();
+            out.units_sectors(used);
+
+            let pct = if capacity > 0 { used * 100 / capacity } else { 0 };
+            write!(out, "\r{:>2}%\r", pct).unwrap();
+
+            if d.leaving > 0 {
+                out.units_sectors(d.leaving);
+                out.tab_rjust();
+            }
+
+            out.newline();
+        }
+    }
+
+    Ok(())
+}
+
+fn dev_usage_full_to_text(out: &mut Printbuf, d: &DevContext) {
+    let u = &d.usage;
+    let capacity = u.capacity_sectors();
+    let used = u.used_sectors();
+
+    let label = d.info.label.as_deref().unwrap_or("(no label)");
+    let state = accounting::member_state_str(u.state);
+    let pct = if capacity > 0 { used * 100 / capacity } else { 0 };
+
+    write!(out, "{} (device {}):\t{}\r{}\r    {:>2}%\n", label, d.info.idx, d.info.dev, state, pct).unwrap();
+
+    out.indent_add(2);
+    write!(out, "\tdata\rbuckets\rfragmented\r\n").unwrap();
+
+    for (dt_type, dt) in u.iter_typed() {
+        accounting::prt_data_type(out, dt_type);
+        write!(out, ":\t").unwrap();
+
+        let sectors = if data_type_is_empty(dt_type) {
+            dt.buckets * u.bucket_size as u64
+        } else {
+            dt.sectors
+        };
+        out.units_sectors(sectors);
+
+        write!(out, "\r{}\r", dt.buckets).unwrap();
+
+        if dt.fragmented > 0 {
+            out.units_sectors(dt.fragmented);
+        }
+        write!(out, "\r\n").unwrap();
+    }
+
+    write!(out, "capacity:\t").unwrap();
+    out.units_sectors(capacity);
+    write!(out, "\r{}\r\n", u.nr_buckets).unwrap();
+
+    write!(out, "bucket size:\t").unwrap();
+    out.units_sectors(u.bucket_size as u64);
+    write!(out, "\r\n").unwrap();
+
+    out.indent_sub(2);
+    out.newline();
+}
+
+fn dev_leaving_sectors(entries: &[AccountingEntry], dev_idx: u32) -> u64 {
+    entries.iter()
+        .find_map(|e| match &e.pos {
+            DiskAccountingPos::DevLeaving { dev } if *dev == dev_idx => Some(e.counter(0)),
+            _ => None,
+        })
+        .unwrap_or(0)
+}

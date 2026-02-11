@@ -49,8 +49,8 @@ static inline unsigned extent_entry_type(const union bch_extent_entry *e)
 static inline size_t extent_entry_u64s(const struct bch_fs *c, const union bch_extent_entry *entry)
 {
 	unsigned type = extent_entry_type(entry);
-	BUG_ON(type >= c->extent_types_known);
-	return c->extent_type_u64s[type];
+	BUG_ON(type >= c->sb.extent_types_known);
+	return c->sb.extent_type_u64s[type];
 }
 
 static inline size_t extent_entry_bytes(const struct bch_fs *c, const union bch_extent_entry *entry)
@@ -62,7 +62,7 @@ static inline size_t extent_entry_bytes(const struct bch_fs *c, const union bch_
 	((typeof(_entry)) ((void *) (_entry) + extent_entry_bytes(_c, _entry)))
 
 #define extent_entry_next_safe(_c, _entry, _end)			\
-	(likely(extent_entry_type(_entry) < (_c)->extent_types_known)	\
+	(likely(extent_entry_type(_entry) < (_c)->sb.extent_types_known)\
 	 ? extent_entry_next(_c, _entry)				\
 	 : _end)
 
@@ -388,7 +388,8 @@ void bch2_mark_io_failure(struct bch_io_failures *, struct extent_ptr_decoded *,
 void bch2_mark_dev_io_failure(struct bch_io_failures *, unsigned, int);
 int bch2_bkey_pick_read_device(struct bch_fs *, struct bkey_s_c,
 			       struct bch_io_failures *,
-			       struct extent_ptr_decoded *, int);
+			       struct extent_ptr_decoded *, unsigned,
+			       enum bch_read_flags);
 
 /* KEY_TYPE_btree_ptr: */
 
@@ -577,12 +578,19 @@ unsigned bch2_bkey_replicas(struct bch_fs *, struct bkey_s_c);
 unsigned bch2_dev_durability(struct bch_fs *, unsigned);
 int bch2_extent_ptr_desired_durability(struct btree_trans *, struct extent_ptr_decoded *);
 int bch2_extent_ptr_durability(struct btree_trans *, struct extent_ptr_decoded *);
-int bch2_bkey_durability(struct btree_trans *, struct bkey_s_c);
-unsigned bch2_btree_ptr_durability(struct bch_fs *, struct bkey_s_c);
+
+struct bkey_durability {
+	unsigned	online, total;
+};
+
+int bch2_bkey_durability(struct btree_trans *, struct bkey_s_c, struct bkey_durability *);
+struct bkey_durability bch2_btree_ptr_durability(struct bch_fs *, struct bkey_s_c);
 bool bch2_bkey_can_read(const struct bch_fs *, struct bkey_s_c);
 
 const struct bch_extent_ptr *bch2_bkey_has_device_c(const struct bch_fs *,
 						    struct bkey_s_c, unsigned);
+bool bch2_bkey_has_device_decode(const struct bch_fs *, struct bkey_s_c, unsigned,
+				 struct extent_ptr_decoded *);
 
 static inline struct bch_extent_ptr *bch2_bkey_has_device(const struct bch_fs *c,
 							  struct bkey_s k, unsigned dev)
@@ -594,6 +602,8 @@ bool bch2_bkey_devs_rw(struct bch_fs *, struct bkey_s_c);
 
 bool bch2_bkey_has_target(struct bch_fs *, struct bkey_s_c, unsigned);
 bool bch2_bkey_in_target(struct bch_fs *, struct bkey_s_c, unsigned);
+
+bool bch2_bkey_has_dev_bad_or_evacuating(struct bch_fs *, struct bkey_s_c);
 
 void bch2_bkey_extent_entry_drop_s(const struct bch_fs *, struct bkey_s, union bch_extent_entry *);
 void bch2_bkey_extent_entry_drop(const struct bch_fs *, struct bkey_i *, union bch_extent_entry *);
@@ -670,6 +680,8 @@ do {										\
 
 bool bch2_bkey_matches_ptr(struct bch_fs *, struct bkey_s_c,
 			   struct bch_extent_ptr, u64);
+bool bch2_bkey_ptrs_match(struct bkey_s_c, struct extent_ptr_decoded,
+			  struct bkey_s_c, struct extent_ptr_decoded);
 bool bch2_extents_match(const struct bch_fs *c, struct bkey_s_c, struct bkey_s_c);
 struct bch_extent_ptr *
 bch2_extent_has_ptr(const struct bch_fs *, struct bkey_s_c, struct extent_ptr_decoded, struct bkey_s);
@@ -679,7 +691,11 @@ void bch2_extent_ptr_set_cached(struct bch_fs *, struct bch_inode_opts *,
 
 int bch2_bkey_drop_stale_ptrs(struct btree_trans *, struct btree_iter *, struct bkey_s_c);
 void bch2_bkey_drop_extra_cached_ptrs(struct bch_fs *, struct bch_inode_opts *, struct bkey_s);
-int bch2_bkey_drop_extra_durability(struct btree_trans *, struct bch_inode_opts *, struct bkey_s);
+int bch2_bkey_drop_extra_durability(struct btree_trans *, struct bch_inode_opts *,
+				    struct bkey_i *, unsigned, bool);
+int bch2_bkey_drop_extra_ec_durability(struct btree_trans *,
+				       struct bch_inode_opts *,
+				       struct bkey_i *, unsigned);
 
 void bch2_extent_ptr_to_text(struct printbuf *out, struct bch_fs *, const struct bch_extent_ptr *);
 void bch2_bkey_ptrs_to_text(struct printbuf *, struct bch_fs *,

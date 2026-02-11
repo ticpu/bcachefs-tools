@@ -1,6 +1,7 @@
 #ifndef _LINUX_MODULE_H
 #define _LINUX_MODULE_H
 
+#include <linux/kernel.h>
 #include <linux/stat.h>
 #include <linux/compiler.h>
 #include <linux/export.h>

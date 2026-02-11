@@ -295,7 +295,7 @@ static int __bch2_btree_iter_verify_ret(struct btree_iter *iter, struct bkey_s_c
 	if (bkey_err(k) || !k.k)
 		return 0;
 
-	BUG_ON(!bch2_snapshot_is_ancestor(trans->c,
+	BUG_ON(!bch2_snapshot_is_ancestor(trans,
 					  iter->snapshot,
 					  k.k->p.snapshot));
 
@@ -307,7 +307,7 @@ static int __bch2_btree_iter_verify_ret(struct btree_iter *iter, struct bkey_s_c
 		return 0;
 
 	if (bkey_eq(prev.k->p, k.k->p) &&
-	    bch2_snapshot_is_ancestor(trans->c, iter->snapshot,
+	    bch2_snapshot_is_ancestor(trans, iter->snapshot,
 				      prev.k->p.snapshot) > 0) {
 		struct printbuf buf1 = PRINTBUF, buf2 = PRINTBUF;
 
@@ -582,6 +582,8 @@ static inline struct bkey_s_c btree_path_level_prev(struct btree_trans *trans,
 						    struct btree_path_level *l,
 						    struct bkey *u)
 {
+	BUG_ON(path->ref != 1);
+
 	struct bkey_s_c k = __btree_iter_unpack(trans->c, l, u,
 			bch2_btree_node_iter_prev(&l->iter, l->b));
 
@@ -2144,7 +2146,9 @@ inline bool bch2_btree_iter_advance(struct btree_iter *iter)
 
 inline bool bch2_btree_iter_rewind(struct btree_iter *iter)
 {
-	struct bpos pos = bkey_start_pos(&iter->k);
+	struct bpos pos = iter->flags & BTREE_ITER_is_extents
+		? bkey_start_pos(&iter->k)
+		: iter->k.p;
 	bool ret = !(iter->flags & BTREE_ITER_all_snapshots
 		     ? bpos_eq(pos, POS_MIN)
 		     : bkey_eq(pos, POS_MIN));
@@ -2383,8 +2387,7 @@ static struct bkey_s_c __bch2_btree_iter_peek(struct btree_iter *iter, struct bp
 		if (unlikely(iter->flags & BTREE_ITER_with_journal))
 			btree_trans_peek_journal(trans, iter, search_key, &k);
 
-		if (unlikely((iter->flags & BTREE_ITER_with_updates) &&
-			     trans->nr_updates))
+		if (unlikely(trans->nr_updates))
 			bch2_btree_trans_peek_updates(trans, iter, search_key, &k);
 
 		if (k.k && bkey_deleted(k.k)) {
@@ -2529,7 +2532,7 @@ struct bkey_s_c bch2_btree_iter_peek_max(struct btree_iter *iter, struct bpos en
 			 * We can never have a key in a leaf node at POS_MAX, so
 			 * we don't have to check these successor() calls:
 			 */
-			if (!bch2_snapshot_is_ancestor(trans->c,
+			if (!bch2_snapshot_is_ancestor(trans,
 						       iter->snapshot,
 						       k.k->p.snapshot)) {
 				search_key = bpos_successor(k.k->p);
@@ -2666,14 +2669,22 @@ static struct bkey_s_c __bch2_btree_iter_peek_prev(struct btree_iter *iter, stru
 			k = bkey_s_c_null;
 			break;
 		}
+		iter->path = bch2_btree_path_make_mut(trans, iter->path,
+				iter->flags & BTREE_ITER_intent,
+				btree_iter_ip_allocated(iter));
+		path = btree_iter_path(trans, iter);
+		l = path_l(path);
 
 		btree_path_set_should_be_locked(trans, path);
 
 		k = btree_path_level_peek_all(trans->c, l, &iter->k);
+
 		if (!k.k || bpos_gt(k.k->p, search_key)) {
 			k = btree_path_level_prev(trans, path, l, &iter->k);
 
 			BUG_ON(k.k && bpos_gt(k.k->p, search_key));
+		} else if (k.k) {
+			path->pos = k.k->p;
 		}
 
 		if (unlikely(iter->flags & BTREE_ITER_with_key_cache) &&
@@ -2690,17 +2701,16 @@ static struct bkey_s_c __bch2_btree_iter_peek_prev(struct btree_iter *iter, stru
 		if (unlikely(iter->flags & BTREE_ITER_with_journal))
 			btree_trans_peek_prev_journal(trans, iter, search_key, &k);
 
-		if (unlikely((iter->flags & BTREE_ITER_with_updates) &&
-			     trans->nr_updates))
+		if (unlikely(trans->nr_updates))
 			bch2_btree_trans_peek_prev_updates(trans, iter, search_key, &k);
 
 		if (likely(k.k && !bkey_deleted(k.k))) {
 			break;
 		} else if (k.k) {
 			search_key = bpos_predecessor(k.k->p);
-		} else if (likely(!bpos_eq(path->l[0].b->data->min_key, POS_MIN))) {
+		} else if (likely(!bpos_eq(l->b->data->min_key, POS_MIN))) {
 			/* Advance to previous leaf node: */
-			search_key = bpos_predecessor(path->l[0].b->data->min_key);
+			search_key = bpos_predecessor(l->b->data->min_key);
 		} else {
 			/* Start of btree: */
 			bch2_btree_iter_set_pos(iter, POS_MIN);
@@ -2793,7 +2803,7 @@ struct bkey_s_c bch2_btree_iter_peek_prev_min(struct btree_iter *iter, struct bp
 			if (unlikely(bkey_lt(k.k->p, end)))
 				goto end;
 
-			if (!bch2_snapshot_is_ancestor(trans->c, iter->snapshot, k.k->p.snapshot)) {
+			if (!bch2_snapshot_is_ancestor(trans, iter->snapshot, k.k->p.snapshot)) {
 				search_key = bpos_predecessor(k.k->p);
 				continue;
 			}
@@ -2941,8 +2951,7 @@ struct bkey_s_c bch2_btree_iter_peek_slot(struct btree_iter *iter)
 	    !(iter->flags & (BTREE_ITER_is_extents|BTREE_ITER_filter_snapshots))) {
 		k = bkey_s_c_null;
 
-		if (unlikely((iter->flags & BTREE_ITER_with_updates) &&
-			     trans->nr_updates)) {
+		if (unlikely(trans->nr_updates)) {
 			bch2_btree_trans_peek_slot_updates(trans, iter, &k);
 			if (k.k)
 				goto out;
@@ -3071,6 +3080,32 @@ struct bkey_s_c bch2_btree_iter_peek_and_restart_outlined(struct btree_iter *ite
 
 	lockrestart_do(iter->trans, bkey_err(k = bch2_btree_iter_peek_type(iter, iter->flags)));
 	return k;
+}
+
+struct bkey_s_c bch2_btree_iter_peek_root(struct btree_trans *trans, struct btree_iter *iter,
+					  enum btree_id btree, unsigned level)
+{
+	struct bch_fs *c = trans->c;
+
+	while (level == bch2_btree_id_root(c, btree)->b->c.level + 1) {
+		bch2_trans_node_iter_init(trans, iter, btree, POS_MIN, 0, level - 1,
+					  BTREE_ITER_not_extents|
+					  BTREE_ITER_all_snapshots);
+		struct btree *b = bch2_btree_iter_peek_node(iter);
+		int ret = PTR_ERR_OR_ZERO(b);
+		if (ret)
+			return bkey_s_c_err(ret);
+
+		if (b != btree_node_root(c, b))
+			continue;
+
+		if (btree_node_fake(b))
+			break;
+
+		return bkey_i_to_s_c(&b->key);
+	}
+
+	return bkey_s_c_null;
 }
 
 /* new transactional stuff: */
@@ -3864,6 +3899,8 @@ void bch2_fs_btree_iter_exit(struct bch_fs *c)
 		bch2_time_stats_exit(&s->lock_hold_times);
 	}
 
+	printbuf_exit(&c->btree.trans.stats_json_buf);
+
 	if (c->btree.trans.barrier_initialized) {
 		synchronize_srcu_expedited(&c->btree.trans.barrier);
 		cleanup_srcu_struct(&c->btree.trans.barrier);
@@ -3886,6 +3923,8 @@ void bch2_fs_btree_iter_init_early(struct bch_fs *c)
 
 	INIT_LIST_HEAD(&c->btree.trans.list);
 	seqmutex_init(&c->btree.trans.lock);
+	mutex_init(&c->btree.trans.stats_json_lock);
+	c->btree.trans.stats_json_buf = PRINTBUF;
 }
 
 int bch2_fs_btree_iter_init(struct bch_fs *c)

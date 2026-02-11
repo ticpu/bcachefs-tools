@@ -15,6 +15,7 @@
 #include "data/compress.h"
 
 #include "init/error.h"
+#include "init/fs.h"
 #include "init/passes.h"
 
 /*
@@ -431,8 +432,11 @@ int bch2_accounting_mem_insert(struct bch_fs *c, struct bkey_s_c_accounting a,
 
 	percpu_up_read(&c->capacity.mark_lock);
 	int ret;
-	scoped_guard(percpu_write, &c->capacity.mark_lock)
+	scoped_guard(percpu_write, &c->capacity.mark_lock) {
+		guard(memalloc_flags)(PF_MEMALLOC_NOFS);
+
 		ret = __bch2_accounting_mem_insert(c, a);
+	}
 	percpu_down_read(&c->capacity.mark_lock);
 	return ret;
 }
@@ -468,8 +472,14 @@ void __bch2_accounting_maybe_kill(struct bch_fs *c, struct bpos pos)
 	if (acc_k.type != BCH_DISK_ACCOUNTING_replicas)
 		return;
 
+	if (acc_k.replicas.data_type > BCH_DATA_btree &&
+	    !bch2_request_incompat_feature(c, bcachefs_metadata_version_no_sb_user_data_replicas))
+		return;
+
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
 	scoped_guard(percpu_write, &c->capacity.mark_lock) {
+
 		struct bch_accounting_mem *acc = &c->accounting;
 
 		unsigned idx = eytzinger0_find(acc->k.data, acc->k.nr, sizeof(acc->k.data[0]),
@@ -624,6 +634,8 @@ int bch2_gc_accounting_start(struct bch_fs *c)
 	int ret = 0;
 
 	guard(percpu_write)(&c->capacity.mark_lock);
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
+
 	darray_for_each(acc->k, e) {
 		e->v[1] = __alloc_percpu_gfp(e->nr_counters * sizeof(u64),
 					     sizeof(u64), GFP_KERNEL);
@@ -647,6 +659,8 @@ int bch2_gc_accounting_done(struct bch_fs *c)
 	int ret = 0;
 
 	guard(percpu_write)(&c->capacity.mark_lock);
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
+
 	while (1) {
 		unsigned idx = eytzinger0_find_ge(acc->k.data, acc->k.nr, sizeof(acc->k.data[0]),
 						  accounting_pos_cmp, &pos);
@@ -726,6 +740,29 @@ static int accounting_read_key(struct btree_trans *trans, struct bkey_s_c k)
 
 	if (k.k->type != KEY_TYPE_accounting)
 		return 0;
+
+	struct disk_accounting_pos acc_k;
+	bpos_to_disk_accounting_pos(&acc_k, k.k->p);
+
+	if (acc_k.type == BCH_DISK_ACCOUNTING_replicas &&
+	    !bch2_accounting_key_is_zero(bkey_s_c_to_accounting(k))) {
+		unsigned flags = 0;
+		switch (c->opts.degraded) {
+		case BCH_DEGRADED_very:
+			flags |= BCH_FORCE_IF_DEGRADED|BCH_FORCE_IF_LOST;
+			break;
+		case BCH_DEGRADED_yes:
+			flags |= BCH_FORCE_IF_DEGRADED;
+			break;
+		}
+
+		CLASS(printbuf, buf)();
+		if (!bch2_can_read_replicas_with_devs(c, &c->devs_online, &acc_k.replicas, flags, &buf)) {
+			bch2_missing_devs_to_text(&buf, c);
+			bch2_print_str_loglevel(c, LOGLEVEL_err, buf.buf);
+			return bch_err_throw(c, insufficient_devices_to_start);
+		}
+	}
 
 	guard(percpu_read)(&c->capacity.mark_lock);
 	return bch2_accounting_mem_mod_locked(trans, bkey_s_c_to_accounting(k),

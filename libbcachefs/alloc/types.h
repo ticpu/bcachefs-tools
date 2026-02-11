@@ -29,7 +29,7 @@ enum bch_watermark {
 #define BCH_WATERMARK_BITS	3
 #define BCH_WATERMARK_MASK	~(~0U << BCH_WATERMARK_BITS)
 
-#define OPEN_BUCKETS_COUNT	1024
+#define OPEN_BUCKETS_COUNT	4096
 
 #define WRITE_POINT_HASH_NR	32
 #define WRITE_POINT_MAX		32
@@ -94,6 +94,7 @@ struct write_point {
 
 		/* calculated based on how many pointers we're actually going to use: */
 		unsigned		sectors_free;
+		unsigned		prev_sectors_free;
 
 		struct open_buckets	ptrs;
 		struct dev_stripe_state	stripe;

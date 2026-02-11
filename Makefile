@@ -1,4 +1,10 @@
+ifneq ($(wildcard .git),)
+VERSION=$(shell git -c safe.directory=$$PWD -c core.abbrev=12 describe)
+else ifneq ($(wildcard .version),)
+VERSION=$(shell cat .version)
+else
 VERSION=$(shell cargo metadata --format-version 1 | jq -r '.packages[] | select(.name | test("bcachefs-tools")) | .version')
+endif
 
 PREFIX?=/usr/local
 LIBEXECDIR?=$(PREFIX)/libexec
@@ -48,9 +54,8 @@ CFLAGS+=-std=gnu11 -O2 -g -MMD -Wall -fPIC			\
 	-DFUSE_USE_VERSION=35					\
 	-DNO_BCACHEFS_CHARDEV					\
 	-DNO_BCACHEFS_FS					\
-	-DNO_BCACHEFS_SYSFS					\
+	-DCONFIG_DEBUG_FS					\
 	-DCONFIG_UNICODE					\
-	-DVERSION_STRING='"$(VERSION)"'				\
 	-D__SANE_USERSPACE_TYPES__				\
 	$(EXTRA_CFLAGS)
 
@@ -152,29 +157,29 @@ libbcachefs.a: $(OBJS)
 	@echo "    [AR]     $@"
 	$(Q)$(AR) -rc $@ $+
 
-.PHONY: generate_version
-generate_version:
-ifneq ($(VERSION),$(shell cat .version 2>/dev/null))
-# If the version string differs from the last build, update the last version
-	@echo "  [VERS]    .version"
-	$(Q)echo '$(VERSION)' > .version
-endif
+.PHONY: force
 
-.version: generate_version
-	$(Q)echo -n
+.version: force
+	$(Q)echo "$(VERSION)" > .version.new
+	$(Q)cmp -s .version.new .version || mv .version.new .version
+
+VERSION_H=$(shell echo "#define bcachefs_version \\\"$(VERSION)\\\"")
+
+version.h: force
+	$(Q)echo "$(VERSION_H)" > version.h.new
+	$(Q)cmp -s version.h.new version.h || mv version.h.new version.h
+
+.PHONY: generate_version
+generate_version: .version version.h
 
 # Rebuild the 'version' command any time the version string changes
-cmd_version.o : .version
+c_src/cmd_version.o : version.h
+c_src/cmd_fusemount.o: version.h
 
 .PHONY: dkms/dkms.conf
-dkms/dkms.conf: dkms/dkms.conf.in .version
+dkms/dkms.conf: dkms/dkms.conf.in version.h
 	@echo "    [SED]    $@"
 	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/dkms.conf.in > dkms/dkms.conf
-
-# Recreate dkms/module-version.c iff and only iff version string changes.
-dkms/module-version.c: dkms/module-version.c.in .version
-	@echo "    [SED]    $@"
-	$(Q)sed "s|@PACKAGE_VERSION@|$(VERSION)|g" dkms/module-version.c.in > dkms/module-version.c
 
 .PHONY: initramfs/hook
 initramfs/hook: initramfs/hook.in
@@ -182,17 +187,20 @@ initramfs/hook: initramfs/hook.in
 	$(Q)sed "s|@ROOT_SBINDIR@|$(ROOT_SBINDIR)|g" initramfs/hook.in > initramfs/hook
 
 .PHONY: install
+BASH_COMPLETION_DIR?=$(shell $(PKG_CONFIG) --variable=completionsdir bash-completion 2>/dev/null || echo $(PREFIX)/share/bash-completion/completions)
+
 install: INITRAMFS_HOOK=$(INITRAMFS_DIR)/hooks/bcachefs
 install: INITRAMFS_SCRIPT=$(INITRAMFS_DIR)/scripts/local-premount/bcachefs
 install: all install_dkms
 	$(INSTALL) -m0755 -D $(BUILT_BIN)  -t $(DESTDIR)$(ROOT_SBINDIR)
 	$(INSTALL) -m0644 -D bcachefs.8    -t $(DESTDIR)$(PREFIX)/share/man/man8/
-	$(INSTALL) -m0755 -D initramfs/script $(DESTDIR)$(INITRAMFS_SCRIPT)
 	$(INSTALL) -m0755 -D initramfs/hook   $(DESTDIR)$(INITRAMFS_HOOK)
 	$(INSTALL) -m0644 -D udev/64-bcachefs.rules -t $(DESTDIR)$(PKGCONFIG_UDEVRULESDIR)/
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/mkfs.bcachefs
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/fsck.bcachefs
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/mount.bcachefs
+	$(INSTALL) -d $(DESTDIR)$(BASH_COMPLETION_DIR)
+	$(BUILT_BIN) completions bash > $(DESTDIR)$(BASH_COMPLETION_DIR)/bcachefs
 ifdef BCACHEFS_FUSE
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/mkfs.fuse.bcachefs
 	$(LN) -sfr $(DESTDIR)$(ROOT_SBINDIR)/bcachefs $(DESTDIR)$(ROOT_SBINDIR)/fsck.fuse.bcachefs
@@ -206,6 +214,7 @@ install_dkms: dkms/dkms.conf dkms/module-version.c
 	$(INSTALL) -m0644 -D libbcachefs/Makefile	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
 	(cd libbcachefs; find -name '*.[ch]' -exec install -m0644 -D {} $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/{} \; )
 	$(INSTALL) -m0644 -D dkms/module-version.c	-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
+	$(INSTALL) -m0644 -D version.h			-t $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs
 	sed -i "s|^#define TRACE_INCLUDE_PATH \\.\\./\\.\\./fs/bcachefs$$|#define TRACE_INCLUDE_PATH .|" \
 	  $(DESTDIR)$(DKMSDIR)/src/fs/bcachefs/debug/trace.h
 
@@ -242,6 +251,7 @@ update-bcachefs-sources:
 	cp -r $(LINUX_DIR)/fs/bcachefs/* libbcachefs/
 	git add libbcachefs/*.[ch]
 	git add libbcachefs/*/*.[ch]
+	git add libbcachefs/*/*/*.[ch]
 	git add libbcachefs/Makefile
 	git add libbcachefs/Kconfig
 	git rm -f libbcachefs/util/mean_and_variance_test.c

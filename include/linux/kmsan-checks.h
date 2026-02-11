@@ -10,7 +10,7 @@
 #ifndef _LINUX_KMSAN_CHECKS_H
 #define _LINUX_KMSAN_CHECKS_H
 
-#include <linux/types.h>
+#include <linux/kernel.h>
 
 #ifdef CONFIG_KMSAN
 
@@ -24,7 +24,7 @@
  * uninitialized. Error reports for this memory will reference the call site of
  * kmsan_poison_memory() as origin.
  */
-void kmsan_poison_memory(const void *address, size_t size, gfp_t flags);
+void kmsan_poison_memory(const void *address, size_t size, unsigned flags);
 
 /**
  * kmsan_unpoison_memory() -  Mark the memory range as initialized.
@@ -75,7 +75,7 @@ void kmsan_memmove(void *to, const void *from, size_t to_copy);
 #else
 
 static inline void kmsan_poison_memory(const void *address, size_t size,
-				       gfp_t flags)
+				       unsigned flags)
 {
 }
 static inline void kmsan_unpoison_memory(const void *address, size_t size)

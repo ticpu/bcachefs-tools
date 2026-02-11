@@ -14,13 +14,13 @@
 #include "btree/interior.h"
 #include "btree/write_buffer.h"
 
-#include "data/ec.h"
+#include "data/ec/init.h"
 #include "data/extents.h"
 #include "data/write.h"
 #include "data/keylist.h"
 #include "data/migrate.h"
 #include "data/move.h"
-#include "data/reconcile.h"
+#include "data/reconcile/trigger.h"
 
 #include "journal/journal.h"
 
@@ -49,12 +49,13 @@ static struct bkey_i *drop_dev_ptrs(struct btree_trans *trans, struct bkey_s_c k
 
 	bch2_bkey_drop_device(c, bkey_i_to_s(n), dev_idx);
 
-	int nr_good = bch2_bkey_durability(trans, bkey_i_to_s_c(n));
-	if (nr_good < 0)
-		return ERR_PTR(nr_good);
+	struct bkey_durability durability;
+	int ret = bch2_bkey_durability(trans, bkey_i_to_s_c(n), &durability);
+	if (ret)
+		return ERR_PTR(ret);
 
-	if ((!nr_good && !(flags & lost)) ||
-	    (nr_good < replicas && !(flags & degraded))) {
+	if ((!durability.total && !(flags & lost)) ||
+	    (durability.total < replicas && !(flags & degraded))) {
 		prt_str(err, "cannot drop device without degrading/losing data\n  ");
 		bch2_bkey_val_to_text(err, c, k);
 		prt_newline(err);
@@ -65,7 +66,7 @@ static struct bkey_i *drop_dev_ptrs(struct btree_trans *trans, struct bkey_s_c k
 		struct bch_inode_opts opts;
 		int ret = bch2_bkey_get_io_opts(trans, NULL, k, &opts) ?:
 			  bch2_bkey_set_needs_reconcile(trans, NULL, &opts, n,
-							SET_NEEDS_REBALANCE_opt_change, 0);
+							SET_NEEDS_RECONCILE_opt_change, 0);
 		if (ret)
 			return ERR_PTR(ret);
 	} else if (!metadata) {
@@ -224,29 +225,55 @@ static int data_drop_bp(struct btree_trans *trans, unsigned dev_idx,
 		return bch2_dev_usrdata_drop_key(trans, &iter, k, dev_idx, flags, err);
 }
 
-int bch2_dev_data_drop_by_backpointers(struct bch_fs *c, unsigned dev_idx, unsigned flags,
-				       struct printbuf *err)
+static bool dev_has_data(struct bch_fs *c, struct bch_dev *ca)
 {
+	struct bch_dev_usage usage = bch2_dev_usage_read(ca);
+	for (unsigned i = 0; i < BCH_DATA_NR; i++)
+		if (!data_type_is_empty(i) && !data_type_is_hidden(i) && usage.buckets[i])
+			return true;
+
+	return false;
+}
+
+int bch2_dev_data_drop_by_backpointers(struct bch_fs *c, struct bch_dev *ca,
+				       unsigned flags, struct printbuf *err)
+{
+	unsigned dev_idx = ca->dev_idx;
+
 	CLASS(btree_trans, trans)(c);
-	CLASS(disk_reservation, res)(c);
 
 	struct wb_maybe_flush last_flushed __cleanup(wb_maybe_flush_exit);
 	wb_maybe_flush_init(&last_flushed);
 
-	return bch2_btree_write_buffer_flush_sync(trans) ?:
-		for_each_btree_key_max_commit(trans, iter, BTREE_ID_backpointers,
-				POS(dev_idx, 0),
-				POS(dev_idx, U64_MAX), 0, k,
-				&res.r, NULL, BCH_TRANS_COMMIT_no_enospc, ({
-			if (k.k->type != KEY_TYPE_backpointer)
-				continue;
+	struct progress_indicator progress;
+	bch2_progress_init(&progress, "dropping device data", c,
+			   BIT(BTREE_ID_backpointers), 0);
 
+	for (unsigned i = 0; i < 3; i++) {
+		try(bch2_btree_write_buffer_flush_sync(trans));
+
+		/*
+		 * Backpointers on RO devices may be updated (primarily via
+		 * reconcile), even when we're not updating the data on those
+		 * devices (e.g. propagating pending/hipri bits); this creates a
+		 * race with device removal that's difficult to deal with except
+		 * by retrying:
+		 */
+
+		try(backpointer_scan_for_each(trans, iter, BTREE_ID_backpointers,
+					      POS(dev_idx, 0), POS(dev_idx, U64_MAX),
+						  &last_flushed, &progress, bp, ({
 			wb_maybe_flush_inc(&last_flushed);
-			bch2_disk_reservation_put(c, &res.r);
-			data_drop_bp(trans, dev_idx, bkey_s_c_to_backpointer(k),
-				     &last_flushed, flags, err);
+			CLASS(disk_reservation, res)(c);
+			data_drop_bp(trans, dev_idx, bp, &last_flushed, flags, err) ?:
+			bch2_trans_commit(trans, &res.r, NULL, BCH_TRANS_COMMIT_no_enospc);
+		})));
 
-	}));
+		if (!dev_has_data(c, ca))
+			break;
+	}
+
+	return 0;
 }
 
 int bch2_dev_data_drop(struct bch_fs *c, unsigned dev_idx,
@@ -258,7 +285,7 @@ int bch2_dev_data_drop(struct bch_fs *c, unsigned dev_idx,
 
 	try(bch2_dev_usrdata_drop(c, &progress, dev_idx, flags, err));
 
-	bch2_progress_init(&progress, "dropping metadata", c, 0, ~0ULL);
+	bch2_progress_init(&progress, "dropping metadata", c, ~0ULL, ~0ULL);
 
 	return bch2_dev_metadata_drop(c, &progress, dev_idx, flags, err);
 }

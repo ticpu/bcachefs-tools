@@ -1,6 +1,6 @@
 use crate::bcachefs;
 use crate::bcachefs::*;
-use crate::errcode::bch_errcode;
+use crate::errcode::BchError;
 use crate::path_to_cstr;
 use anyhow::anyhow;
 
@@ -17,8 +17,7 @@ pub fn read_super_opts(
         unsafe { crate::bcachefs::bch2_read_super(path.as_ptr(), &mut opts, sb.as_mut_ptr()) };
 
     if ret != 0 {
-        let err: bch_errcode = unsafe { ::std::mem::transmute(ret) };
-        Err(anyhow!(err))
+        Err(anyhow!(BchError::from_raw(ret)))
     } else {
         Ok(unsafe { sb.assume_init() })
     }
@@ -41,8 +40,7 @@ pub fn read_super_silent(
     };
 
     if ret != 0 {
-        let err: bch_errcode = unsafe { ::std::mem::transmute(ret) };
-        Err(anyhow!(err))
+        Err(anyhow!(BchError::from_raw(ret)))
     } else {
         Ok(unsafe { sb.assume_init() })
     }

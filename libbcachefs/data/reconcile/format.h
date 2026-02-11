@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _BCACHEFS_REBALANCE_FORMAT_H
-#define _BCACHEFS_REBALANCE_FORMAT_H
+#ifndef _BCACHEFS_RECONCILE_FORMAT_H
+#define _BCACHEFS_RECONCILE_FORMAT_H
 
 /*
  * rebalance on disk data structures:
@@ -144,7 +144,7 @@ struct bch_extent_reconcile_bp {
 };
 
 /* subset of BCH_INODE_OPTS */
-#define BCH_REBALANCE_OPTS()			\
+#define BCH_RECONCILE_OPTS()			\
 	x(data_replicas)			\
 	x(data_checksum)			\
 	x(erasure_code)				\
@@ -153,12 +153,12 @@ struct bch_extent_reconcile_bp {
 	x(promote_target)
 
 enum bch_reconcile_opts {
-#define x(n)	BCH_REBALANCE_##n,
-	BCH_REBALANCE_OPTS()
+#define x(n)	BCH_RECONCILE_##n,
+	BCH_RECONCILE_OPTS()
 #undef x
 };
 
-#define BCH_REBALANCE_ACCOUNTING()		\
+#define BCH_RECONCILE_ACCOUNTING()		\
 	x(replicas,		0)		\
 	x(checksum,		1)		\
 	x(erasure_code,		2)		\
@@ -166,12 +166,13 @@ enum bch_reconcile_opts {
 	x(target,		4)		\
 	x(high_priority,	5)		\
 	x(pending,		6)		\
+	x(stripes,		7)
 
 enum bch_reconcile_accounting_type {
-#define x(t, n) BCH_REBALANCE_ACCOUNTING_##t = n,
-	BCH_REBALANCE_ACCOUNTING()
+#define x(t, n) BCH_RECONCILE_ACCOUNTING_##t = n,
+	BCH_RECONCILE_ACCOUNTING()
 #undef x
-	BCH_REBALANCE_ACCOUNTING_NR,
+	BCH_RECONCILE_ACCOUNTING_NR,
 };
 
 #define RECONCILE_WORK_IDS()			\
@@ -199,5 +200,10 @@ static const enum btree_id reconcile_work_phys_btree[] = {
 	[RECONCILE_WORK_normal]		= BTREE_ID_reconcile_work_phys,
 };
 
-#endif /* _BCACHEFS_REBALANCE_FORMAT_H */
+#define RECONCILE_SCAN_COOKIE_device	32
+#define RECONCILE_SCAN_COOKIE_pending	2
+#define RECONCILE_SCAN_COOKIE_metadata	1
+#define RECONCILE_SCAN_COOKIE_fs	0
+
+#endif /* _BCACHEFS_RECONCILE_FORMAT_H */
 

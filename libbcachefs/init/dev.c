@@ -5,13 +5,14 @@
 #include "alloc/background.h"
 #include "alloc/backpointers.h"
 #include "alloc/check.h"
+#include "alloc/discard.h"
 #include "alloc/replicas.h"
 
 #include "btree/interior.h"
 
-#include "data/ec.h"
+#include "data/ec/init.h"
 #include "data/migrate.h"
-#include "data/reconcile.h"
+#include "data/reconcile/work.h"
 
 #include "debug/sysfs.h"
 
@@ -359,6 +360,7 @@ static struct bch_dev *__bch2_dev_alloc(struct bch_fs *c,
 	mutex_init(&ca->bucket_backpointer_mismatch.lock);
 	mutex_init(&ca->bucket_backpointer_empty.lock);
 
+	bch2_dev_journal_init_early(ca);
 	bch2_dev_allocator_background_init(ca);
 
 	if (enumerated_ref_init(&ca->io_ref[READ],  BCH_DEV_READ_REF_NR,  NULL) ||
@@ -481,7 +483,8 @@ static int __bch2_dev_attach_bdev(struct bch_fs *c, struct bch_dev *ca,
 	if (model.nr && model.data[model.nr - 1] == '\n')
 		model.data[--model.nr] = '\0';
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
 
 		strtomem_pad(m->device_name, name.buf, '\0');
@@ -569,8 +572,19 @@ int __bch2_dev_set_state(struct bch_fs *c, struct bch_dev *ca,
 {
 	int ret = 0;
 
-	if (ca->mi.state == new_state)
+	bool do_reconcile_scan =
+		new_state == BCH_MEMBER_STATE_rw ||
+		new_state == BCH_MEMBER_STATE_evacuating;
+
+	struct reconcile_scan s = new_state == BCH_MEMBER_STATE_rw
+		? (struct reconcile_scan) { .type = RECONCILE_SCAN_pending }
+		: (struct reconcile_scan) { .type = RECONCILE_SCAN_device, .dev = ca->dev_idx };
+
+	if (ca->mi.state == new_state) {
+		if (new_state == BCH_MEMBER_STATE_evacuating)
+			return bch2_set_reconcile_needs_scan(c, s, true);
 		return 0;
+	}
 
 	if (!bch2_dev_state_allowed(c, ca, new_state, flags, err))
 		return bch_err_throw(c, device_state_not_allowed);
@@ -579,14 +593,6 @@ int __bch2_dev_set_state(struct bch_fs *c, struct bch_dev *ca,
 		__bch2_dev_read_only(c, ca);
 
 	bch_notice_dev(ca, "%s", bch2_member_states[new_state]);
-
-	bool do_reconcile_scan =
-		new_state == BCH_MEMBER_STATE_rw ||
-		new_state == BCH_MEMBER_STATE_evacuating;
-
-	struct reconcile_scan s = new_state == BCH_MEMBER_STATE_rw
-		? (struct reconcile_scan) { .type = RECONCILE_SCAN_pending }
-		: (struct reconcile_scan) { .type = RECONCILE_SCAN_device, .dev = ca->dev_idx };
 
 	if (do_reconcile_scan)
 		try(bch2_set_reconcile_needs_scan(c, s, false));
@@ -597,7 +603,7 @@ int __bch2_dev_set_state(struct bch_fs *c, struct bch_dev *ca,
 		bch2_write_super(c);
 	}
 
-	if (new_state == BCH_MEMBER_STATE_rw)
+	if (new_state == BCH_MEMBER_STATE_rw && bch2_dev_is_online(ca))
 		__bch2_dev_read_write(c, ca);
 
 	if (do_reconcile_scan)
@@ -636,7 +642,7 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 	try(__bch2_dev_set_state(c, ca, BCH_MEMBER_STATE_evacuating, flags, err));
 
 	ret = fast_device_removal
-		? bch2_dev_data_drop_by_backpointers(c, ca->dev_idx, flags, err)
+		? bch2_dev_data_drop_by_backpointers(c, ca, flags, err)
 		: (bch2_dev_data_drop(c, ca->dev_idx, flags, err) ?:
 		   bch2_dev_remove_stripes(c, ca->dev_idx, flags, err));
 	if (ret)
@@ -650,11 +656,20 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 		if (!data_type_is_empty(i) &&
 		    !data_type_is_hidden(i) &&
 		    usage.buckets[i]) {
-			prt_printf(err, "Remove failed: still has data (%s, %llu buckets)\n",
-				   __bch2_data_types[i], usage.buckets[i]);
-			ret = -EBUSY;
-			goto err;
+			if (!ret) {
+				prt_printf(err, "Remove failed: still has data\n");
+				ret = -EBUSY;
+			}
+			prt_printf(err, "  %s: %llu buckets\n", __bch2_data_types[i], usage.buckets[i]);
 		}
+	if (ret)
+		goto err;
+
+	/*
+	 * Disallow reads before we remove alloc info, otherwise we'll get
+	 * spurious stale pointer errors:
+	 */
+	__bch2_dev_offline(c, ca);
 
 	ret = bch2_dev_remove_alloc(c, ca);
 	if (ret) {
@@ -704,8 +719,6 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 		goto err;
 	}
 
-	__bch2_dev_offline(c, ca);
-
 	scoped_guard(mutex, &c->sb_lock)
 		rcu_assign_pointer(c->devs[ca->dev_idx], NULL);
 
@@ -723,7 +736,8 @@ int bch2_dev_remove(struct bch_fs *c, struct bch_dev *ca, int flags,
 	 * Free this device's slot in the bch_member array - all pointers to
 	 * this device must be gone:
 	 */
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, dev_idx);
 
 		if (fast_device_removal)
@@ -746,26 +760,23 @@ err:
 /* Add new device to running filesystem: */
 int bch2_dev_add(struct bch_fs *c, const char *path, struct printbuf *err)
 {
-	struct bch_opts opts = bch2_opts_empty();
-	struct bch_sb_handle sb __cleanup(bch2_free_super) = {};
-	struct bch_dev *ca = NULL;
-	CLASS(printbuf, label)();
 	int ret = 0;
 
+	struct bch_opts opts = bch2_opts_empty();
+	struct bch_sb_handle sb __cleanup(bch2_free_super) = {};
 	ret = bch2_read_super(path, &opts, &sb);
 	if (ret) {
 		prt_printf(err, "error reading superblock: %s\n", bch2_err_str(ret));
-		goto err;
+		return ret;
 	}
 
 	struct bch_member dev_mi = bch2_sb_member_get(sb.sb, sb.sb->dev_idx);
 
+	CLASS(printbuf, label)();
 	if (BCH_MEMBER_GROUP(&dev_mi)) {
 		bch2_disk_path_to_text_sb(&label, sb.sb, BCH_MEMBER_GROUP(&dev_mi) - 1);
-		if (label.allocation_failure) {
-			ret = -ENOMEM;
-			goto err;
-		}
+		if (label.allocation_failure)
+			return -ENOMEM;
 	}
 
 	if (list_empty(&c->list)) {
@@ -778,19 +789,15 @@ int bch2_dev_add(struct bch_fs *c, const char *path, struct printbuf *err)
 
 		if (ret) {
 			prt_printf(err, "cannot go multidevice: filesystem UUID already open\n");
-			goto err;
+			return ret;
 		}
 	}
 
-	ret = bch2_dev_may_add(sb.sb, c);
-	if (ret)
-		goto err;
+	try(bch2_dev_may_add(sb.sb, c));
 
-	ca = __bch2_dev_alloc(c, &dev_mi);
-	if (!ca) {
-		ret = -ENOMEM;
-		goto err;
-	}
+	struct bch_dev *ca = __bch2_dev_alloc(c, &dev_mi);
+	if (!ca)
+		return -ENOMEM;
 
 	ret = __bch2_dev_attach_bdev(c, ca, &sb, err);
 	if (ret)
@@ -806,7 +813,8 @@ int bch2_dev_add(struct bch_fs *c, const char *path, struct printbuf *err)
 	}
 
 	scoped_guard(rwsem_write, &c->state_lock) {
-		scoped_guard(mutex, &c->sb_lock) {
+		scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+			guard(mutex)(&c->sb_lock);
 			SET_BCH_SB_MULTI_DEVICE(c->disk_sb.sb, true);
 
 			ret = bch2_sb_from_fs(c, ca);
@@ -962,11 +970,23 @@ int bch2_dev_online(struct bch_fs *c, const char *path, struct printbuf *err)
 		}
 	}
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx)->last_mount =
 			cpu_to_le64(ktime_get_real_seconds());
 		bch2_write_super(c);
 	}
+
+	/*
+	 * We might have been unable to write because this device was offline:
+	 *
+	 * We'd like to limit reconcile pending scans, having them happen
+	 * because a device is going offline and coming back sucks - but to do
+	 * that right we need to at least note somewhere /which/ targets have
+	 * extents on the pending list:
+	 */
+	try(bch2_set_reconcile_needs_scan(c,
+		(struct reconcile_scan) { .type = RECONCILE_SCAN_pending}, true));
 
 	return 0;
 }
@@ -979,7 +999,7 @@ static int bch2_dev_may_offline(struct bch_fs *c, struct bch_dev *ca, int flags,
 	struct bch_devs_mask new_rw_devs = c->allocator.rw_devs[0];
 	__clear_bit(ca->dev_idx, new_devs.d);
 
-	if (!bch2_can_read_fs_with_devs(c, new_devs, flags, err) ||
+	if (!bch2_can_read_fs_with_devs(c, &new_devs, flags, err) ||
 	    (!c->opts.read_only &&
 	     !bch2_can_write_fs_with_devs(c, new_rw_devs, flags, err))) {
 		prt_printf(err, "Cannot offline required disk\n");
@@ -1049,7 +1069,8 @@ int bch2_dev_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets, struct p
 		return ret;
 	}
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
 		m->nbuckets = cpu_to_le64(nbuckets);
 
@@ -1165,12 +1186,12 @@ static void bch2_fs_bdev_mark_dead(struct block_device *bdev, bool surprise)
 			evict_inodes(sb);
 		}
 
-		if (dev) {
-			__bch2_dev_offline(c, ca);
-		} else {
+		if (!dev) {
 			bch2_journal_flush(&c->journal);
 			print = bch2_fs_emergency_read_only(c, &buf);
 		}
+
+		__bch2_dev_offline(c, ca);
 
 		if (print)
 			bch2_print_str(c, KERN_ERR, buf.buf);

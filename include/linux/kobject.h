@@ -25,7 +25,7 @@
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
-struct kset;
+#include "util/darray.h"
 
 struct kobj_type {
 	void (*release)(struct kobject *kobj);
@@ -47,85 +47,20 @@ struct kobj_attribute {
 };
 
 struct kobject {
+	const char		*name;
 	struct kobject		*parent;
-	struct kset		*kset;
 	const struct kobj_type	*ktype;
-	struct kernfs_node	*sd; /* sysfs directory entry */
 	atomic_t		ref;
-	unsigned int state_initialized:1;
-	unsigned int state_in_sysfs:1;
-	unsigned int state_add_uevent_sent:1;
-	unsigned int state_remove_uevent_sent:1;
-	unsigned int uevent_suppress:1;
+	bool			state_initialized:1;
+	bool			state_in_sysfs:1;
+	bool			state_add_uevent_sent:1;
+	bool			state_remove_uevent_sent:1;
+	bool			uevent_suppress:1;
+
+	DARRAY(struct kobject *) subdirs;
+	DARRAY(const struct attribute *) files;
+	DARRAY(const struct bin_attribute *) bin_files;
 };
-
-struct kset {
-	struct kobject		kobj;
-};
-
-#define kobject_add(...)	0
-
-static inline void kobject_init(struct kobject *kobj, const struct kobj_type *ktype)
-{
-	memset(kobj, 0, sizeof(*kobj));
-
-	atomic_set(&kobj->ref, 1);
-	kobj->ktype = ktype;
-	kobj->state_initialized = 1;
-}
-
-static inline void kobject_del(struct kobject *kobj);
-
-static inline void kobject_cleanup(struct kobject *kobj)
-{
-	const struct kobj_type *t = kobj->ktype;
-
-	/* remove from sysfs if the caller did not do it */
-	if (kobj->state_in_sysfs)
-		kobject_del(kobj);
-
-	if (t && t->release)
-		t->release(kobj);
-}
-
-static inline void kobject_put(struct kobject *kobj)
-{
-	BUG_ON(!kobj);
-	BUG_ON(!kobj->state_initialized);
-
-	if (atomic_dec_and_test(&kobj->ref))
-		kobject_cleanup(kobj);
-}
-
-static inline void kobject_del(struct kobject *kobj)
-{
-	if (!kobj)
-		return;
-
-	kobj->state_in_sysfs = 0;
-#if 0
-	kobj_kset_leave(kobj);
-#endif
-	kobject_put(kobj->parent);
-	kobj->parent = NULL;
-}
-
-static inline struct kobject *kobject_get(struct kobject *kobj)
-{
-	BUG_ON(!kobj);
-	BUG_ON(!kobj->state_initialized);
-
-	atomic_inc(&kobj->ref);
-	return kobj;
-}
-
-static inline void kset_unregister(struct kset *kset)
-{
-	kfree(kset);
-}
-
-#define kset_create_and_add(_name, _u, _parent)				\
-	((struct kset *) kzalloc(sizeof(struct kset), GFP_KERNEL))
 
 enum kobject_action {
 	KOBJ_ADD,
@@ -138,6 +73,20 @@ enum kobject_action {
 	KOBJ_UNBIND,
 };
 
+void kobject_init(struct kobject *, const struct kobj_type *);
+struct kobject *kobject_get(struct kobject *);
+
+int kobject_add(struct kobject *, struct kobject *, const char *, ...);
+void kobject_del(struct kobject *);
+
+void kobject_put(struct kobject *);
+struct kobject *kobject_get(struct kobject *);
+
 static inline void kobject_uevent_env(struct kobject *kobj, int flags, char **envp) {}
+
+int sysfs_read_or_html_dirlist(const char *, struct printbuf *);
+int sysfs_write(const char *, const char *, size_t);
+
+#define fs_kobj	NULL
 
 #endif /* _KOBJECT_H_ */

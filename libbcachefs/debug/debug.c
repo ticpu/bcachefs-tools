@@ -197,7 +197,7 @@ void bch2_btree_node_ondisk_to_text(struct printbuf *out, struct bch_fs *c,
 	unsigned offset = 0;
 	int ret;
 
-	if (bch2_bkey_pick_read_device(c, bkey_i_to_s_c(&b->key), NULL, &pick, -1) <= 0) {
+	if (bch2_bkey_pick_read_device(c, bkey_i_to_s_c(&b->key), NULL, &pick, 0, 0) <= 0) {
 		prt_printf(out, "error getting device to read from: invalid device\n");
 		return;
 	}
@@ -948,42 +948,6 @@ static const struct file_operations btree_node_scan_ops = {
 	.read		= bch2_btree_node_scan_read,
 };
 
-static ssize_t bch2_subvolumes_read(struct file *file, char __user *buf,
-					size_t size, loff_t *ppos)
-{
-	struct dump_iter *i = file->private_data;
-
-	if (!test_bit(BCH_FS_may_go_rw, &i->c->flags))
-		return 0;
-
-	return bch2_simple_print(file, buf, size, ppos, bch2_subvolumes_list_to_text);
-}
-
-static const struct file_operations subvolumes_ops = {
-	.owner		= THIS_MODULE,
-	.open		= bch2_dump_open,
-	.release	= bch2_dump_release,
-	.read		= bch2_subvolumes_read,
-};
-
-static ssize_t bch2_snapshot_trees_read(struct file *file, char __user *buf,
-					size_t size, loff_t *ppos)
-{
-	struct dump_iter *i = file->private_data;
-
-	if (!test_bit(BCH_FS_may_go_rw, &i->c->flags))
-		return 0;
-
-	return bch2_simple_print(file, buf, size, ppos, bch2_snapshot_trees_to_text);
-}
-
-static const struct file_operations snapshot_trees_ops = {
-	.owner		= THIS_MODULE,
-	.open		= bch2_dump_open,
-	.release	= bch2_dump_release,
-	.read		= bch2_snapshot_trees_read,
-};
-
 void bch2_fs_debug_exit(struct bch_fs *c)
 {
 	if (!IS_ERR_OR_NULL(c->fs_debug_dir))
@@ -1045,12 +1009,6 @@ void bch2_fs_debug_init(struct bch_fs *c)
 
 	debugfs_create_file("write_points", 0400, c->fs_debug_dir,
 			    c->btree_debug, &write_points_ops);
-
-	debugfs_create_file("subvolumes", 0400, c->fs_debug_dir,
-			    c->btree_debug, &subvolumes_ops);
-
-	debugfs_create_file("snapshot_trees", 0400, c->fs_debug_dir,
-			    c->btree_debug, &snapshot_trees_ops);
 
 	bch2_fs_async_obj_debugfs_init(c);
 

@@ -1,5 +1,5 @@
 use crate::c;
-use crate::errcode::{bch_errcode, errptr_to_result};
+use crate::errcode::{BchError, errptr_to_result};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ pub struct Fs {
 }
 
 impl Fs {
-    pub fn open(devs: &[PathBuf], mut opts: c::bch_opts) -> Result<Fs, bch_errcode> {
+    pub fn open(devs: &[PathBuf], mut opts: c::bch_opts) -> Result<Fs, BchError> {
         let devs_cstrs : Vec<_> = devs
             .iter()
             .map(|i| CString::new(i.as_os_str().as_bytes()).unwrap())

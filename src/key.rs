@@ -25,6 +25,43 @@ use crate::ErrnoError;
 
 const BCH_KEY_MAGIC: &[u8; 8] = b"bch**key";
 
+/// Check if a superblock has an encrypted passphrase set.
+pub fn sb_is_encrypted(sb: &bch_sb_handle) -> bool {
+    let bch_key_magic = u64::from_le_bytes(*BCH_KEY_MAGIC);
+    sb.sb()
+        .crypt()
+        .map(|c| c.key().magic != bch_key_magic)
+        .unwrap_or(false)
+}
+
+/// Create an unencrypted (plaintext) key for the crypt field (remove-passphrase).
+pub fn unencrypted_key(key: &bch_key) -> bch_encrypted_key {
+    bch_encrypted_key {
+        magic: u64::from_le_bytes(*BCH_KEY_MAGIC),
+        key: *key,
+    }
+}
+
+/// Target keyring for key storage.
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+#[clap(rename_all = "snake_case")]
+pub enum Keyring {
+    Session,
+    #[default]
+    User,
+    UserSession,
+}
+
+impl Keyring {
+    pub fn id(self) -> i32 {
+        match self {
+            Keyring::Session => keyutils::KEY_SPEC_SESSION_KEYRING,
+            Keyring::User => keyutils::KEY_SPEC_USER_KEYRING,
+            Keyring::UserSession => keyutils::KEY_SPEC_USER_SESSION_KEYRING,
+        }
+    }
+}
+
 #[derive(Clone, Debug, clap::ValueEnum, strum::Display)]
 pub enum UnlockPolicy {
     /// Don't ask for passphrase, if the key cannot be found in the keyring just
@@ -47,8 +84,8 @@ impl UnlockPolicy {
         match self {
             Self::Fail => KeyHandle::new_from_search(&uuid),
             Self::Wait => Ok(KeyHandle::wait_for_unlock(&uuid)?),
-            Self::Ask => Passphrase::new_from_prompt(&uuid).and_then(|p| KeyHandle::new(sb, &p)),
-            Self::Stdin => Passphrase::new_from_stdin().and_then(|p| KeyHandle::new(sb, &p)),
+            Self::Ask => Passphrase::new_from_prompt(&uuid).and_then(|p| KeyHandle::new(sb, &p, Keyring::User)),
+            Self::Stdin => Passphrase::new_from_stdin().and_then(|p| KeyHandle::new(sb, &p, Keyring::User)),
         }
     }
 }
@@ -71,7 +108,7 @@ impl KeyHandle {
         CString::new(format!("bcachefs:{uuid}")).unwrap()
     }
 
-    pub fn new(sb: &bch_sb_handle, passphrase: &Passphrase) -> Result<Self> {
+    pub fn new(sb: &bch_sb_handle, passphrase: &Passphrase, keyring: Keyring) -> Result<Self> {
         let key_name = Self::format_key_name(&sb.sb().uuid());
         let key_name = CStr::as_ptr(&key_name);
         let key_type = c"user";
@@ -84,7 +121,7 @@ impl KeyHandle {
                 key_name,
                 ptr::addr_of!(passphrase_key).cast(),
                 mem::size_of_val(&passphrase_key),
-                keyutils::KEY_SPEC_USER_KEYRING,
+                keyring.id(),
             )
         };
 
@@ -146,7 +183,7 @@ impl Passphrase {
     pub fn new(uuid: &Uuid) -> Result<Self> {
         match get_stdin_type() {
             StdinType::Terminal => Self::new_from_prompt(uuid),
-            StdinType::DevNull => Self::new_from_askpassword(uuid).unwrap_or_else(|err| Err(err)),
+            StdinType::DevNull => Self::new_from_askpassword(uuid)?,
             StdinType::Other => Self::new_from_stdin(),
         }
     }
@@ -176,18 +213,14 @@ impl Passphrase {
         })
     }
 
-    // blocks indefinitely if no input is available on stdin
-    pub fn new_from_prompt(uuid: &Uuid) -> Result<Self> {
-        match Self::new_from_askpassword(uuid) {
-            Ok(phrase) => return phrase,
-            Err(_) => debug!("Failed to start systemd-ask-password, doing the prompt ourselves"),
-        }
+    /// Prompt for a passphrase with echo disabled.
+    fn prompt_hidden(prompt: &str) -> Result<Self> {
         let old = termios::tcgetattr(stdin())?;
         let mut new = old.clone();
         new.local_modes.remove(termios::LocalModes::ECHO);
         termios::tcsetattr(stdin(), termios::OptionalActions::Flush, &new)?;
 
-        eprint!("Enter passphrase: ");
+        eprint!("{}", prompt);
 
         let mut line = Zeroizing::new(String::new());
         let res = stdin().read_line(&mut line);
@@ -196,6 +229,26 @@ impl Passphrase {
         res?;
 
         Ok(Self(CString::new(line.trim_end_matches('\n'))?))
+    }
+
+    // blocks indefinitely if no input is available on stdin
+    pub fn new_from_prompt(uuid: &Uuid) -> Result<Self> {
+        match Self::new_from_askpassword(uuid) {
+            Ok(phrase) => return phrase,
+            Err(_) => debug!("Failed to start systemd-ask-password, doing the prompt ourselves"),
+        }
+        Self::prompt_hidden("Enter passphrase: ")
+    }
+
+    /// Prompt for a new passphrase twice and verify they match.
+    pub fn new_from_prompt_twice() -> Result<Self> {
+        if !stdin().is_terminal() {
+            return Self::new_from_stdin();
+        }
+        let pass1 = Self::prompt_hidden("Enter new passphrase: ")?;
+        let pass2 = Self::prompt_hidden("Enter same passphrase again: ")?;
+        ensure!(pass1.get().to_bytes() == pass2.get().to_bytes(), "Passphrases do not match");
+        Ok(pass1)
     }
 
     // blocks indefinitely if no input is available on stdin
@@ -225,6 +278,33 @@ impl Passphrase {
         let crypt_ptr = (crypt as *const bch_sb_field_crypt).cast_mut();
 
         unsafe { bcachefs::derive_passphrase(crypt_ptr, self.get().as_ptr()) }
+    }
+
+    /// Re-encrypt a filesystem key with this passphrase.
+    /// Returns the encrypted key suitable for writing to crypt->key.
+    pub fn encrypt_key(
+        &self,
+        sb: &bch_sb_handle,
+        key: &bch_key,
+    ) -> bch_encrypted_key {
+        let crypt = sb.sb().crypt().expect("called on encrypted fs");
+        let mut new_key = bch_encrypted_key {
+            magic: u64::from_le_bytes(*BCH_KEY_MAGIC),
+            key: *key,
+        };
+
+        let mut passphrase_key: bch_key = self.derive(crypt);
+
+        unsafe {
+            bch2_chacha20(
+                ptr::addr_of_mut!(passphrase_key),
+                sb.sb().nonce(),
+                ptr::addr_of_mut!(new_key).cast(),
+                mem::size_of_val(&new_key),
+            )
+        };
+
+        new_key
     }
 
     pub fn check(&self, sb: &bch_sb_handle) -> Result<(bch_key, bch_encrypted_key)> {

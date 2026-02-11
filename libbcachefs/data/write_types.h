@@ -20,6 +20,7 @@
 	x(pages_stable)			\
 	x(pages_owned)			\
 	x(only_specified_devs)		\
+	x(must_ec)			\
 	x(wrote_data_inline)		\
 	x(check_enospc)			\
 	x(sync)				\
@@ -82,7 +83,6 @@ struct bch_write_op {
 	unsigned		compression_opt:8;
 	unsigned		csum_type:4;
 	unsigned		nr_replicas:4;
-	unsigned		nr_replicas_required:4;
 	unsigned		watermark:3;
 	unsigned		incompressible:1;
 	unsigned		stripe_waited:1;

@@ -11,6 +11,23 @@
 
 struct bch_read_bio;
 
+/*
+ * Tracks in-flight data movement IO for ratelimiting.
+ *
+ * Four atomic counters track sectors and IOs in flight:
+ *  - read_sectors/read_ios: extent read submit -> read completion
+ *  - write_sectors/write_ios: read completion -> write completion
+ *
+ * bch2_move_ratelimit() blocks the caller until all counters are below
+ * c->opts.move_bytes_in_flight / move_ios_in_flight.
+ *
+ * Extent moves (bch2_move_extent) and stripe repairs (bch2_stripe_repair)
+ * both account through these counters.
+ *
+ * Lifetime: every in-flight IO holds closure_get(&ctxt->cl).
+ * bch2_moving_ctxt_flush_all() waits for all IO via closure_sync(),
+ * and bch2_moving_ctxt_exit() asserts all counters are zero.
+ */
 struct moving_context {
 	struct btree_trans	*trans;
 	struct list_head	list;
@@ -27,6 +44,7 @@ struct moving_context {
 	struct mutex		lock;
 	struct list_head	reads;
 	struct list_head	ios;
+	u64			io_seq;
 
 	/* in flight sectors: */
 	atomic_t		read_sectors;
@@ -86,9 +104,10 @@ void bch2_moving_ctxt_flush_all(struct moving_context *);
 void bch2_move_ctxt_wait_for_io(struct moving_context *);
 int bch2_move_ratelimit(struct moving_context *);
 
-struct per_snapshot_io_opts;
-int bch2_move_extent(struct moving_context *, struct move_bucket *,
-		     struct per_snapshot_io_opts *, move_pred_fn, void *,
+int bch2_move_extent(struct moving_context *,
+		     struct move_bucket *,
+		     struct bch_inode_opts *,
+		     struct data_update_opts *,
 		     struct btree_iter *, unsigned, struct bkey_s_c);
 
 int bch2_move_data_btree(struct moving_context *, struct bpos, struct bpos,
@@ -98,6 +117,8 @@ int bch2_move_data_phys(struct bch_fs *, unsigned, u64, u64, unsigned,
 			struct bch_ratelimit *, struct bch_move_stats *,
 			struct write_point_specifier, bool,
 			move_pred_fn, void *);
+
+int bch2_evacuate_data(struct moving_context *, unsigned, u64, u64);
 
 int bch2_evacuate_bucket(struct moving_context *,
 			   struct move_bucket *,

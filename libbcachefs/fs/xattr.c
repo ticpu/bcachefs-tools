@@ -6,7 +6,7 @@
 #include "btree/update.h"
 
 #include "data/extents.h"
-#include "data/reconcile.h"
+#include "data/reconcile/work.h"
 
 #include "fs/acl.h"
 #include "fs/dirent.h"
@@ -523,6 +523,9 @@ static int __bch2_xattr_bcachefs_set(const struct xattr_handler *handler,
 
 	struct inode_opt_set s = { .id = inode_opt_id, .defined = value != NULL };
 	u64 v = 0;
+
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
+	guard(opt_change_lock)(c);
 
 	if (value) {
 		char *buf __free(kfree) = kmalloc(size + 1, GFP_KERNEL);

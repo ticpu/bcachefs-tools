@@ -19,6 +19,18 @@ const char * const bch2_counter_names[] = {
 	NULL
 };
 
+const enum bch_counters_flags bch2_counter_flags_map[] = {
+#define x(t, n, flags) [BCH_COUNTER_##t] = flags,
+	BCH_PERSISTENT_COUNTERS()
+#undef x
+};
+
+const u16 bch2_counter_stable_map[] = {
+#define x(n, id, ...) [BCH_COUNTER_##n] = BCH_COUNTER_STABLE_##n,
+	BCH_PERSISTENT_COUNTERS()
+#undef x
+};
+
 static size_t bch2_sb_counter_nr_entries(struct bch_sb_field_counters *ctrs)
 {
 	if (!ctrs)
@@ -149,6 +161,11 @@ int bch2_fs_counters_init(struct bch_fs *c)
 	try(bch2_sb_counters_to_cpu(c));
 
 	INIT_DELAYED_WORK(&c->counters.work, bch2_sb_counters_work);
+	return 0;
+}
+
+int bch2_fs_counters_init_late(struct bch_fs *c)
+{
 	queue_delayed_work(system_unbound_wq, &c->counters.work, HZ / 2);
 	return 0;
 }

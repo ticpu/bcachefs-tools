@@ -28,10 +28,10 @@
 
 static void set_option_usage(void)
 {
-	puts("bcachefs set-fs-option \n"
-	     "Usage: bcachefs set-fs-option [OPTION].. device\n"
+	puts("bcachefs set-fs-option - set a filesystem option\n"
+	     "Usage: bcachefs set-fs-option [OPTION]... <device>\n"
 	     "\n"
-	     "Options:\n");
+	     "Options:");
 	bch2_opts_usage(OPT_MOUNT|OPT_RUNTIME);
 	puts("  -d, --dev-idx               index for device specific options\n"
 	     "  -h, --help                  display this help and exit\n"

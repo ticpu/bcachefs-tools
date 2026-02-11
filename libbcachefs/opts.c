@@ -11,7 +11,7 @@
 
 #include "data/compress.h"
 #include "data/copygc.h"
-#include "data/reconcile.h"
+#include "data/reconcile/work.h"
 
 #include "init/dev.h"
 #include "init/error.h"
@@ -109,7 +109,7 @@ static const char * const __bch2_fs_usage_types[] = {
 };
 
 const char * const __bch2_reconcile_accounting_types[] = {
-	BCH_REBALANCE_ACCOUNTING()
+	BCH_RECONCILE_ACCOUNTING()
 	NULL
 };
 
@@ -514,6 +514,7 @@ void bch2_opt_to_text(struct printbuf *out,
 void bch2_opts_to_text(struct printbuf *out,
 		       struct bch_opts opts,
 		       struct bch_fs *c, struct bch_sb *sb,
+		       struct bch_opts_mask *mask,
 		       unsigned show_mask, unsigned hide_mask,
 		       unsigned flags)
 {
@@ -523,6 +524,9 @@ void bch2_opts_to_text(struct printbuf *out,
 		const struct bch_option *opt = &bch2_opt_table[i];
 
 		if ((opt->flags & hide_mask) || !(opt->flags & show_mask))
+			continue;
+
+		if (mask && !test_bit(i, mask->d))
 			continue;
 
 		u64 v = bch2_opt_get_by_id(&opts, i);
@@ -551,7 +555,8 @@ static int opt_hook_io(struct bch_fs *c, struct bch_dev *ca, u64 inum, enum bch_
 	case Opt_background_compression:
 	case Opt_data_checksum:
 	case Opt_data_replicas:
-	case Opt_erasure_code: {
+	case Opt_erasure_code:
+	case Opt_nocow: {
 		struct reconcile_scan s = {
 			.type = !inum ? RECONCILE_SCAN_fs : RECONCILE_SCAN_inum,
 			.inum = inum,
@@ -636,6 +641,7 @@ void bch2_opt_hook_post_set(struct bch_fs *c, struct bch_dev *ca, u64 inum,
 		break;
 	case Opt_discard:
 		if (!ca) {
+			guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 			guard(mutex)(&c->sb_lock);
 			for_each_member_device(c, ca) {
 				struct bch_member *m =
@@ -671,8 +677,6 @@ void bch2_opt_hook_post_set(struct bch_fs *c, struct bch_dev *ca, u64 inum,
 	default:
 		break;
 	}
-
-	atomic_inc(&c->opt_change_cookie);
 }
 
 int bch2_parse_one_mount_opt(struct bch_fs *c, struct bch_opts *opts,
@@ -863,6 +867,7 @@ bool __bch2_opt_set_sb(struct bch_sb *sb, int dev_idx,
 bool bch2_opt_set_sb(struct bch_fs *c, struct bch_dev *ca,
 		     const struct bch_option *opt, u64 v)
 {
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
 	bool changed = __bch2_opt_set_sb(c->disk_sb.sb, ca ? ca->dev_idx : -1, opt, v);
 	if (changed)
@@ -889,7 +894,7 @@ void bch2_inode_opts_get(struct bch_fs *c, struct bch_inode_opts *ret, bool meta
 	BCH_INODE_OPTS()
 #undef x
 
-	ret->change_cookie = atomic_read(&c->opt_change_cookie);
+	ret->change_cookie = c->opt_change_cookie;
 
 	if (metadata) {
 		ret->background_target	= c->opts.metadata_target ?: c->opts.foreground_target;
@@ -923,11 +928,26 @@ void bch2_inode_opts_to_text(struct printbuf *out, struct bch_fs *c, struct bch_
 {
 	bool first = true;
 
-#define x(_name, _bits)			\
-	if (!first)			\
-		prt_char(out, ',');	\
-	first = false;			\
+#define x(_name, _bits)							\
+	if (!first)							\
+		prt_char(out, ',');					\
+	first = false;							\
+	prt_printf(out, "%s=", bch2_opt_table[Opt_##_name].attr.name);	\
 	bch2_opt_to_text(out, c, c->disk_sb.sb, &bch2_opt_table[Opt_##_name], opts._name, 0);
 	BCH_INODE_OPTS()
 #undef x
+}
+
+void bch2_opt_change_unlock(struct bch_fs *c)
+{
+	BUG_ON(!(c->opt_change_cookie & 1));
+	c->opt_change_cookie++;
+	mutex_unlock(&c->opt_change_lock);
+}
+
+void bch2_opt_change_lock(struct bch_fs *c)
+{
+	mutex_lock(&c->opt_change_lock);
+	BUG_ON(c->opt_change_cookie & 1);
+	c->opt_change_cookie++;
 }

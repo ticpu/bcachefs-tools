@@ -261,6 +261,11 @@ jobs:
           +VERSION=$DEB_VER
           EOF
           rm -f "Makefile.orig"
+          if [ "${{ env.SUITE }}" != "release" ]; then
+          tee -a dkms/dkms.conf.in > /dev/null <<EOT
+          STRIP[0]=no
+          EOT
+          fi
           git add -A
           git commit --message="nobody sees this anyways"
       - name: Build the source-only .deb package

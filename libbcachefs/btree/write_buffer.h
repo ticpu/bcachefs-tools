@@ -23,7 +23,6 @@ static inline bool bch2_btree_write_buffer_must_wait(struct bch_fs *c)
 struct btree_trans;
 int bch2_btree_write_buffer_flush_sync(struct btree_trans *);
 bool bch2_btree_write_buffer_flush_going_ro(struct bch_fs *);
-int bch2_btree_write_buffer_flush_nocheck_rw(struct btree_trans *);
 int bch2_btree_write_buffer_tryflush(struct btree_trans *);
 
 struct wb_maybe_flush {
@@ -172,6 +171,22 @@ void bch2_journal_keys_to_write_buffer_start(struct bch_fs *, struct journal_key
 int bch2_journal_keys_to_write_buffer_end(struct bch_fs *, struct journal_keys_to_wb *);
 
 int bch2_btree_write_buffer_resize(struct bch_fs *, size_t);
+
+void bch2_btree_write_buffer_to_text(struct printbuf *, struct bch_fs *);
+
+static inline void bch2_btree_write_buffer_wakeup(struct bch_fs *c)
+{
+	struct bch_fs_btree_write_buffer *wb = &c->btree.write_buffer;
+
+	guard(rcu)();
+	struct task_struct *p = rcu_dereference(wb->thread);
+	if (p)
+		wake_up_process(p);
+}
+
+void bch2_btree_write_buffer_stop(struct bch_fs *);
+int bch2_btree_write_buffer_start(struct bch_fs *);
+
 void bch2_fs_btree_write_buffer_exit(struct bch_fs *);
 void bch2_fs_btree_write_buffer_init_early(struct bch_fs *);
 int bch2_fs_btree_write_buffer_init(struct bch_fs *);

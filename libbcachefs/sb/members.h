@@ -52,19 +52,11 @@ static inline bool bch2_dev_is_online(struct bch_dev *ca)
 	return !enumerated_ref_is_zero(&ca->io_ref[READ]);
 }
 
-static inline struct bch_dev *bch2_dev_rcu(struct bch_fs *, unsigned);
+static inline struct bch_dev *bch2_dev_rcu_noerror(struct bch_fs *, unsigned);
 
 static inline bool bch2_dev_idx_is_online(struct bch_fs *c, unsigned dev)
 {
-	guard(rcu)();
-	struct bch_dev *ca = bch2_dev_rcu(c, dev);
-	return ca && bch2_dev_is_online(ca);
-}
-
-static inline bool bch2_dev_is_healthy(struct bch_dev *ca)
-{
-	return bch2_dev_is_online(ca) &&
-		ca->mi.state != BCH_MEMBER_STATE_evacuating;
+	return test_bit(dev, c->devs_online.d);
 }
 
 static inline unsigned dev_mask_nr(const struct bch_devs_mask *devs)
@@ -240,6 +232,19 @@ static inline struct bch_dev *bch2_dev_rcu_noerror(struct bch_fs *c, unsigned de
 		: NULL;
 }
 
+static inline bool bch2_dev_bad_or_evacuating_rcu(struct bch_fs *c, unsigned dev)
+{
+	struct bch_dev *ca = bch2_dev_rcu_noerror(c, dev);
+	return !ca || ca->mi.state == BCH_MEMBER_STATE_evacuating;
+}
+
+static inline bool bch2_dev_bad_or_evacuating(struct bch_fs *c, unsigned dev)
+{
+	guard(rcu)();
+	return bch2_dev_bad_or_evacuating_rcu(c, dev);
+}
+
+int bch2_dev_missing_bkey_msg(struct bch_fs *, struct bkey_s_c, unsigned, struct printbuf *out);
 int bch2_dev_missing_bkey(struct bch_fs *, struct bkey_s_c, unsigned);
 
 void bch2_dev_missing_atomic(struct bch_fs *, unsigned);
@@ -273,9 +278,17 @@ static inline struct bch_dev *bch2_dev_tryget(struct bch_fs *c, unsigned dev)
 	return ca;
 }
 
-DEFINE_CLASS(bch2_dev_tryget, struct bch_dev *,
-	     bch2_dev_put(_T), bch2_dev_tryget(c, dev),
-	     struct bch_fs *c, unsigned dev);
+static inline struct bch_dev *bch2_dev_bkey_tryget(struct bch_fs *c, struct bkey_s_c k, unsigned dev)
+{
+	struct bch_dev *ca = bch2_dev_tryget_noerror(c, dev);
+	if (unlikely(!ca && dev != BCH_SB_MEMBER_INVALID))
+		bch2_dev_missing_bkey(c, k, dev);
+	return ca;
+}
+
+DEFINE_CLASS(bch2_dev_bkey_tryget, struct bch_dev *,
+	     bch2_dev_put(_T), bch2_dev_bkey_tryget(c, k, dev),
+	     struct bch_fs *c, struct bkey_s_c k, unsigned dev);
 
 static inline struct bch_dev *bch2_dev_bucket_tryget_noerror(struct bch_fs *c, struct bpos bucket)
 {
@@ -330,7 +343,7 @@ static inline struct bch_dev *bch2_dev_get_ioref(struct bch_fs *c, unsigned dev,
 	might_sleep();
 
 	guard(rcu)();
-	struct bch_dev *ca = bch2_dev_rcu(c, dev);
+	struct bch_dev *ca = bch2_dev_rcu_noerror(c, dev);
 	if (!ca || !enumerated_ref_tryget(&ca->io_ref[rw], ref_idx))
 		return NULL;
 

@@ -160,7 +160,12 @@ static const struct rhashtable_params bch_btree_cache_params = {
 static int btree_node_data_alloc(struct bch_fs *c, struct btree *b, gfp_t gfp,
 				 bool avoid_compaction)
 {
-	gfp |= __GFP_ACCOUNT|__GFP_RECLAIMABLE;
+	/*
+	 * We probably ought to be using __GFP_RECLAIMABLE - but vmalloc barfs.
+	 *
+	 * Shrinkable memory accounting is fubar.
+	 */
+	gfp |= __GFP_ACCOUNT;
 
 	if (!b->data) {
 		if (avoid_compaction && bch2_mm_avoid_compaction) {
@@ -618,54 +623,55 @@ void bch2_fs_btree_cache_exit(struct bch_fs *c)
 	shrinker_free(bc->live[0].shrink);
 
 	/* vfree() can allocate memory: */
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&bc->lock);
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&bc->lock);
 
-	if (c->verify_data)
-		list_move(&c->verify_data->list, &bc->live[0].list);
+		if (c->verify_data)
+			list_move(&c->verify_data->list, &bc->live[0].list);
 
-	kvfree(c->verify_ondisk);
+		kvfree(c->verify_ondisk);
 
-	for (unsigned i = 0; i < btree_id_nr_alive(c); i++) {
-		struct btree_root *r = bch2_btree_id_root(c, i);
+		for (unsigned i = 0; i < btree_id_nr_alive(c); i++) {
+			struct btree_root *r = bch2_btree_id_root(c, i);
 
-		if (r->b)
-			list_add(&r->b->list, &bc->live[0].list);
+			if (r->b)
+				list_add(&r->b->list, &bc->live[0].list);
+		}
+
+		list_for_each_entry_safe(b, t, &bc->live[1].list, list)
+			bch2_btree_node_hash_remove(bc, b);
+		list_for_each_entry_safe(b, t, &bc->live[0].list, list)
+			bch2_btree_node_hash_remove(bc, b);
+
+		list_for_each_entry_safe(b, t, &bc->freeable, list) {
+			BUG_ON(btree_node_read_in_flight(b) ||
+			       btree_node_write_in_flight(b));
+
+			bch2_btree_node_data_free(bc, b);
+			cond_resched();
+		}
+
+		BUG_ON(!bch2_journal_error(&c->journal) && atomic_long_read(&bc->nr_dirty));
+
+		list_splice(&bc->freed_pcpu, &bc->freed_nonpcpu);
+
+		list_for_each_entry_safe(b, t, &bc->freed_nonpcpu, list) {
+			list_del(&b->list);
+			six_lock_exit(&b->c.lock);
+			kfree(b);
+		}
+
+		for (unsigned i = 0; i < ARRAY_SIZE(bc->nr_by_btree); i++)
+			BUG_ON(bc->nr_by_btree[i]);
+		BUG_ON(bc->live[0].nr);
+		BUG_ON(bc->live[1].nr);
+		BUG_ON(bc->nr_freeable);
+
+		darray_exit(&bc->roots_extra);
 	}
-
-	list_for_each_entry_safe(b, t, &bc->live[1].list, list)
-		bch2_btree_node_hash_remove(bc, b);
-	list_for_each_entry_safe(b, t, &bc->live[0].list, list)
-		bch2_btree_node_hash_remove(bc, b);
-
-	list_for_each_entry_safe(b, t, &bc->freeable, list) {
-		BUG_ON(btree_node_read_in_flight(b) ||
-		       btree_node_write_in_flight(b));
-
-		bch2_btree_node_data_free(bc, b);
-		cond_resched();
-	}
-
-	BUG_ON(!bch2_journal_error(&c->journal) && atomic_long_read(&bc->nr_dirty));
-
-	list_splice(&bc->freed_pcpu, &bc->freed_nonpcpu);
-
-	list_for_each_entry_safe(b, t, &bc->freed_nonpcpu, list) {
-		list_del(&b->list);
-		six_lock_exit(&b->c.lock);
-		kfree(b);
-	}
-
-	for (unsigned i = 0; i < ARRAY_SIZE(bc->nr_by_btree); i++)
-		BUG_ON(bc->nr_by_btree[i]);
-	BUG_ON(bc->live[0].nr);
-	BUG_ON(bc->live[1].nr);
-	BUG_ON(bc->nr_freeable);
 
 	if (bc->table_init_done)
 		rhashtable_destroy(&bc->table);
-
-	darray_exit(&bc->roots_extra);
 }
 
 int bch2_fs_btree_cache_init(struct bch_fs *c)
@@ -993,10 +999,30 @@ static noinline struct btree *bch2_btree_node_fill(struct btree_trans *trans,
 		return b;
 
 	bkey_copy(&b->key, k);
-	if (bch2_btree_node_hash_insert(bc, b, level, btree_id)) {
-		/* raced with another fill: */
+	if (!bch2_btree_node_hash_insert(bc, b, level, btree_id)) {
+		set_btree_node_read_in_flight(b);
+		six_unlock_write(&b->c.lock);
 
-		/* mark as unhashed... */
+		if (path) {
+			u32 seq = six_lock_seq(&b->c.lock);
+
+			/* Unlock before doing IO: */
+			six_unlock_intent(&b->c.lock);
+			bch2_trans_unlock(trans);
+
+			bch2_btree_node_read(trans, b, sync);
+
+			if (!sync)
+				b = NULL;
+			else if (!six_relock_type(&b->c.lock, lock_type, seq))
+				b = NULL;
+		} else {
+			bch2_btree_node_read(trans, b, sync);
+			if (lock_type == SIX_LOCK_read)
+				six_lock_downgrade(&b->c.lock);
+		}
+	} else {
+		/* raced with another fill: */
 		b->hash_val = 0;
 
 		mutex_lock(&bc->lock);
@@ -1005,35 +1031,21 @@ static noinline struct btree *bch2_btree_node_fill(struct btree_trans *trans,
 
 		six_unlock_write(&b->c.lock);
 		six_unlock_intent(&b->c.lock);
-		return NULL;
+		b = NULL;
 	}
-
-	set_btree_node_read_in_flight(b);
-	six_unlock_write(&b->c.lock);
-
+	/*
+	 * bch2_btree_node_mem_alloc may have unlocked the trans for GFP_KERNEL
+	 * allocation, and the if (path) { } block above unlocks for IO - ensure
+	 * we're relocked before returning:
+	 */
 	if (path) {
-		u32 seq = six_lock_seq(&b->c.lock);
-
-		/* Unlock before doing IO: */
-		six_unlock_intent(&b->c.lock);
-		bch2_trans_unlock(trans);
-
-		bch2_btree_node_read(trans, b, sync);
-
 		int ret = bch2_trans_relock(trans) ?:
 			  bch2_btree_path_relock(trans, path, _THIS_IP_);
-		if (ret)
+		if (ret) {
+			if (b)
+				six_unlock_type(&b->c.lock, lock_type);
 			return ERR_PTR(ret);
-
-		if (!sync)
-			return NULL;
-
-		if (!six_relock_type(&b->c.lock, lock_type, seq))
-			b = NULL;
-	} else {
-		bch2_btree_node_read(trans, b, sync);
-		if (lock_type == SIX_LOCK_read)
-			six_lock_downgrade(&b->c.lock);
+		}
 	}
 
 	return b;

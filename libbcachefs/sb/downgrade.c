@@ -114,7 +114,12 @@
 	x(reconcile,						\
 	  BIT_ULL(BCH_RECOVERY_PASS_check_reconcile_work),	\
 	  BCH_FSCK_ERR_accounting_mismatch,			\
-	  BCH_FSCK_ERR_extent_io_opts_not_set)
+	  BCH_FSCK_ERR_extent_io_opts_not_set)			\
+	x(bucket_stripe_index,					\
+	  BIT_ULL(BCH_RECOVERY_PASS_check_alloc_info)|		\
+	  BIT_ULL(BCH_RECOVERY_PASS_check_alloc_to_lru_refs),	\
+	  BCH_FSCK_ERR_alloc_key_stripe_refcount_wrong,		\
+	  BCH_FSCK_ERR_stripe_to_missing_bucket_ref)
 
 #define UPGRADE_TABLE_INCOMPAT()				\
 	x(reconcile,						\
@@ -171,7 +176,10 @@
 	x(btree_node_accounting,				\
 	  BIT_ULL(BCH_RECOVERY_PASS_check_allocations),		\
 	  BCH_FSCK_ERR_accounting_mismatch,			\
-	  BCH_FSCK_ERR_accounting_key_nr_counters_wrong)
+	  BCH_FSCK_ERR_accounting_key_nr_counters_wrong)	\
+	x(bucket_stripe_index,					\
+	  BIT_ULL(BCH_RECOVERY_PASS_check_alloc_info)|		\
+	  BIT_ULL(BCH_RECOVERY_PASS_check_alloc_to_lru_refs))
 
 struct upgrade_downgrade_entry {
 	u64		recovery_passes;
@@ -225,6 +233,7 @@ int bch2_sb_set_upgrade_extra(struct bch_fs *c)
 	bool write_sb = false;
 	int ret = 0;
 
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
 	struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
 

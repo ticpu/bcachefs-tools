@@ -1,14 +1,37 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _BCACHEFS_REBALANCE_H
-#define _BCACHEFS_REBALANCE_H
+#ifndef _BCACHEFS_RECONCILE_TRIGGER_H
+#define _BCACHEFS_RECONCILE_TRIGGER_H
 
-#include "data/compress.h"
-#include "alloc/disk_groups.h"
-#include "reconcile_types.h"
+#include "data/extents.h"
 
 int bch2_extent_reconcile_validate(struct bch_fs *, struct bkey_s_c,
 				   struct bkey_validate_context,
 				   const struct bch_extent_reconcile *);
+
+static inline struct bpos data_to_rb_work_pos(enum btree_id btree, struct bpos pos)
+{
+	if (btree == BTREE_ID_reflink ||
+	    btree == BTREE_ID_stripes)
+		pos = bpos_min(pos, POS(0, U64_MAX));
+
+	if (btree == BTREE_ID_extents)
+		pos = bpos_max(pos, POS(BCACHEFS_ROOT_INO, 0));
+
+	if (btree == BTREE_ID_reflink)
+		pos.inode++;
+	return pos;
+}
+
+static inline struct bbpos rb_work_to_data_pos(struct bpos pos)
+{
+	if (!pos.inode)
+		return BBPOS(BTREE_ID_stripes, pos);
+	if (pos.inode < BCACHEFS_ROOT_INO) {
+		--pos.inode;
+		return BBPOS(BTREE_ID_reflink, pos);
+	}
+	return BBPOS(BTREE_ID_extents, pos);
+}
 
 static inline enum reconcile_work_id rb_work_id(const struct bch_extent_reconcile *r)
 {
@@ -21,9 +44,8 @@ static inline enum reconcile_work_id rb_work_id(const struct bch_extent_reconcil
 	return RECONCILE_WORK_normal;
 }
 
-static inline enum reconcile_work_id rb_work_id_phys(const struct bch_extent_reconcile *r)
+static inline enum reconcile_work_id rb_work_id_phys(enum reconcile_work_id w)
 {
-	enum reconcile_work_id w = rb_work_id(r);
 	return w == RECONCILE_WORK_pending ? RECONCILE_WORK_none : w;
 }
 
@@ -35,10 +57,41 @@ static inline struct bch_extent_reconcile io_opts_to_reconcile_opts(struct bch_f
 #define x(_name)							\
 		._name = opts->_name,					\
 		._name##_from_inode = opts->_name##_from_inode,
-		BCH_REBALANCE_OPTS()
+		BCH_RECONCILE_OPTS()
 #undef x
 	};
 };
+
+struct bpos bch2_bkey_get_reconcile_bp_pos(const struct bch_fs *, struct bkey_s_c);
+void bch2_bkey_set_reconcile_bp(const struct bch_fs *, struct bkey_s, u64);
+
+int reconcile_bp_del(struct btree_trans *, enum btree_id, unsigned,
+		     struct bkey_s_c, struct bpos bp_pos);
+int reconcile_bp_add(struct btree_trans *trans, enum btree_id, unsigned,
+		     struct bkey_s, struct bpos *);
+
+struct bkey_s_c reconcile_bp_get_key(struct btree_trans *,
+				     struct btree_iter *,
+				     struct bkey_s_c_backpointer);
+
+static inline struct bch_backpointer rb_bp(enum btree_id btree, unsigned level, struct bkey_s_c k)
+{
+	return (struct bch_backpointer) {
+		.btree_id	= btree,
+		.level		= level,
+		.pos		= k.k->p,
+	};
+}
+
+static inline bool extent_has_rotational(struct bch_fs *c, struct bkey_s_c k)
+{
+	struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
+
+	bkey_for_each_ptr(ptrs, ptr)
+		if (bch2_dev_rotational(c, ptr->dev))
+			return true;
+	return false;
+}
 
 void bch2_extent_rebalance_v1_to_text(struct printbuf *, struct bch_fs *,
 				      const struct bch_extent_rebalance_v1 *);
@@ -46,6 +99,8 @@ void bch2_extent_reconcile_to_text(struct printbuf *, struct bch_fs *,
 				      const struct bch_extent_reconcile *);
 
 const struct bch_extent_reconcile *bch2_bkey_reconcile_opts(const struct bch_fs *, struct bkey_s_c);
+
+enum reconcile_work_id bch2_bkey_reconcile_work_id(const struct bch_fs *, struct bkey_s_c);
 
 int __bch2_trigger_extent_reconcile(struct btree_trans *,
 				    enum btree_id, unsigned,
@@ -74,10 +129,10 @@ static inline int bch2_trigger_extent_reconcile(struct btree_trans *trans,
 }
 
 enum set_needs_reconcile_ctx {
-	SET_NEEDS_REBALANCE_opt_change,
-	SET_NEEDS_REBALANCE_opt_change_indirect,
-	SET_NEEDS_REBALANCE_foreground,
-	SET_NEEDS_REBALANCE_other,
+	SET_NEEDS_RECONCILE_opt_change,
+	SET_NEEDS_RECONCILE_opt_change_indirect,
+	SET_NEEDS_RECONCILE_foreground,
+	SET_NEEDS_RECONCILE_other,
 };
 
 /* Inodes in different snapshots may have different IO options: */
@@ -101,7 +156,7 @@ static inline struct per_snapshot_io_opts per_snapshot_io_opts_init(struct bch_f
 {
 	return (struct per_snapshot_io_opts) {
 		/* io_opts->fs_io_opts will be initialized when we know the key type */
-		.fs_io_opts.change_cookie = atomic_read(&c->opt_change_cookie) - 1,
+		.fs_io_opts.change_cookie = c->opt_change_cookie - 1,
 	};
 }
 
@@ -131,54 +186,4 @@ int bch2_bkey_set_needs_reconcile(struct btree_trans *,
 				  struct per_snapshot_io_opts *, struct bch_inode_opts *,
 				  struct bkey_i *, enum set_needs_reconcile_ctx, u32);
 
-#define RECONCILE_SCAN_TYPES()		\
-	x(fs)				\
-	x(metadata)			\
-	x(pending)			\
-	x(device)			\
-	x(inum)
-
-struct reconcile_scan {
-	enum reconcile_scan_type {
-#define x(t)	RECONCILE_SCAN_##t,
-		RECONCILE_SCAN_TYPES()
-#undef x
-	}			type;
-
-	union {
-		unsigned	dev;
-		u64		inum;
-	};
-};
-
-int bch2_set_reconcile_needs_scan_trans(struct btree_trans *, struct reconcile_scan);
-int bch2_set_reconcile_needs_scan(struct bch_fs *, struct reconcile_scan, bool);
-int bch2_set_fs_needs_reconcile(struct bch_fs *);
-
-static inline void bch2_reconcile_wakeup(struct bch_fs *c)
-{
-	c->reconcile.kick++;
-	guard(rcu)();
-	struct task_struct *p = rcu_dereference(c->reconcile.thread);
-	if (p)
-		wake_up_process(p);
-}
-
-static inline int bch2_reconcile_pending_wakeup(struct bch_fs *c)
-{
-	return bch2_set_reconcile_needs_scan(c,
-		(struct reconcile_scan) { .type = RECONCILE_SCAN_pending}, true);
-}
-
-void bch2_reconcile_status_to_text(struct printbuf *, struct bch_fs *);
-void bch2_reconcile_scan_pending_to_text(struct printbuf *, struct bch_fs *);
-
-void bch2_reconcile_stop(struct bch_fs *);
-int bch2_reconcile_start(struct bch_fs *);
-
-void bch2_fs_reconcile_exit(struct bch_fs *);
-int bch2_fs_reconcile_init(struct bch_fs *);
-
-int bch2_check_reconcile_work(struct bch_fs *);
-
-#endif /* _BCACHEFS_REBALANCE_H */
+#endif /* _BCACHEFS_RECONCILE_TRIGGER_H */

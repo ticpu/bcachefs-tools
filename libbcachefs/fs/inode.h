@@ -117,42 +117,33 @@ struct bkey_i *bch2_inode_to_v3(struct btree_trans *, struct bkey_i *);
 void bch2_inode_unpacked_to_text(struct printbuf *, struct bch_inode_unpacked *);
 
 int __bch2_inode_peek(struct btree_trans *, struct btree_iter *,
-		      struct bch_inode_unpacked *, subvol_inum, unsigned, bool);
+		      struct bch_inode_unpacked *, subvol_inum, unsigned, const char *);
 
 static inline int bch2_inode_peek_nowarn(struct btree_trans *trans,
 					 struct btree_iter *iter,
 					 struct bch_inode_unpacked *inode,
 					 subvol_inum inum, unsigned flags)
 {
-	return __bch2_inode_peek(trans, iter, inode, inum, flags, false);
+	return __bch2_inode_peek(trans, iter, inode, inum, flags, NULL);
 }
 
-static inline int bch2_inode_peek(struct btree_trans *trans,
-				  struct btree_iter *iter,
-				  struct bch_inode_unpacked *inode,
-				  subvol_inum inum, unsigned flags)
-{
-	return __bch2_inode_peek(trans, iter, inode, inum, flags, true);
-}
+#define bch2_inode_peek(_trans, _iter, _inode, _inum, _flags)			\
+	__bch2_inode_peek(_trans, _iter, _inode, _inum, _flags, __func__)
 
 int bch2_inode_find_by_inum_snapshot(struct btree_trans *, u64, u32,
 				     struct bch_inode_unpacked *, unsigned);
 
 int __bch2_inode_find_by_inum_trans(struct btree_trans *, subvol_inum,
-				    struct bch_inode_unpacked *, bool);
+				    struct bch_inode_unpacked *, const char *);
 
-static inline int bch2_inode_find_by_inum_trans(struct btree_trans *trans,
-				  subvol_inum inum,
-				  struct bch_inode_unpacked *inode)
-{
-	return __bch2_inode_find_by_inum_trans(trans, inum, inode, true);
-}
+#define bch2_inode_find_by_inum_trans(_trans, _inum, _inode)			\
+	__bch2_inode_find_by_inum_trans(_trans, _inum, _inode, __func__)
 
 static inline int bch2_inode_find_by_inum_nowarn_trans(struct btree_trans *trans,
 				  subvol_inum inum,
 				  struct bch_inode_unpacked *inode)
 {
-	return __bch2_inode_find_by_inum_trans(trans, inum, inode, false);
+	return __bch2_inode_find_by_inum_trans(trans, inum, inode, NULL);
 }
 
 int bch2_inode_find_by_inum(struct bch_fs *, subvol_inum,
@@ -305,7 +296,7 @@ void bch2_inode_opts_get_inode(struct bch_fs *, struct bch_inode_unpacked *, str
 int bch2_inode_set_casefold(struct btree_trans *, subvol_inum,
 			    struct bch_inode_unpacked *, unsigned);
 
-#include "data/reconcile.h"
+#include "data/reconcile/trigger.h"
 
 static inline struct bch_extent_reconcile
 bch2_inode_reconcile_opts_get(struct bch_fs *c, struct bch_inode_unpacked *inode)

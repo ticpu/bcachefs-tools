@@ -11,6 +11,7 @@
 
 #include "alloc/backpointers.h"
 #include "alloc/buckets_waiting_for_journal.h"
+#include "alloc/discard.h"
 #include "alloc/disk_groups.h"
 #include "alloc/foreground.h"
 #include "alloc/replicas.h"
@@ -27,11 +28,12 @@
 #include "data/checksum.h"
 #include "data/compress.h"
 #include "data/copygc.h"
-#include "data/ec.h"
+#include "data/ec/create.h"
+#include "data/ec/init.h"
 #include "data/move.h"
 #include "data/nocow_locking.h"
 #include "data/read.h"
-#include "data/reconcile.h"
+#include "data/reconcile/work.h"
 #include "data/write.h"
 
 #ifdef CONFIG_DEBUG_FS
@@ -242,6 +244,10 @@ static void bch2_fs_time_stats_release(struct kobject *k)
 {
 }
 
+static void bch2_fs_time_stats_json_release(struct kobject *k)
+{
+}
+
 static struct attribute *bcachefs_files[] = {
 	NULL
 };
@@ -258,6 +264,7 @@ KTYPE(bch2_fs_counters);
 KTYPE(bch2_fs_internal);
 KTYPE(bch2_fs_opts_dir);
 KTYPE(bch2_fs_time_stats);
+KTYPE(bch2_fs_time_stats_json);
 
 static struct kobject bcachefs_kobj;
 
@@ -318,6 +325,7 @@ static void __bch2_fs_read_only(struct bch_fs *c)
 	bch2_open_buckets_stop(c, NULL, true);
 	bch2_reconcile_stop(c);
 	bch2_copygc_stop(c);
+	bch2_btree_write_buffer_stop(c);
 	bch2_fs_ec_flush(c);
 	cancel_delayed_work_sync(&c->maybe_schedule_btree_bitmap_gc);
 
@@ -434,6 +442,7 @@ void bch2_fs_read_only(struct bch_fs *c)
 		bch2_verify_accounting_clean(c);
 	} else {
 		/* Make sure error counts/counters are persisted */
+		guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 		guard(mutex)(&c->sb_lock);
 		bch2_write_super(c);
 
@@ -547,6 +556,7 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 	enumerated_ref_start(&c->writes);
 
 	int ret = bch2_journal_reclaim_start(&c->journal) ?:
+		  bch2_btree_write_buffer_start(c) ?:
 		  bch2_copygc_start(c) ?:
 		  bch2_reconcile_start(c);
 	if (ret) {
@@ -599,6 +609,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 
 	bch2_reconcile_stop(c);
 	bch2_copygc_stop(c);
+	bch2_btree_write_buffer_stop(c);
 	bch2_free_pending_node_rewrites(c);
 	bch2_free_fsck_errs(c);
 	bch2_fs_vfs_exit(c);
@@ -613,6 +624,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_fs_errors_exit(c);
 	bch2_fs_encryption_exit(c);
 	bch2_fs_ec_exit(c);
+	bch2_fs_data_update_exit(c);
 	bch2_fs_counters_exit(c);
 	bch2_fs_copygc_exit(c);
 	bch2_fs_compress_exit(c);
@@ -678,8 +690,10 @@ int bch2_fs_stop(struct bch_fs *c)
 		wait_event(c->ro_ref_wait, !refcount_read(&c->ro_ref));
 
 		kobject_put(&c->counters_kobj);
+		kobject_put(&c->time_stats_json);
 		kobject_put(&c->time_stats);
 		kobject_put(&c->opts_dir);
+		sysfs_remove_bin_file(&c->internal, &bin_attr_btree_trans_stats_json);
 		kobject_put(&c->internal);
 
 		/* btree prefetch might have kicked off reads in the background: */
@@ -752,9 +766,11 @@ static int bch2_fs_online(struct bch_fs *c)
 	    kobject_add(&c->opts_dir, &c->kobj, "options") ?:
 #ifndef CONFIG_BCACHEFS_NO_LATENCY_ACCT
 	    kobject_add(&c->time_stats, &c->kobj, "time_stats") ?:
+	    kobject_add(&c->time_stats_json, &c->kobj, "time_stats_json") ?:
 #endif
 	    kobject_add(&c->counters_kobj, &c->kobj, "counters") ?:
-	    bch2_opts_create_sysfs_files(&c->opts_dir, OPT_FS))
+	    bch2_opts_create_sysfs_files(&c->opts_dir, OPT_FS) ?:
+	    sysfs_create_bin_file(&c->internal, &bin_attr_btree_trans_stats_json))
 		return bch_err_throw(c, sysfs_init_error);
 
 	guard(rwsem_write)(&c->state_lock);
@@ -786,6 +802,7 @@ int bch2_fs_init_rw(struct bch_fs *c)
 	try(bch2_fs_journal_init(&c->journal));
 	try(bch2_fs_vfs_init_rw(c));
 	try(bch2_journal_reclaim_start(&c->journal));
+	try(bch2_btree_write_buffer_start(c));
 	try(bch2_copygc_start(c));
 	try(bch2_reconcile_start(c));
 
@@ -947,7 +964,8 @@ static int bch2_fs_opt_version_init(struct bch_fs *c, struct printbuf *out)
 	if (c->opts.journal_rewind)
 		prt_printf(out, "rewinding journal, fsck required\n");
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
 
 		__le64 now = cpu_to_le64(ktime_get_real_seconds());
@@ -997,6 +1015,18 @@ static int bch2_fs_opt_version_init(struct bch_fs *c, struct printbuf *out)
 
 		if (c->sb.version_upgrade_complete < bcachefs_metadata_version_autofix_errors)
 			SET_BCH_SB_ERROR_ACTION(c->disk_sb.sb, BCH_ON_ERROR_fix_safe);
+
+		unsigned extent_bp_shift_needed = ilog2(c->opts.encoded_extent_max >> 9) + 1;
+		if (extent_bp_shift_needed > c->sb.extent_bp_shift) {
+			prt_printf(out, "extent_bp_shift too small: must repair backpointers\n");
+			SET_BCH_SB_EXTENT_BP_SHIFT(c->disk_sb.sb, extent_bp_shift_needed);
+			ext->recovery_passes_required[0] |=
+				cpu_to_le64(bch2_recovery_passes_to_stable(BIT_ULL(BCH_RECOVERY_PASS_check_extents_to_backpointers)));
+			ext->recovery_passes_required[0] |=
+				cpu_to_le64(bch2_recovery_passes_to_stable(BIT_ULL(BCH_RECOVERY_PASS_check_backpointers_to_extents)));
+			__set_bit_le64(BCH_FSCK_ERR_backpointer_to_missing_ptr, ext->errors_silent);
+			__set_bit_le64(BCH_FSCK_ERR_ptr_to_missing_backpointer, ext->errors_silent);
+		}
 
 		/* Don't write the superblock, defer that until we go rw */
 	}
@@ -1050,6 +1080,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	kobject_init(&c->internal, &bch2_fs_internal_ktype);
 	kobject_init(&c->opts_dir, &bch2_fs_opts_dir_ktype);
 	kobject_init(&c->time_stats, &bch2_fs_time_stats_ktype);
+	kobject_init(&c->time_stats_json, &bch2_fs_time_stats_json_ktype);
 	kobject_init(&c->counters_kobj, &bch2_fs_counters_ktype);
 
 	c->minor		= -1;
@@ -1061,6 +1092,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 
 	refcount_set(&c->ro_ref, 1);
 	init_waitqueue_head(&c->ro_ref_wait);
+	mutex_init(&c->opt_change_lock);
 
 	for (unsigned i = 0; i < BCH_TIME_STAT_NR; i++)
 		bch2_time_stats_init(&c->times[i]);
@@ -1095,8 +1127,10 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 
 	try(bch2_fs_capacity_init(c));
 
-	scoped_guard(mutex, &c->sb_lock)
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		try(bch2_sb_to_fs(c, sb));
+	}
 
 	/* Compat: */
 	if (le16_to_cpu(sb->version) <= bcachefs_metadata_version_inode_v2 &&
@@ -1148,11 +1182,11 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	try(bch2_fs_buckets_waiting_for_journal_init(c));
 	try(bch2_fs_compress_init(c));
 	try(bch2_fs_counters_init(c));
+	try(bch2_fs_data_update_init(c));
 	try(bch2_fs_ec_init(c));
 	try(bch2_fs_errors_init(c));
 	try(bch2_fs_encryption_init(c));
 	try(bch2_fs_io_read_init(c));
-	try(bch2_fs_reconcile_init(c));
 	try(bch2_fs_vfs_init(c));
 	try(bch2_io_clock_init(&c->io_clock[READ]));
 	try(bch2_io_clock_init(&c->io_clock[WRITE]));
@@ -1189,7 +1223,8 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 			&c->clock_journal_res,
 			(sizeof(struct jset_entry_clock) / sizeof(u64)) * 2);
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		if (!bch2_sb_field_get_minsize(&c->disk_sb, ext,
 				sizeof(struct bch_sb_field_ext) / sizeof(u64)))
 			return bch_err_throw(c, ENOSPC_sb);
@@ -1208,13 +1243,6 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 		 */
 		try(bch2_fs_opt_version_init(c, out));
 	}
-
-	/*
-	 * just make sure this is always allocated if we might need it - mount
-	 * failing due to kthread_create() failing is _very_ annoying
-	 */
-	if (go_rw_in_recovery(c))
-		try(bch2_fs_init_rw(c));
 
 	scoped_guard(mutex, &bch2_fs_list_lock)
 		try(bch2_fs_online(c));
@@ -1237,6 +1265,17 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts *opts,
 	}
 
 	return c;
+}
+
+void bch2_missing_devs_to_text(struct printbuf *out, struct bch_fs *c)
+{
+	prt_printf(out, "Missing devices\n");
+	for_each_member_device(c, ca)
+		if (!bch2_dev_is_online(ca) && bch2_dev_has_data(c, ca)) {
+			prt_printf(out, "Device %u\n", ca->dev_idx);
+			guard(printbuf_indent)(out);
+			bch2_member_to_text_short(out, c, ca);
+		}
 }
 
 static int bch2_fs_may_start(struct bch_fs *c, struct printbuf *err)
@@ -1270,17 +1309,10 @@ static int bch2_fs_may_start(struct bch_fs *c, struct printbuf *err)
 	}
 	}
 
-	if (!bch2_can_read_fs_with_devs(c, c->devs_online, flags, err) ||
+	if (!bch2_can_read_fs_with_devs(c, &c->devs_online, flags, err) ||
 	    (!c->opts.read_only &&
 	     !bch2_can_write_fs_with_devs(c, c->allocator.rw_devs[0], flags, err))) {
-		prt_printf(err, "Missing devices\n");
-		for_each_member_device(c, ca)
-			if (!bch2_dev_is_online(ca) && bch2_dev_has_data(c, ca)) {
-				prt_printf(err, "Device %u\n", ca->dev_idx);
-				guard(printbuf_indent)(err);
-				bch2_member_to_text_short(err, c, ca);
-			}
-
+		bch2_missing_devs_to_text(err, c);
 		return bch_err_throw(c, insufficient_devices_to_start);
 	}
 
@@ -1301,6 +1333,16 @@ static int __bch2_fs_start(struct bch_fs *c, struct printbuf *err)
 	}
 
 	try(bch2_fs_may_start(c, err));
+
+	try(bch2_fs_reconcile_init(c));
+	try(bch2_fs_counters_init_late(c));
+
+	/*
+	 * just make sure this is always allocated if we might need it - mount
+	 * failing due to kthread_create() failing is _very_ annoying
+	 */
+	if (go_rw_in_recovery(c))
+		try(bch2_fs_init_rw(c));
 
 	/*
 	 * check mount options as early as possible; some can only be checked
@@ -1379,7 +1421,8 @@ int bch2_fs_resize_on_mount(struct bch_fs *c)
 				return ret;
 			}
 
-			scoped_guard(mutex, &c->sb_lock) {
+			scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+				guard(mutex)(&c->sb_lock);
 				struct bch_member *m =
 					bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
 				m->nbuckets = cpu_to_le64(new_nbuckets);

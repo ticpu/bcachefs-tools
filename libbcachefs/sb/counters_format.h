@@ -19,7 +19,6 @@ enum bch_counters_flags {
 	x(data_read_nopromote_already_promoted,		87,	TYPE_COUNTER)	\
 	x(data_read_nopromote_unwritten,		88,	TYPE_COUNTER)	\
 	x(data_read_nopromote_congested,		89,	TYPE_COUNTER)	\
-	x(data_read_nopromote_in_flight,		90,	TYPE_COUNTER)	\
 	x(data_read_bounce,				31,	TYPE_COUNTER)	\
 	x(data_read_split,				33,	TYPE_COUNTER)	\
 	x(data_read_reuse_race,				34,	TYPE_COUNTER)	\
@@ -31,11 +30,13 @@ enum bch_counters_flags {
 	x(data_update_pred,				96,	TYPE_SECTORS)	\
 	x(data_update,					2,	TYPE_SECTORS)	\
 	x(data_update_no_io,				91,	TYPE_SECTORS)	\
+	x(data_update_in_flight,			90,	TYPE_COUNTER)	\
 	x(data_update_fail,				82,	TYPE_SECTORS)	\
 	x(data_update_read,				35,	TYPE_SECTORS)	\
 	x(data_update_write,				36,	TYPE_SECTORS)	\
 	x(data_update_key,				37,	TYPE_SECTORS)	\
 	x(data_update_key_fail,				38,	TYPE_SECTORS)	\
+	x(data_update_useless_write_fail,		128,	TYPE_SECTORS)	\
 	x(data_update_start_fail_obsolete,		39,	TYPE_COUNTER)	\
 	x(data_update_noop_obsolete,			92,	TYPE_COUNTER)	\
 	x(reconcile_scan_fs,				113,	TYPE_SECTORS)	\
@@ -43,18 +44,24 @@ enum bch_counters_flags {
 	x(reconcile_scan_pending,			115,	TYPE_SECTORS)	\
 	x(reconcile_scan_device,			116,	TYPE_SECTORS)	\
 	x(reconcile_scan_inum,				117,	TYPE_SECTORS)	\
+	x(reconcile_clear_scan,				129,	TYPE_COUNTER)	\
 	x(reconcile_btree,				118,	TYPE_SECTORS)	\
 	x(reconcile_data,				119,	TYPE_SECTORS)	\
 	x(reconcile_phys,				120,	TYPE_SECTORS)	\
+	x(reconcile_stripe,				130,	TYPE_SECTORS)	\
 	x(reconcile_set_pending,			83,	TYPE_SECTORS)	\
 	x(evacuate_bucket,				84,	TYPE_COUNTER)	\
+	x(stripe_alloc,					125,	TYPE_COUNTER)	\
 	x(stripe_create,				102,	TYPE_COUNTER)	\
+	x(stripe_reuse,					123,	TYPE_COUNTER)	\
 	x(stripe_create_fail,				103,	TYPE_COUNTER)	\
+	x(stripe_delete,				124,	TYPE_COUNTER)	\
 	x(stripe_update_bucket,				104,	TYPE_COUNTER)	\
 	x(stripe_update_extent,				99,	TYPE_COUNTER)	\
 	x(stripe_update_extent_fail,			100,	TYPE_COUNTER)	\
 	x(copygc,					40,	TYPE_COUNTER)	\
 	x(copygc_wait_obsolete,				41,	TYPE_COUNTER)	\
+	x(cached_ptr_drop,				121,	TYPE_SECTORS)	\
 	x(bucket_invalidate,				3,	TYPE_COUNTER)	\
 	x(bucket_discard_worker,			108,	TYPE_COUNTER)	\
 	x(bucket_discard_fast_worker,			109,	TYPE_COUNTER)	\
@@ -62,6 +69,9 @@ enum bch_counters_flags {
 	x(bucket_discard_fast,				79,	TYPE_COUNTER)	\
 	x(bucket_alloc,					5,	TYPE_COUNTER)	\
 	x(bucket_alloc_fail,				6,	TYPE_COUNTER)	\
+	x(open_bucket_alloc_fail,			122,	TYPE_COUNTER)	\
+	x(bucket_alloc_from_stripe,			127,	TYPE_COUNTER)	\
+	x(sectors_alloc,				126,	TYPE_SECTORS)	\
 	x(bkey_pack_pos_fail,				112,	TYPE_COUNTER)	\
 	x(btree_cache_scan,				7,	TYPE_COUNTER)	\
 	x(btree_cache_reap,				8,	TYPE_COUNTER)	\
@@ -83,7 +93,7 @@ enum bch_counters_flags {
 	x(btree_path_relock_fail,			22,	TYPE_COUNTER)	\
 	x(btree_path_upgrade_fail,			23,	TYPE_COUNTER)	\
 	x(btree_reserve_get_fail,			24,	TYPE_COUNTER)	\
-	x(journal_entry_full,				25,	TYPE_COUNTER)	\
+	x(journal_res_get_blocked,			25,	TYPE_COUNTER)	\
 	x(journal_full,					26,	TYPE_COUNTER)	\
 	x(journal_reclaim_finish,			27,	TYPE_COUNTER)	\
 	x(journal_reclaim_start,			28,	TYPE_COUNTER)	\

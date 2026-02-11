@@ -60,6 +60,7 @@ void bcachefs_usage(void)
 	     "Commands for managing a running filesystem:\n"
 	     "  fs usage                 Show disk usage\n"
 	     "  fs top                   Show runtime performance information\n"
+	     "  fs timestats             Show filesystem time statistics\n"
 	     "\n"
 	     "Commands for managing devices within a running filesystem:\n"
 	     "  device add               Add a new device to an existing filesystem\n"
@@ -75,6 +76,8 @@ void bcachefs_usage(void)
 	     "  subvolume create         Create a new subvolume\n"
 	     "  subvolume delete         Delete an existing subvolume\n"
 	     "  subvolume snapshot       Create a snapshot\n"
+	     "  subvolume list           List subvolumes\n"
+	     "  subvolume list-snapshots List snapshots and their disk usage\n"
 	     "\n"
 	     "Commands for managing filesystem data:\n"
 	     "  reconcile status         Show status of background data processing\n"
@@ -97,6 +100,7 @@ void bcachefs_usage(void)
 	     "\n"
 	     "Commands for operating on files in a bcachefs filesystem:\n"
 	     "  set-file-option          Set various attributes on files or directories\n"
+	     "  reflink-option-propagate Propagate IO options to reflinked extents\n"
 	     "\n"
 	     "Debug:\n"
 	     "These commands work on offline, unmounted filesystems\n"
@@ -104,6 +108,7 @@ void bcachefs_usage(void)
 	     "  undump                   Convert qcow2 metadata dumps to sparse raw files\n"
 	     "  list                     List filesystem metadata in textual form\n"
 	     "  list_journal             List contents of journal\n"
+	     "  kill_btree_node          Make btree nodes unreadable\n"
 	     "\n"
 #ifdef BCACHEFS_FUSE
 	     "FUSE:\n"
@@ -111,6 +116,7 @@ void bcachefs_usage(void)
 	     "\n"
 #endif
 	     "Miscellaneous:\n"
-         "  completions              Generate shell completions\n"
+	     "  completions              Generate shell completions\n"
 	     "  version                  Display the version of the invoked bcachefs tool\n");
+	exit(EXIT_SUCCESS);
 }

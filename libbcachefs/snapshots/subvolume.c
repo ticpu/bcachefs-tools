@@ -303,8 +303,7 @@ bch2_subvolume_get_inlined(struct btree_trans *trans, unsigned subvol,
 			   struct bch_subvolume *s)
 {
 	int ret = bch2_bkey_get_val_typed(trans, BTREE_ID_subvolumes, POS(0, subvol),
-					  BTREE_ITER_cached|
-					  BTREE_ITER_with_updates, subvolume, s);
+					  BTREE_ITER_cached, subvolume, s);
 	if (bch2_err_matches(ret, ENOENT) && inconsistent_if_not_found)
 		ret = bch2_subvolume_missing(trans->c, subvol) ?: ret;
 	return ret;
@@ -345,8 +344,7 @@ int bch2_snapshot_get_subvol(struct btree_trans *trans, u32 snapshot,
 int __bch2_subvolume_get_snapshot(struct btree_trans *trans, u32 subvolid,
 				  u32 *snapid, bool warn)
 {
-	CLASS(btree_iter, iter)(trans, BTREE_ID_subvolumes, POS(0, subvolid),
-				BTREE_ITER_cached|BTREE_ITER_with_updates);
+	CLASS(btree_iter, iter)(trans, BTREE_ID_subvolumes, POS(0, subvolid), BTREE_ITER_cached);
 	struct bkey_s_c_subvolume subvol = bch2_bkey_get_typed(&iter, subvolume);
 	int ret = bkey_err(subvol);
 
@@ -671,36 +669,3 @@ void bch2_fs_subvolumes_init_early(struct bch_fs *c)
 		  bch2_subvolume_wait_for_pagecache_and_delete);
 }
 
-static int bch2_subvolume_to_text_full(struct printbuf *out, struct btree_trans *trans, struct bkey_s_c_subvolume s)
-{
-	unsigned pos = out->pos;
-
-	prt_printf(out, "%3llu ", s.k->p.offset);
-
-	int ret = bch2_inum_to_path(trans, (subvol_inum) { s.k->p.offset, le64_to_cpu(s.v->inode) }, out);
-	if (ret) {
-		out->pos = pos;
-		return ret;
-	}
-
-	u32 snapshot = le32_to_cpu(s.v->snapshot);
-
-	prt_printf(out, ":\t%u\r%u\r\n",
-		   bch2_snapshot_tree(trans->c, snapshot),
-		   snapshot);
-	return 0;
-}
-
-void bch2_subvolumes_list_to_text(struct printbuf *out, struct bch_fs *c)
-{
-	printbuf_tabstop_push(out, 40);
-	printbuf_tabstop_push(out, 12);
-	printbuf_tabstop_push(out, 12);
-
-	CLASS(btree_trans, trans)(c);
-	for_each_btree_key(trans, iter, BTREE_ID_subvolumes, POS_MIN, 0, k, ({
-		if (k.k->type != KEY_TYPE_subvolume)
-			continue;
-		bch2_subvolume_to_text_full(out, trans, bkey_s_c_to_subvolume(k));
-	}));
-}

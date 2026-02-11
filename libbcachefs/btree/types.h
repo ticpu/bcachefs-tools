@@ -239,7 +239,6 @@ struct btree_node_iter {
 	x(not_extents)				\
 	x(cached)				\
 	x(with_key_cache)			\
-	x(with_updates)				\
 	x(with_journal)				\
 	x(snapshot_field)			\
 	x(all_snapshots)			\
@@ -623,6 +622,9 @@ struct bch_fs_btree_trans {
 	bool				barrier_initialized;
 
 	struct btree_transaction_stats	stats[BCH_TRANSACTIONS_NR];
+
+	struct mutex			stats_json_lock;
+	struct printbuf			stats_json_buf;
 };
 
 static inline struct btree_path *btree_iter_path(struct btree_trans *trans, struct btree_iter *iter)
@@ -671,7 +673,6 @@ enum btree_write_type {
 	x(fake)								\
 	x(need_rewrite)							\
 	x(need_rewrite_error)						\
-	x(need_rewrite_degraded)					\
 	x(need_rewrite_ptr_written_zero)				\
 	x(never_write)							\
 	x(pinned)
@@ -701,7 +702,6 @@ BTREE_FLAGS()
 	x(none)								\
 	x(unknown)							\
 	x(error)							\
-	x(degraded)							\
 	x(ptr_written_zero)
 
 enum btree_node_rewrite_reason {
@@ -745,8 +745,6 @@ static inline enum btree_node_rewrite_reason btree_node_rewrite_reason(struct bt
 {
 	if (btree_node_need_rewrite_ptr_written_zero(b))
 		return BTREE_NODE_REWRITE_ptr_written_zero;
-	if (btree_node_need_rewrite_degraded(b))
-		return BTREE_NODE_REWRITE_degraded;
 	if (btree_node_need_rewrite_error(b))
 		return BTREE_NODE_REWRITE_error;
 	if (btree_node_need_rewrite(b))

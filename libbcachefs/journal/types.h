@@ -237,6 +237,7 @@ struct journal {
 
 	struct delayed_work	write_work;
 	struct workqueue_struct *wq;
+	struct workqueue_struct *discard_wq;
 
 	/* Sequence number of most recent journal entry (last entry in @pin) */
 	atomic64_t		seq;
@@ -300,8 +301,6 @@ struct journal {
 	bool			flush_in_progress_dropped;
 	wait_queue_head_t	pin_flush_wait;
 
-	/* protects advancing ja->discard_idx: */
-	struct mutex		discard_lock;
 	bool			can_discard;
 
 	unsigned long		last_flush_write;
@@ -348,6 +347,9 @@ struct journal_device {
 	/* Bio for journal reads/writes to this device */
 	struct journal_bio	*bio[JOURNAL_BUF_NR];
 
+	struct mutex		discard_lock;
+	struct work_struct	discard;
+
 	/* for bch_journal_read_device */
 	struct closure		read;
 	u64			highest_seq_found;
@@ -360,10 +362,36 @@ struct journal_entry_res {
 	unsigned		u64s;
 };
 
+/*
+ * Computed by bch2_journal_read(), consumed by bch2_fs_recovery() and
+ * bch2_fs_journal_start():
+ *
+ * After journal read we have three sequence number zones:
+ *
+ *   [last_seq ... replay_end]  [replay_end+1 ... cur_seq-1]  [cur_seq ...]
+ *         replay these              blacklist these            new writes
+ *
+ * @last_seq:	Start of replay window — from last flush entry's last_seq.
+ *		All entries >= last_seq are needed for recovery.
+ *
+ * @replay_end:	End of replay window — last flush entry's seq.
+ *		Entries past this may exist on disk (noflush/torn writes)
+ *		but are unreliable.
+ *
+ * @cur_seq:	First sequence number available for new journal writes.
+ *		Initialized to highest on-disk entry + 1, then bumped
+ *		further by recovery (+JOURNAL_BUF_NR*4 for unclean
+ *		shutdown) and max'd with last blacklisted seq.
+ *		Must be strictly greater than every entry found on disk,
+ *		including noflush/blacklisted entries — we must never
+ *		reuse a sequence number that was already written.
+ *
+ * @clean:	Last flush entry was empty (filesystem was clean).
+ */
 struct journal_start_info {
-	u64	seq_read_start;
-	u64	seq_read_end;
-	u64	start_seq;
+	u64	last_seq;
+	u64	replay_end;
+	u64	cur_seq;
 	bool	clean;
 };
 

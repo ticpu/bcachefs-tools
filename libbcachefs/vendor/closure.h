@@ -194,7 +194,7 @@ static inline unsigned closure_nr_remaining(struct closure *cl)
  */
 static inline void closure_sync(struct closure *cl)
 {
-	if (closure_nr_remaining(cl) > 1)
+	//if (closure_nr_remaining(cl) > 1)
 		__bch2_closure_sync(cl);
 }
 
@@ -206,6 +206,8 @@ static inline int closure_sync_timeout(struct closure *cl, unsigned long timeout
 		? __bch2_closure_sync_timeout(cl, timeout)
 		: 0;
 }
+
+void bch2_closure_sync_unbounded(struct closure *);
 
 //#ifdef CONFIG_DEBUG_CLOSURES
 #if 0

@@ -27,6 +27,10 @@
 
 void die(const char *, ...)
 	__attribute__ ((format (printf, 1, 2))) noreturn;
+
+char *vmprintf(const char *fmt, va_list args)
+	__attribute__ ((format (printf, 1, 0)));
+
 char *mprintf(const char *, ...)
 	__attribute__ ((format (printf, 1, 2)));
 

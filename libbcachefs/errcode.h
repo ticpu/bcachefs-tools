@@ -199,8 +199,10 @@
 	x(EEXIST,			EEXIST_str_hash_set)			\
 	x(EEXIST,			EEXIST_discard_in_flight_add)		\
 	x(EEXIST,			EEXIST_subvolume_create)		\
-	x(ENOSPC,			open_buckets_empty)			\
-	x(ENOSPC,			freelist_empty)				\
+	x(EAGAIN,			open_buckets_empty)			\
+	x(EAGAIN,			freelist_empty)				\
+	x(EAGAIN,			stripe_needs_block_evacuate)		\
+	x(ENOSPC,			ec_alloc_failed)			\
 	x(BCH_ERR_freelist_empty,	no_buckets_found)			\
 	x(0,				transaction_restart)			\
 	x(BCH_ERR_transaction_restart,	transaction_restart_fault_inject)	\
@@ -265,8 +267,11 @@
 	x(BCH_ERR_data_update_done,	data_update_done_no_writes_needed)	\
 	x(0,				data_update_fail)			\
 	x(BCH_ERR_data_update_fail,	data_update_fail_would_block)		\
+	x(BCH_ERR_data_update_fail,	data_update_fail_in_flight)		\
 	x(BCH_ERR_data_update_fail,	data_update_fail_no_snapshot)		\
 	x(BCH_ERR_data_update_fail,	data_update_fail_no_rw_devs)		\
+	x(BCH_ERR_data_update_fail,	data_update_fail_need_copygc)		\
+	x(EPERM,			reflink_p_may_update_options_unset)	\
 	x(EINVAL,			device_state_not_allowed)		\
 	x(EINVAL,			member_info_missing)			\
 	x(EINVAL,			mismatched_block_size)			\
@@ -293,6 +298,7 @@
 	x(EINVAL,			inode_has_child_snapshot)		\
 	x(EINVAL,			varint_decode_error)			\
 	x(EINVAL,			erasure_coding_found_btree_node)	\
+	x(EINVAL,			erasure_coding_stripe_update_err)	\
 	x(EINVAL,			option_negative)			\
 	x(EINVAL,			topology_repair)			\
 	x(EINVAL,			unaligned_io)				\
@@ -320,10 +326,14 @@
 	x(EROFS,			erofs_filesystem_full)			\
 	x(EROFS,			insufficient_devices)			\
 	x(EROFS,			erofs_recovery_cancelled)		\
+	x(EROFS,			emergency_ro)				\
 	x(ESHUTDOWN,			btree_not_started)			\
 	x(0,				operation_blocked)			\
 	x(BCH_ERR_operation_blocked,	btree_cache_cannibalize_lock_blocked)	\
 	x(BCH_ERR_operation_blocked,	journal_res_blocked)			\
+	x(BCH_ERR_operation_blocked,	bucket_alloc_blocked)			\
+	x(BCH_ERR_operation_blocked,	open_bucket_alloc_blocked)		\
+	x(BCH_ERR_operation_blocked,	stripe_alloc_blocked)			\
 	x(BCH_ERR_journal_res_blocked,	journal_blocked)			\
 	x(BCH_ERR_journal_res_blocked,	journal_max_in_flight)			\
 	x(BCH_ERR_journal_res_blocked,	journal_max_open)			\
@@ -332,8 +342,6 @@
 	x(BCH_ERR_journal_res_blocked,	journal_buf_enomem)			\
 	x(BCH_ERR_journal_res_blocked,	journal_stuck)				\
 	x(BCH_ERR_journal_res_blocked,	journal_retry_open)			\
-	x(BCH_ERR_journal_res_blocked,	bucket_alloc_blocked)			\
-	x(BCH_ERR_journal_res_blocked,	stripe_alloc_blocked)			\
 	x(BCH_ERR_invalid,		invalid_sb)				\
 	x(BCH_ERR_invalid_sb,		invalid_sb_magic)			\
 	x(BCH_ERR_invalid_sb,		invalid_sb_version)			\
@@ -386,7 +394,12 @@
 	x(EIO,				trigger_stripe_pointer)			\
 	x(EIO,				metadata_bucket_inconsistency)		\
 	x(EIO,				mark_stripe)				\
-	x(EIO,				stripe_reconstruct)			\
+	x(EIO,				stripe_read)				\
+	x(BCH_ERR_stripe_read,		stripe_read_device_offline)		\
+	x(BCH_ERR_stripe_read,		stripe_read_ptr_stale)			\
+	x(BCH_ERR_stripe_read,		stripe_read_csum_err)			\
+	x(BCH_ERR_stripe_read,		stripe_reconstruct)			\
+	x(BCH_ERR_stripe_read,		stripe_reconstruct_insufficient_blocks)	\
 	x(EIO,				key_type_error)				\
 	x(EIO,				extent_poisoned)			\
 	x(EIO,				missing_indirect_extent)		\
@@ -394,6 +407,7 @@
 	x(EIO,				no_encryption_key)			\
 	x(EIO,				insufficient_journal_devices)		\
 	x(EIO,				device_offline)				\
+	x(EIO,				stripe_create_device_offline)		\
 	x(EIO,				EIO_fault_injected)			\
 	x(EIO,				ec_block_read)				\
 	x(EIO,				ec_block_write)				\
@@ -436,7 +450,6 @@
 	x(BCH_ERR_nopromote,		nopromote_unwritten)			\
 	x(BCH_ERR_nopromote,		nopromote_congested)			\
 	x(BCH_ERR_nopromote,		nopromote_ratelimited)			\
-	x(BCH_ERR_nopromote,		nopromote_in_flight)			\
 	x(BCH_ERR_nopromote,		nopromote_no_writes)			\
 	x(BCH_ERR_nopromote,		nopromote_enomem)			\
 	x(0,				invalid_snapshot_node)			\

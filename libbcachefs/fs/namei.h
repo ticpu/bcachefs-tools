@@ -25,9 +25,9 @@ int bch2_link_trans(struct btree_trans *,
 		    subvol_inum, struct bch_inode_unpacked *,
 		    const struct qstr *);
 
-int bch2_unlink_trans(struct btree_trans *, subvol_inum,
-		      struct bch_inode_unpacked *,
-		      struct bch_inode_unpacked *,
+int bch2_unlink_trans(struct btree_trans *,
+		      subvol_inum, struct bch_inode_unpacked *,
+		      subvol_inum, struct bch_inode_unpacked *,
 		      const struct qstr *, bool);
 
 int bch2_rename_trans(struct btree_trans *,
@@ -43,6 +43,11 @@ bool bch2_reinherit_attrs(struct bch_inode_unpacked *,
 			  struct bch_inode_unpacked *);
 
 int bch2_inum_to_path(struct btree_trans *, subvol_inum, struct printbuf *);
+
+#define INUM_TO_PATH_FAIL_ON_ERR	(1 << 0)
+
+int bch2_inum_to_path_in_subvol(struct btree_trans *, subvol_inum,
+				u32, unsigned, struct printbuf *);
 int bch2_inum_snapshot_to_path(struct btree_trans *, u64, u32,
 			       snapshot_id_list *, struct printbuf *);
 

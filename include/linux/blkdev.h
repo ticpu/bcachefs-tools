@@ -25,6 +25,7 @@ struct user_namespace;
 
 struct file {
 	struct inode		*f_inode;
+	void			*private_data;
 };
 
 static inline struct inode *file_inode(const struct file *f)
@@ -124,10 +125,11 @@ struct dir_context {
 	u64 pos;
 };
 
-/* /sys/fs */
-extern struct kobject *fs_kobj;
-
 struct file_operations {
+	struct module *owner;
+	int (*open) (struct inode *, struct file *);
+	int (*release) (struct inode *, struct file *);
+	ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
 };
 
 static inline int register_chrdev(unsigned int major, const char *name,
@@ -178,6 +180,8 @@ blk_status_t errno_to_blk_status(int errno);
 const char *blk_status_to_str(blk_status_t status);
 
 static inline void invalidate_bdev(struct block_device *bdev) {}
+
+void blkdev_init(void);
 
 #endif /* __TOOLS_LINUX_BLKDEV_H */
 

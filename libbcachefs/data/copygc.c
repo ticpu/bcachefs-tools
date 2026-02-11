@@ -17,7 +17,7 @@
 #include "btree/update.h"
 #include "btree/write_buffer.h"
 
-#include "data/ec.h"
+#include "data/ec/trigger.h"
 #include "data/move.h"
 #include "data/copygc.h"
 
@@ -232,7 +232,7 @@ static int bch2_copygc_get_stripe_buckets(struct moving_context *ctxt,
 				continue;
 
 			const struct bch_extent_ptr *ptr = s->ptrs + i;
-			CLASS(bch2_dev_tryget, ca)(trans->c, ptr->dev);
+			CLASS(bch2_dev_bkey_tryget, ca)(trans->c, s_k, ptr->dev);
 			if (unlikely(!ca))
 				continue;
 
@@ -368,7 +368,7 @@ err:
 	return ret;
 }
 
-static u64 bch2_copygc_dev_wait_amount(struct bch_dev *ca)
+u64 bch2_copygc_dev_wait_amount(struct bch_dev *ca)
 {
 	struct bch_dev_usage_full usage_full = bch2_dev_usage_full_read(ca);
 	struct bch_dev_usage usage;
@@ -376,7 +376,16 @@ static u64 bch2_copygc_dev_wait_amount(struct bch_dev *ca)
 	for (unsigned i = 0; i < BCH_DATA_NR; i++)
 		usage.buckets[i] = usage_full.d[i].buckets;
 
-	s64 fragmented_allowed = ((__dev_buckets_available(ca, usage, BCH_WATERMARK_stripe) *
+	/* Don't start until less than 20% of the device is free */
+	u64 available = (usage.buckets[BCH_DATA_free] +
+			 usage.buckets[BCH_DATA_need_gc_gens] +
+			 usage.buckets[BCH_DATA_need_discard]);
+	s64 wait = (available * 5 - ca->mi.nbuckets) * ca->mi.bucket_size;
+	if (wait > 0)
+		return wait;
+
+	s64 fragmented_allowed = (((__dev_buckets_available(ca, usage, BCH_WATERMARK_stripe) +
+				    (ca->mi.nbuckets >> 6)) * /* Copygc hard reserve */
 				   ca->mi.bucket_size) >> 1);
 	s64 fragmented = 0;
 
@@ -415,6 +424,7 @@ void bch2_copygc_wait_to_text(struct printbuf *out, struct bch_fs *c)
 {
 	printbuf_tabstop_push(out, 32);
 	prt_printf(out, "running:\t%u\n",		c->copygc.running);
+	prt_printf(out, "run count:\t%u\n",		c->copygc.run_count);
 	prt_printf(out, "copygc_wait:\t%llu\n",		c->copygc.wait);
 	prt_printf(out, "copygc_wait_at:\t%llu\n",	c->copygc.wait_at);
 
@@ -510,7 +520,7 @@ static int bch2_copygc_thread(void *arg)
 			c->copygc.wait_at = last;
 			c->copygc.wait = last + wait;
 			move_buckets_wait(&ctxt, &buckets, true);
-			bch2_kthread_io_clock_wait(clock, last + wait,
+			bch2_kthread_io_clock_wait_once(clock, last + wait,
 					MAX_SCHEDULE_TIMEOUT);
 			continue;
 		}
@@ -520,6 +530,7 @@ static int bch2_copygc_thread(void *arg)
 		c->copygc.running = true;
 		ret = bch2_copygc(&ctxt, &buckets, &did_work);
 		c->copygc.running = false;
+		c->copygc.run_count++;
 
 		wake_up(&c->copygc.running_wq);
 
@@ -530,7 +541,7 @@ static int bch2_copygc_thread(void *arg)
 				min_member_capacity = 128 * 2048;
 
 			move_buckets_wait(&ctxt, &buckets, true);
-			bch2_kthread_io_clock_wait(clock, last + (min_member_capacity >> 6),
+			bch2_kthread_io_clock_wait_once(clock, last + (min_member_capacity >> 6),
 					MAX_SCHEDULE_TIMEOUT);
 		}
 	}
@@ -547,9 +558,10 @@ err:
 
 void bch2_copygc_stop(struct bch_fs *c)
 {
-	if (c->copygc.thread) {
-		kthread_stop(c->copygc.thread);
-		put_task_struct(c->copygc.thread);
+	struct task_struct *t = rcu_dereference_protected(c->copygc.thread, true);
+	if (t) {
+		kthread_stop(t);
+		put_task_struct(t);
 	}
 	c->copygc.thread = NULL;
 }
@@ -578,6 +590,7 @@ int bch2_copygc_start(struct bch_fs *c)
 		get_task_struct(t);
 
 		c->copygc.thread = t;
+		rcu_assign_pointer(c->copygc.thread, t);
 		wake_up_process(c->copygc.thread);
 	}
 

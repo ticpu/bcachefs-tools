@@ -2,7 +2,7 @@
 #define __TOOLS_LINUX_ATOMIC_H
 
 #include <linux/compiler.h>
-#include <linux/types.h>
+#include <linux/kernel.h>
 
 typedef struct {
 	int		counter;

@@ -1,7 +1,7 @@
-#ifndef __LINUX_BYTEORDER_H
-#define __LINUX_BYTEORDER_H
+#ifndef __LINUX_SHIM_BYTEORDER_H
+#define __LINUX_SHIM_BYTEORDER_H
 
-#include <linux/compiler.h>
+#include <linux/kernel.h>
 #include <asm/byteorder.h>
 
 #define swab16 __swab16
@@ -80,4 +80,4 @@ static inline void le32_to_cpu_array(u32 *buf, unsigned int words)
 	}
 }
 
-#endif /* __LINUX_BYTEORDER_H */
+#endif /* __LINUX_SHIM_BYTEORDER_H */

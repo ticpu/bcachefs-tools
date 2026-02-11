@@ -11,6 +11,7 @@
 #include "cmds.h"
 #include "libbcachefs.h"
 #include "tools-util.h"
+#include "version.h"
 
 #include "bcachefs.h"
 
@@ -31,6 +32,8 @@
 #include "init/fs.h"
 
 #include <linux/dcache.h>
+
+#include "src/rust_to_c.h"
 
 /* used by write_aligned function for waiting on bch2_write closure */
 struct write_aligned_op_t {
@@ -179,52 +182,42 @@ static void bcachefs_fuse_setattr(fuse_req_t req, fuse_ino_t ino,
 				  struct fuse_file_info *fi)
 {
 	struct bch_fs *c = fuse_req_userdata(req);
-	struct bch_inode_unpacked inode_u;
-	struct btree_trans *trans;
-	struct btree_iter iter;
-	u64 now;
-	int ret;
 
 	subvol_inum inum = map_root_ino(ino);
+	struct bch_inode_unpacked inode_u;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_setattr(%llu, %x)\n", inum.inum, to_set);
 
-	trans = bch2_trans_get(c);
-retry:
-	bch2_trans_begin(trans);
-	now = bch2_current_time(c);
+	CLASS(btree_trans, trans)(c);
+	int ret = commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+		u64 now = bch2_current_time(c);
 
-	ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
-	if (ret)
-		goto err;
+		CLASS(btree_iter_uninit, iter)(trans);
+		ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
+		if (ret)
+			goto err;
 
-	if (to_set & FUSE_SET_ATTR_MODE)
-		inode_u.bi_mode	= attr->st_mode;
-	if (to_set & FUSE_SET_ATTR_UID)
-		inode_u.bi_uid	= attr->st_uid;
-	if (to_set & FUSE_SET_ATTR_GID)
-		inode_u.bi_gid	= attr->st_gid;
-	if (to_set & FUSE_SET_ATTR_SIZE)
-		inode_u.bi_size	= attr->st_size;
-	if (to_set & FUSE_SET_ATTR_ATIME)
-		inode_u.bi_atime = timespec_to_bch2_time(c, attr->st_atim);
-	if (to_set & FUSE_SET_ATTR_MTIME)
-		inode_u.bi_mtime = timespec_to_bch2_time(c, attr->st_mtim);
-	if (to_set & FUSE_SET_ATTR_ATIME_NOW)
-		inode_u.bi_atime = now;
-	if (to_set & FUSE_SET_ATTR_MTIME_NOW)
-		inode_u.bi_mtime = now;
-	/* TODO: CTIME? */
-
-	ret   = bch2_inode_write(trans, &iter, &inode_u) ?:
-		bch2_trans_commit(trans, NULL, NULL,
-				  BCH_TRANS_COMMIT_no_enospc);
+		if (to_set & FUSE_SET_ATTR_MODE)
+			inode_u.bi_mode	= attr->st_mode;
+		if (to_set & FUSE_SET_ATTR_UID)
+			inode_u.bi_uid	= attr->st_uid;
+		if (to_set & FUSE_SET_ATTR_GID)
+			inode_u.bi_gid	= attr->st_gid;
+		if (to_set & FUSE_SET_ATTR_SIZE)
+			inode_u.bi_size	= attr->st_size;
+		if (to_set & FUSE_SET_ATTR_ATIME)
+			inode_u.bi_atime = timespec_to_bch2_time(c, attr->st_atim);
+		if (to_set & FUSE_SET_ATTR_MTIME)
+			inode_u.bi_mtime = timespec_to_bch2_time(c, attr->st_mtim);
+		if (to_set & FUSE_SET_ATTR_ATIME_NOW)
+			inode_u.bi_atime = now;
+		if (to_set & FUSE_SET_ATTR_MTIME_NOW)
+			inode_u.bi_mtime = now;
+		/* TODO: CTIME? */
 err:
-        bch2_trans_iter_exit(&iter);
-	if (ret == -EINTR)
-		goto retry;
-
-	bch2_trans_put(trans);
+		ret ?:
+		bch2_inode_write(trans, &iter, &inode_u);
+	}));
 
 	if (!ret) {
 		*attr = inode_to_stat(c, &inode_u);
@@ -263,7 +256,7 @@ static void bcachefs_fuse_mknod(fuse_req_t req, fuse_ino_t dir_ino,
 	int ret;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_mknod(%llu, %s, %x, %x)\n",
-		 dir.inum, name, mode, rdev);
+		 dir.inum, name, mode, (u32) rdev);
 
 	ret = do_create(c, dir, name, mode, rdev, &new_inode);
 	if (ret)
@@ -280,7 +273,7 @@ static void bcachefs_fuse_mkdir(fuse_req_t req, fuse_ino_t dir,
 				const char *name, mode_t mode)
 {
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_mkdir(%llu, %s, %x)\n",
-		 dir, name, mode);
+		 (u64) dir, name, mode);
 
 	BUG_ON(mode & S_IFMT);
 
@@ -301,7 +294,8 @@ static void bcachefs_fuse_unlink(fuse_req_t req, fuse_ino_t dir_ino,
 	int ret = bch2_trans_commit_do(c, NULL, NULL,
 				BCH_TRANS_COMMIT_no_enospc,
 			    bch2_unlink_trans(trans, dir, &dir_u,
-					      &inode_u, &qstr, false));
+					      (subvol_inum) {}, &inode_u,
+					      &qstr, false));
 
 	fuse_reply_err(req, -ret);
 }
@@ -309,7 +303,7 @@ static void bcachefs_fuse_unlink(fuse_req_t req, fuse_ino_t dir_ino,
 static void bcachefs_fuse_rmdir(fuse_req_t req, fuse_ino_t dir,
 				const char *name)
 {
-	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_rmdir(%llu, %s)\n", dir, name);
+	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_rmdir(%llu, %s)\n", (u64) dir, name);
 
 	bcachefs_fuse_unlink(req, dir, name);
 }
@@ -495,7 +489,7 @@ static void bcachefs_fuse_read(fuse_req_t req, fuse_ino_t ino,
 	struct bch_fs *c = fuse_req_userdata(req);
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_read(%llu, %zd, %lld)\n",
-		 inum, size, offset);
+		 inum.inum, size, (s64) offset);
 
 	/* Check inode size. */
 	struct bch_inode_unpacked bi;
@@ -532,37 +526,23 @@ static void bcachefs_fuse_read(fuse_req_t req, fuse_ino_t ino,
 
 static int inode_update_times(struct bch_fs *c, subvol_inum inum)
 {
-	struct btree_trans *trans;
-	struct btree_iter iter;
-	struct bch_inode_unpacked inode_u;
-	int ret = 0;
-	u64 now;
+	CLASS(btree_trans, trans)(c);
+	return commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+		u64 now = bch2_current_time(c);
 
-	trans = bch2_trans_get(c);
-retry:
-	bch2_trans_begin(trans);
-	now = bch2_current_time(c);
+		CLASS(btree_iter_uninit, iter)(trans);
+		struct bch_inode_unpacked inode_u;
+		int ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
+		if (ret)
+			goto err;
 
-	ret = bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent);
-	if (ret)
-		goto err;
-
-	inode_u.bi_mtime = now;
-	inode_u.bi_ctime = now;
-
-	ret = bch2_inode_write(trans, &iter, &inode_u);
-	if (ret)
-		goto err;
-
-	ret = bch2_trans_commit(trans, NULL, NULL,
-				BCH_TRANS_COMMIT_no_enospc);
+		inode_u.bi_mtime = now;
+		inode_u.bi_ctime = now;
 err:
-        bch2_trans_iter_exit(&iter);
-	if (ret == -EINTR)
-		goto retry;
+		ret ?:
+		bch2_inode_write(trans, &iter, &inode_u);
+	}));
 
-	bch2_trans_put(trans);
-	return ret;
 }
 
 static int write_aligned(struct bch_fs *c, subvol_inum inum,
@@ -625,7 +605,7 @@ static void bcachefs_fuse_write(fuse_req_t req, fuse_ino_t ino,
 	int			ret = 0;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_write(%llu, %zd, %lld)\n",
-		 inum, size, offset);
+		 inum.inum, size, (s64) offset);
 
 	struct fuse_align_io align = align_io(c, size, offset);
 	void *aligned_buf = aligned_alloc(PAGE_SIZE, align.size);
@@ -880,7 +860,7 @@ static int fuse_filldir(struct dir_context *_ctx,
 	};
 
 	fuse_log(FUSE_LOG_DEBUG, "fuse_filldir(name=%s inum=%llu pos=%llu)\n",
-		 name, statbuf.st_ino, pos);
+		 name, (u64) statbuf.st_ino, (s64) pos);
 
 	size_t len = fuse_add_direntry2(ctx->buf,
 					ctx->bufsize,
@@ -935,7 +915,7 @@ static void bcachefs_fuse_readdir(fuse_req_t req, fuse_ino_t dir_ino,
 	int ret = 0;
 
 	fuse_log(FUSE_LOG_DEBUG, "bcachefs_fuse_readdir(dir=%llu, size=%zu, "
-		 "off=%lld)\n", dir.inum, size, off);
+		 "off=%lld)\n", dir.inum, size, (s64) off);
 
 	ret = bch2_inode_find_by_inum(c, dir, &bi);
 	if (ret)
@@ -1125,15 +1105,11 @@ static const struct fuse_lowlevel_ops bcachefs_fuse_ops = {
 
 struct bf_context {
 	char			*devices_str;
-	darray_const_str	devices;
 };
 
 static void bf_context_free(struct bf_context *ctx)
 {
 	free(ctx->devices_str);
-	darray_for_each(ctx->devices, i)
-		free((void *) *i);
-	darray_exit(&ctx->devices);
 }
 
 static struct fuse_opt bf_opts[] = {
@@ -1150,6 +1126,8 @@ static int bf_opt_proc(void *data, const char *arg, int key,
 	struct bf_context *ctx = data;
 
 	switch (key) {
+	case FUSE_OPT_KEY_OPT:
+		return 0;
 	case FUSE_OPT_KEY_NONOPT:
 		/* Just extract the first non-option string. */
 		if (!ctx->devices_str) {
@@ -1162,40 +1140,72 @@ static int bf_opt_proc(void *data, const char *arg, int key,
 	return 1;
 }
 
-/*
- * dev1:dev2 -> [ dev1, dev2 ]
- * dev	     -> [ dev ]
- */
-static void tokenize_devices(struct bf_context *ctx)
-{
-	char *devices_str = strdup(ctx->devices_str);
-	char *devices_tmp = devices_str;
-	char *dev = NULL;
-
-	while ((dev = strsep(&devices_tmp, ":")))
-		if (strlen(dev) > 0)
-			darray_push(&ctx->devices, strdup(dev));
-
-	free(devices_str);
-}
-
-static void usage(char *argv[])
+static void fusemount_usage(char *argv[])
 {
 	printf("Usage: %s fusemount [options] <dev>[:dev2:...] <mountpoint>\n",
 	       argv[0]);
 	printf("\n");
 }
 
+static void maybe_start_http(char *optstr)
+{
+	if (!optstr)
+		return;
+
+	char *copied_opts = strdup(optstr);
+	char *opt;
+
+	while ((opt = strsep(&copied_opts, ",")) != NULL) {
+		if (!*opt)
+			continue;
+
+		char *name	= strsep(&opt, "=");
+		char *val	= opt;
+
+		if (!strcmp(name, "http"))
+			start_http(val);
+	}
+}
+
 int cmd_fusemount(int argc, char *argv[])
 {
-	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	struct bch_opts bch_opts = bch2_opts_empty();
-	struct bf_context ctx = { 0 };
-	struct bch_fs *c = NULL;
-	struct fuse_session *se = NULL;
 	int ret = 0;
 
+	/* fuse argument parsing can't cope with unknown arguments - !? */
+	for (unsigned i = 0; i < argc; i++) {
+		if (!strcmp(argv[i], "-t")) {
+			unsigned nr = min(argc - i, 2);
+
+			memmove(&argv[i],
+				&argv[i + 2],
+				nr * sizeof(argv[0]));
+			argc -= nr;
+			argv[argc] = NULL;
+			break;
+		}
+	}
+
+	char *opts_str = NULL;
+	static const struct option longopts[] = {
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
+	int opt;
+	while ((opt = getopt_long(argc, argv, ":o:h", longopts, NULL)) != -1)
+		switch (opt) {
+		case 'o':
+			opts_str = strdup(optarg);
+			break;
+		case 'h':
+			fusemount_usage(argv);
+			exit(0);
+		case ':':
+			continue;
+		}
+
 	/* Parse arguments. */
+	struct bf_context ctx = { 0 };
+	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	if (fuse_opt_parse(&args, &ctx, bf_opts, bf_opt_proc) < 0)
 		die("fuse_opt_parse err: %m");
 
@@ -1204,59 +1214,53 @@ int cmd_fusemount(int argc, char *argv[])
 		die("fuse_parse_cmdline err: %m");
 
 	if (fuse_opts.show_help) {
-		usage(argv);
+		fusemount_usage(argv);
 		fuse_cmdline_help();
 		fuse_lowlevel_help();
-		ret = 0;
-		goto out;
+		exit(EXIT_SUCCESS);
 	}
 	if (fuse_opts.show_version) {
 		printf("FUSE library version %s\n", fuse_pkgversion());
 		fuse_lowlevel_version();
-		printf("bcachefs version: %s\n", VERSION_STRING);
-		ret = 0;
-		goto out;
+		printf("bcachefs version: %s\n", bcachefs_version);
+		exit(EXIT_SUCCESS);
 	}
 	if (!fuse_opts.mountpoint) {
-		usage(argv);
-		printf("Please supply a mountpoint.\n");
-		ret = 1;
-		goto out;
+		fusemount_usage(argv);
+		die("Please supply a mountpoint.\n");
 	}
 	if (!ctx.devices_str) {
-		usage(argv);
-		printf("Please specify a device or device1:device2:...\n");
-		ret = 1;
-		goto out;
+		fusemount_usage(argv);
+		die("Please specify a device or device1:device2:...\n");
 	}
-	tokenize_devices(&ctx);
 
 	struct printbuf fsname = PRINTBUF;
-	prt_printf(&fsname, "fsname=");
-	darray_for_each(ctx.devices, i) {
-		if (i != ctx.devices.data)
-			prt_str(&fsname, ":");
-		prt_str(&fsname, *i);
-	}
-
+	prt_printf(&fsname, "fsname=%s", ctx.devices_str);
 	fuse_opt_add_arg(&args, "-o");
 	fuse_opt_add_arg(&args, fsname.buf);
+	fuse_opt_add_arg(&args, "-osubtype=bcachefs");
 
-	/* Open bch */
-	printf("Opening bcachefs filesystem on %s\n", ctx.devices_str);
+	char *dev = bch2_scan_devices(ctx.devices_str);
+	darray_const_str devs= {};
+	bch2_split_devs(dev, &devs);
 
-	c = bch2_fs_open(&ctx.devices, &bch_opts);
+	struct bch_opts bch_opts = bch2_opts_empty();
+	opt_set(bch_opts, nostart, true);
+	CLASS(printbuf, parse_later)();
+	ret = bch2_parse_mount_opts(NULL, &bch_opts, &parse_later, opts_str, false);
+	if (ret)
+		exit(EXIT_FAILURE);
+
+	struct bch_fs *c = bch2_fs_open(&devs, &bch_opts);
 	if (IS_ERR(c))
-		die("error opening %s: %s", ctx.devices_str,
-		    bch2_err_str(PTR_ERR(c)));
+		exit(EXIT_FAILURE);
 
 	/* Fuse */
-	se = fuse_session_new(&args, &bcachefs_fuse_ops,
-				sizeof(bcachefs_fuse_ops), c);
-	if (!se) {
-		fprintf(stderr, "fuse_lowlevel_new err: %m\n");
-		goto err;
-	}
+	struct fuse_session *se =
+		fuse_session_new(&args, &bcachefs_fuse_ops,
+				 sizeof(bcachefs_fuse_ops), c);
+	if (!se)
+		die("fuse_lowlevel_new err: %m");
 
 	if (fuse_set_signal_handlers(se) < 0) {
 		fprintf(stderr, "fuse_set_signal_handlers err: %m\n");
@@ -1268,15 +1272,14 @@ int cmd_fusemount(int argc, char *argv[])
 		goto err;
 	}
 
-	/* This print statement is a trigger for tests. */
-	printf("Fuse mount initialized.\n");
-
-	if (fuse_opts.foreground == 0){
-		printf("Fuse forcing to foreground mode, due gcc constructors usage.\n");
-		fuse_opts.foreground = 1;
-	}
-
 	fuse_daemonize(fuse_opts.foreground);
+
+	linux_shrinkers_init();
+	maybe_start_http(opts_str);
+
+	ret = bch2_fs_start(c);
+	if (ret)
+		exit(EXIT_FAILURE);
 
 	ret = fuse_session_loop(se);
 

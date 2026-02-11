@@ -14,7 +14,7 @@
 #include "data/extents.h"
 #include "data/extent_update.h"
 #include "data/io_misc.h"
-#include "data/reconcile.h"
+#include "data/reconcile/trigger.h"
 #include "data/write.h"
 
 #include "fs/inode.h"
@@ -86,16 +86,21 @@ int bch2_extent_fallocate(struct btree_trans *trans,
 		e = bkey_extent_init(new.k);
 		e->k.p = iter->pos;
 
-		ret = bch2_alloc_sectors_start_trans(trans,
-				opts.foreground_target,
-				false,
-				write_point,
-				&devs_have,
-				opts.data_replicas,
-				opts.data_replicas,
-				BCH_WATERMARK_normal, 0, &cl, &wp);
-		if (bch2_err_matches(ret, BCH_ERR_operation_blocked))
+		struct alloc_request *req;
+		ret = PTR_ERR_OR_ZERO(req = alloc_request_get(trans,
+						opts.foreground_target,
+						false,
+						&devs_have,
+						opts.data_replicas,
+						opts.data_replicas,
+						BCH_WATERMARK_normal,
+						0, &cl)) ?:
+			bch2_alloc_sectors_req(trans, req, write_point, &wp);
+		if (bch2_err_matches(ret, BCH_ERR_operation_blocked)) {
+			bch2_trans_unlock_long(trans);
+			bch2_wait_on_allocator(c, req, ret, &cl);
 			ret = bch_err_throw(c, transaction_restart_nested);
+		}
 		if (ret)
 			goto err;
 
@@ -125,11 +130,6 @@ err:
 	}
 err_noprint:
 	bch2_open_buckets_put(c, &open_buckets);
-
-	if (closure_nr_remaining(&cl) != 1) {
-		bch2_trans_unlock_long(trans);
-		bch2_wait_on_allocator(c, &cl);
-	}
 
 	return ret;
 }
@@ -246,7 +246,8 @@ static int truncate_set_isize(struct btree_trans *trans,
 	CLASS(btree_iter_uninit, iter)(trans);
 	struct bch_inode_unpacked inode_u;
 
-	return __bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent, warn) ?:
+	return __bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent,
+				 warn ? __func__ : NULL) ?:
 		(inode_u.bi_size = new_i_size, 0) ?:
 		bch2_inode_write(trans, &iter, &inode_u);
 }
@@ -330,7 +331,8 @@ static int adjust_i_size(struct btree_trans *trans, subvol_inum inum,
 	CLASS(btree_iter_uninit, iter)(trans);
 	struct bch_inode_unpacked inode_u;
 
-	try(__bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent, warn));
+	try(__bch2_inode_peek(trans, &iter, &inode_u, inum, BTREE_ITER_intent,
+			      warn ? __func__ : NULL));
 
 	if (len > 0) {
 		if (MAX_LFS_FILESIZE - inode_u.bi_size < len)
@@ -426,8 +428,15 @@ case LOGGED_OP_FINSERT_shift_extents:
 		if ((ret = PTR_ERR_OR_ZERO(copy)))
 			goto btree_err;
 
-		if (insert &&
-		    bkey_lt(bkey_start_pos(k.k), src_pos)) {
+		if (snapshot != k.k->p.snapshot) {
+			ret = bch2_disk_reservation_add(c, &disk_res,
+					copy->k.size *
+					bch2_bkey_nr_ptrs_allocated(c, bkey_i_to_s_c(copy)),
+					0);
+			if (ret)
+				goto btree_err;
+		} else if (insert &&
+			   bkey_lt(bkey_start_pos(k.k), src_pos)) {
 			bch2_cut_front(c, src_pos, copy);
 
 			/* Splitting compressed extent? */

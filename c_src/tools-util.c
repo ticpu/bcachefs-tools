@@ -37,18 +37,22 @@ void die(const char *fmt, ...)
 	_exit(EXIT_FAILURE);
 }
 
+char *vmprintf(const char *fmt, va_list args)
+{
+	char *str;
+	int ret = vasprintf(&str, fmt, args);
+	if (ret < 0)
+		die("insufficient memory");
+
+	return str;
+}
+
 char *mprintf(const char *fmt, ...)
 {
 	va_list args;
-	char *str;
-	int ret;
-
 	va_start(args, fmt);
-	ret = vasprintf(&str, fmt, args);
+	char *str = vmprintf(fmt, args);
 	va_end(args);
-
-	if (ret < 0)
-		die("insufficient memory");
 
 	return str;
 }

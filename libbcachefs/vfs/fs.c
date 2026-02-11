@@ -8,7 +8,7 @@
 
 #include "btree/update.h"
 
-#include "data/reconcile.h"
+#include "data/reconcile/work.h"
 
 #include "fs/acl.h"
 #include "fs/check.h"
@@ -47,6 +47,23 @@
 #include <linux/string.h>
 #include <linux/version.h>
 #include <linux/xattr.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,19,0)
+static inline unsigned inode_state_read(struct inode *inode)
+{
+	return inode->i_state;
+}
+
+static inline unsigned inode_state_read_once(struct inode *inode)
+{
+	return READ_ONCE(inode->i_state);
+}
+
+static inline void inode_state_set_raw(struct inode *inode, unsigned flags)
+{
+	WRITE_ONCE(inode->i_state, inode->i_state|flags);
+}
+#endif
 
 static struct kmem_cache *bch2_inode_cache;
 
@@ -294,7 +311,7 @@ restart:
 	darray_for_each(subvols, i) {
 		u32 snap;
 		try(bch2_subvolume_get_snapshot(trans, *i, &snap));
-		try(bch2_snapshot_is_ancestor(c, snap, p.snapshot));
+		try(bch2_snapshot_is_ancestor(trans, snap, p.snapshot));
 	}
 
 	return 0;
@@ -333,7 +350,7 @@ repeat:
 			spin_unlock(&inode->v.i_lock);
 			return NULL;
 		}
-		if ((inode->v.i_state & (I_FREEING|I_WILL_FREE))) {
+		if (inode_state_read(&inode->v) & (I_FREEING|I_WILL_FREE)) {
 			if (!trans) {
 				__wait_on_freeing_inode(c, inode, inum);
 			} else {
@@ -397,7 +414,7 @@ retry:
 		 * only insert fully created inodes in the inode hash table. But
 		 * discard_new_inode() expects it to be set...
 		 */
-		inode->v.i_state |= I_NEW;
+		inode_state_set_raw(&inode->v, I_NEW);
 		/*
 		 * We don't want bch2_evict_inode() to delete the inode on disk,
 		 * we just raced and had another inode in cache. Normally new
@@ -496,8 +513,28 @@ static struct bch_inode_info *bch2_inode_hash_init_insert(struct btree_trans *tr
 
 }
 
+static inline struct bch_inode_info *
+__bch2_vfs_inode_get_trans(struct btree_trans *trans, subvol_inum inum, const char *warn)
+{
+	struct bch_inode_info *inode;
+	struct bch_inode_unpacked inode_u;
+	struct bch_subvolume subvol;
+	int ret = bch2_subvolume_get(trans, inum.subvol, warn, &subvol) ?:
+		__bch2_inode_find_by_inum_trans(trans, inum, &inode_u, warn) ?:
+		PTR_ERR_OR_ZERO(inode = bch2_inode_hash_init_insert(trans, inum, &inode_u, &subvol));
+
+	return ret ? ERR_PTR(ret) : inode;
+}
+
+struct bch_inode_info *bch2_vfs_inode_get_trans(struct btree_trans *trans, subvol_inum inum,
+						const char *warn)
+{
+	return bch2_inode_hash_find(trans->c, trans, inum) ?:
+		__bch2_vfs_inode_get_trans(trans, inum, warn);
+}
+
 struct inode *bch2_vfs_inode_get(struct bch_fs *c, subvol_inum inum,
-				 bool warn)
+				 const char *warn)
 {
 	struct bch_inode_info *inode = bch2_inode_hash_find(c, NULL, inum);
 	if (inode)
@@ -505,12 +542,8 @@ struct inode *bch2_vfs_inode_get(struct bch_fs *c, subvol_inum inum,
 
 	CLASS(btree_trans, trans)(c);
 
-	struct bch_inode_unpacked inode_u;
-	struct bch_subvolume subvol;
 	int ret = lockrestart_do(trans,
-		bch2_subvolume_get(trans, inum.subvol, warn, &subvol) ?:
-		__bch2_inode_find_by_inum_trans(trans, inum, &inode_u, warn) ?:
-		PTR_ERR_OR_ZERO(inode = bch2_inode_hash_init_insert(trans, inum, &inode_u, &subvol)));
+		PTR_ERR_OR_ZERO(inode = bch2_vfs_inode_get_trans(trans, inum, warn)));
 
 	return ret ? ERR_PTR(ret) : &inode->v;
 }
@@ -811,8 +844,8 @@ int __bch2_unlink(struct inode *vdir, struct dentry *dentry,
 	ret = commit_do(trans, NULL, NULL,
 			BCH_TRANS_COMMIT_no_enospc,
 		bch2_unlink_trans(trans,
-				  inode_inum(dir), &dir_u,
-				  &inode_u, &dentry->d_name,
+				  inode_inum(dir),	&dir_u,
+				  inode_inum(inode),	&inode_u, &dentry->d_name,
 				  deleting_snapshot));
 	if (unlikely(ret))
 		goto err;
@@ -1584,7 +1617,7 @@ static struct inode *bch2_nfs_get_inode(struct super_block *sb,
 	struct inode *vinode = bch2_vfs_inode_get(c, (subvol_inum) {
 				    .subvol = fid.subvol,
 				    .inum = fid.inum,
-	}, false);
+	}, NULL);
 	if (!IS_ERR(vinode) && vinode->i_generation != fid.gen) {
 		iput(vinode);
 		vinode = ERR_PTR(-ESTALE);
@@ -1626,7 +1659,7 @@ static struct dentry *bch2_get_parent(struct dentry *child)
 	};
 
 	/* needs nowarn */
-	return d_obtain_alias(bch2_vfs_inode_get(c, parent_inum, false));
+	return d_obtain_alias(bch2_vfs_inode_get(c, parent_inum, NULL));
 }
 
 static int bch2_get_name(struct dentry *parent, char *name, struct dentry *child)
@@ -1815,6 +1848,11 @@ static int bch2_vfs_write_inode(struct inode *vinode,
 	return bch2_err_class(ret);
 }
 
+static bool verify_i_size_at_evict;
+
+module_param_named(verify_i_size_at_evict, verify_i_size_at_evict, bool, 0644);
+MODULE_PARM_DESC(verify_i_size_at_evict, "");
+
 static void bch2_evict_inode(struct inode *vinode)
 {
 	struct bch_fs *c = vinode->i_sb->s_fs_info;
@@ -1830,6 +1868,40 @@ static void bch2_evict_inode(struct inode *vinode)
 	 */
 	if (!delete)
 		bch2_inode_hash_remove(c, inode);
+
+	if (IS_ENABLED(CONFIG_BCACHEFS_DEBUG) && delete)
+		write_inode_now(&inode->v, true);
+
+	if (verify_i_size_at_evict) {
+		BUG_ON(inode_state_read_once(&inode->v) & I_DIRTY);
+
+		struct bch_inode_unpacked inode_u;
+		if (!is_bad_inode(&inode->v) &&
+		    !bch2_journal_error(&c->journal) &&
+		    !bch2_inode_find_by_inum(c, inode_inum(inode), &inode_u)) {
+			if (inode->v.i_size != inode_u.bi_size) {
+				CLASS(bch_log_msg, msg)(c);
+
+				prt_printf(&msg.m, "vfs i_size mismatch at evict: %llu != %llu (inum %llu)\n",
+					   (u64) inode->v.i_size, inode_u.bi_size, inode_u.bi_inum);
+				bch2_trans_do(c, bch2_inum_to_path(trans, inode_inum(inode), &msg.m));
+				prt_newline(&msg.m);
+				bch2_inode_unpacked_to_text(&msg.m, &inode_u);
+				msg.m.suppress = !bch2_count_fsck_err(c, vfs_i_size_bad, &msg.m);
+			}
+
+			if (inode->v.i_blocks != inode_u.bi_sectors) {
+				CLASS(bch_log_msg, msg)(c);
+
+				prt_printf(&msg.m, "vfs i_sectors mismatch at evict: %llu != %llu (inum %llu)\n",
+					   (u64) inode->v.i_blocks, inode_u.bi_sectors, inode_u.bi_inum);
+				bch2_trans_do(c, bch2_inum_to_path(trans, inode_inum(inode), &msg.m));
+				prt_newline(&msg.m);
+				bch2_inode_unpacked_to_text(&msg.m, &inode_u);
+				msg.m.suppress = !bch2_count_fsck_err(c, vfs_i_sectors_bad, &msg.m);
+			}
+		}
+	}
 
 	truncate_inode_pages_final(&inode->v.i_data);
 
@@ -1882,8 +1954,7 @@ again:
 		if (!snapshot_list_has_id(s, inode->ei_inum.subvol))
 			continue;
 
-		if (!(inode->v.i_state & I_DONTCACHE) &&
-		    !(inode->v.i_state & I_FREEING) &&
+		if (!(inode_state_read_once(&inode->v) & (I_DONTCACHE|I_FREEING)) &&
 		    igrab(&inode->v)) {
 			this_pass_clean = false;
 
@@ -2022,6 +2093,7 @@ static int bch2_show_options(struct seq_file *seq, struct dentry *root)
 	CLASS(printbuf, buf)();
 
 	bch2_opts_to_text(&buf, c->opts, c, c->disk_sb.sb,
+			  &c->mount_opts,
 			  OPT_MOUNT, OPT_HIDDEN, OPT_SHOW_MOUNT_STYLE);
 	printbuf_nul_terminate(&buf);
 	seq_printf(seq, ",%s", buf.buf);
@@ -2105,6 +2177,13 @@ static int bch2_test_super(struct super_block *s, void *data)
 	return true;
 }
 
+static void set_mount_opts(struct bch_fs *c, struct bch_opts *opts)
+{
+	for (enum bch_opt_id id = 0; id < bch2_opts_nr; id++)
+		if (bch2_opt_defined_by_id(opts, id))
+			set_bit(id, c->mount_opts.d);
+}
+
 static int bch2_fs_get_tree(struct fs_context *fc)
 {
 	struct bch_fs *c;
@@ -2141,6 +2220,7 @@ static int bch2_fs_get_tree(struct fs_context *fc)
 
 	if (opt_defined(opts, discard))
 		set_bit(BCH_FS_discard_mount_opt_set, &c->flags);
+	set_mount_opts(c, &opts);
 
 	/* Some options can't be parsed until after the fs is started: */
 	opts = bch2_opts_empty();
@@ -2149,6 +2229,7 @@ static int bch2_fs_get_tree(struct fs_context *fc)
 		goto err_stop_fs;
 
 	bch2_opts_apply(&c->opts, opts);
+	set_mount_opts(c, &opts);
 
 	ret = bch2_fs_start(c);
 	if (ret)
@@ -2232,7 +2313,7 @@ got_sb:
 	generic_set_sb_d_ops(sb);
 #endif
 
-	vinode = bch2_vfs_inode_get(c, BCACHEFS_ROOT_SUBVOL_INUM, true);
+	vinode = bch2_vfs_inode_get(c, BCACHEFS_ROOT_SUBVOL_INUM, __func__);
 	ret = PTR_ERR_OR_ZERO(vinode);
 	bch_err_msg(c, ret, "mounting: error getting root inode");
 	if (ret)
@@ -2333,6 +2414,8 @@ static int bch2_fs_reconfigure(struct fs_context *fc)
 		guard(rwsem_write)(&c->state_lock);
 
 		if (opts->opts.read_only) {
+			try(sync_filesystem(sb));
+
 			bch2_fs_read_only(c);
 
 			sb->s_flags |= SB_RDONLY;

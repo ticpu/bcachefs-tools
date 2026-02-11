@@ -2,6 +2,8 @@
 #ifndef __LINUX_OVERFLOW_H
 #define __LINUX_OVERFLOW_H
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <linux/compiler.h>
 #include <linux/limits.h>
 #include <linux/const.h>

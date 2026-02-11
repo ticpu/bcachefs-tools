@@ -10,7 +10,7 @@
 #include "btree/bkey_methods.h"
 #include "btree/cache.h"
 
-#include "data/ec.h"
+#include "data/ec/trigger.h"
 #include "data/extents.h"
 #include "data/io_misc.h"
 #include "data/reflink.h"
@@ -94,7 +94,7 @@ void bch2_set_bkey_error(struct bch_fs *c, struct bkey_i *k, enum bch_key_type_e
 
 		struct bkey_i_error *e = bkey_i_to_error(k);
 
-		memset(e, 0, sizeof(*e));
+		memset(&e->v, 0, sizeof(e->v));
 		e->v.err = err;
 	} else {
 		set_bkey_val_bytes(&k->k, 0);

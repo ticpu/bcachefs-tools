@@ -1,6 +1,173 @@
 # Changelog
 
-## v1.34.0 - Sat Dec 27
+## v1.36.1 - Fri Feb  6 2026
+
+### New `bcachefs fs timestats` command
+
+Interactive TUI for monitoring various filesystem internals, slowpaths and
+device performance, with duration and frequency tracking for various events.
+Helpful for diagnosing performance issues.
+
+- `encoded_extent_max` default bumped to 256k; new filesystems now initialize
+  `BCH_SB_EXTENT_BP_SHIFT` to 16, so higher settings won't require rebuilding
+  backpointers
+
+- `--rotational` flag now works correctly during format
+
+- Copygc now waits until a device is less than 20% free before starting
+
+- Improved `bcachefs reconcile status` output
+
+- Large batch of erasure coding cleanup and hardening: better error reporting
+  for EC reconstruct reads, fix a race between EC and data moves, and various
+  other EC bugfixes
+
+- Fix write buffer `move_keys_from_inc_to_flushing()` regression, which was
+  causing occasional oopses under load for some users
+
+- Snapshot deletion is now much faster when deleting large numbers of snapshos;
+  we now use an eytzinger tree for the list of nodes being deleted
+
+- Fix sporadic superblock checksum failures during device scan
+
+And many smaller bugfixes.
+
+## v1.36.0 - Sat Jan 31 2026
+
+bcachefs_metadata_version_no_sb_user_data_replicas
+
+This requires an incompatible upgrade to enable, and once enabled we'll no
+longer store replicas entries in the superblock for user data, which are used
+for deciding whether we an do a degraded mount without data loss - instead, we
+defer that and use the accounting btree to check, in early recovery.
+
+This is a performance/scalability fix: on filesystems with large numbers of
+drives (a 50 device filesystem was the original bug report), the superblock
+writes needed to add and delete replicas entries become a bottleneck.
+
+Replicas entries for metadata (btree and journal) can still be an issue, and
+another bug report indicated that these will have to be addressed soon - a
+single slow (or dying) device in a large multidevice will cause all superblock
+writes to slow to a degree that can cause major problems. Metadata replicas
+entries will however require a different approach to solve, so expect that in a
+future update.
+
+- Some fairly involved fixes for the data update path: it turns out, the data
+  update path was dropping replicas to devices being evacuated (which are
+  considered to have durability of 0) before the extent was sufficiently
+  replicated on other devices. This caused data loss for a few users,
+  unfortunately, but the new code is much more rigorous when reconciling the
+  exsiting extent with newly written replicas and deciding which replicas to
+  keep and which can be dropped.
+
+- Fix various codepaths that were (incorrectly) causing the filesystem to go
+  emergency read-only when finding a pointer to an invalid device, instead of
+  continuing so it could be repaired or flagging the filesystem as needing
+  repair. We now should only go emergency read-only on pointer to invalid device
+  when that would indicate a runtime bug, not filesystem corruption.
+
+- Reconcile will now shut down correctly (when the filesystem is going read-only
+  or unmounting) when processing the reconcile_*_phys btrees.
+
+- Multiple other smaller reconcile fixes; various users report that issues where
+  reconcile did not seem to be finding pending work seem to be resolved.
+
+- Degraded btree nodes are no longer un-degraded synchronously; now that we have
+  reconcile this is no longer necessary, and forcing them to be un-degraded
+  synchronously was prone to causing deadlocks on open_bucket allocation.
+
+- The 'allocator stuck' log message now provides improved information, and
+  internally has been re-plumbed to have access to the original 'struct
+  alloc_request', so if necessary for future debugging we can easily provide as
+  much information about how the allocation was attempted as required.
+
+## v1.35.2 - Tue Jan 20 2026
+
+- Linux v6.19 is now supported
+
+- Reconcile now considers the amount of durability we have available among
+  online devices when dropping extra replicas (because the replicas setting was
+  changed), and won't let the online durability go below the replicas setting.
+
+- Fix a race in the nocow write path when checking if we need to fall back to a
+  normal COW write
+
+- Fix a livelock when walking btree roots in reconcile and elsewhere
+
+- Journal discards are now done asynchronously instead of being done by the
+  journal reclaim thread, and we try to keep more of the journal discarded to
+  avoid journal writes having to block and do discards synchronously
+
+- Fix several bugs with copygc <-> reconcile interaction, and copygc should no
+  longer spin when a device is completely full with no fragmented buckets for it
+  to evacuate.
+
+- Fix propagating the incompressible bit in the data update path: sometimes this
+  would be lost, leading to spurious "extent with bad/missing reconcile options"
+  errors.
+
+## v1.35.1 - Fri Jan 16 2026
+
+- Self healing for the new stripe refcount field in `bch_alloc_v4`
+
+  This fixes issues upgrading to 1.35 with (still experimental) erasure coding
+  feature.
+
+- Major allocator refactoring, simplifying the central control flow. Prep work
+  for failure domains.
+
+- Erasure coding can now delete stripes from triggers; this gives better
+  behaviour when data being deleted with no other activity to cause stripes to
+  be deleted.
+
+- Fix a deadlock in device add when allocating journal on the new device; this
+  fixes a regression from the watermark cleanup.
+
+- Fedora builds are working again
+
+## v1.35.0 - Mon Jan 12 2026
+
+bcachefs_metadata_version_bucket_stripe_index
+
+- The requirement that devices must have matched bucket sizes to be members of
+  the same stripes has been removed.
+
+- Stripes may be reshaped (number of blocks increased or decreased), as needed;
+  this improves EC's handling of device failures.
+
+- Significantly improved evacuate, rereplicate performance on rotating disks: we
+  now launch one thread per device being read from (i.e. every device that
+  shared data with the device going away); each device is read from in parallel
+  with reads across the whole device done in sorted order.
+
+- `backpointer_scan_iter`, for improved performance for code doing backpointer
+  -> extent walks, including but not limited to reconcile; this is quite
+  significant on systems with metadata on rotating disk and relatively limited
+  memory.
+
+- The bug with reconcile where btree roots wouldn't be processed has been fixed.
+
+- A few bugs with reconcile's handling of cached data have been fixed.
+
+- The reconcile tracepoints, especially `reconcile_set_pending`, now give
+  significantly more information.
+
+- Reconcile now knows how to wait on copygc when a device it wants to write to
+  is full, rather than (incorrectly) marking the extent as pending.
+
+- Fixed several memory reclaim recursion bugs; performance under memory pressure
+  should be improved.
+
+- Various allocation watermark fixes; btree updates now only run with high
+  priority watermarks when necessary. This fixes some allocator deadlocks on
+  open bucket allocation.
+
+- 'encoded_extent_max` settings of 1MB and greater now work properly;
+  previously, this could cause backpointer issues if compression was enabled.
+
+Along with numerous other bugfixes.
+
+## v1.34.0 - Sat Dec 27 2025
 
 bcachefs_metadata_version_extended_key_type_error
 

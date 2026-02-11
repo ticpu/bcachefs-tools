@@ -151,6 +151,9 @@ int __bch2_darray_resize_noprof(darray_char *, size_t, size_t, gfp_t, bool);
 	_ret;								\
 })
 
+#define darray_remove_items(_d, _pos, _nr)				\
+	array_remove_items((_d)->data, (_d)->nr, (_pos) - (_d)->data, _nr)
+
 #define darray_remove_item(_d, _pos)					\
 	array_remove_item((_d)->data, (_d)->nr, (_pos) - (_d)->data)
 
@@ -169,6 +172,16 @@ int __bch2_darray_resize_noprof(darray_char *, size_t, size_t, gfp_t, bool);
 #define darray_find(_d, _item)	darray_find_p(_d, _i, *_i == _item)
 
 #define darray_sort(_d, _cmp)						\
-	sort((_d).data, (_d).nr, sizeof((_d).data[0]), _cmp, NULL)
+	sort_nonatomic((_d).data, (_d).nr, sizeof((_d).data[0]), _cmp, NULL)
+
+#define darray_eytzinger1_sort(_d, _cmp)				\
+	eytzinger1_sort((_d).data, (_d).nr - 1, sizeof((_d).data[0]), _cmp, NULL)
+
+#define darray_eytzinger1_find(_d, _cmp, _search)				\
+({										\
+	int idx = eytzinger1_find((_d).data, (_d).nr - 1, sizeof((_d).data[0]),	\
+				  _cmp, _search);				\
+	idx ? (_d).data + idx : NULL;						\
+})
 
 #endif /* _BCACHEFS_DARRAY_H */

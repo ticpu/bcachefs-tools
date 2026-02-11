@@ -149,7 +149,7 @@ static int __btree_err(enum bch_fsck_flags flags,
 		struct extent_ptr_decoded pick;
 		bool have_retry = bch2_bkey_pick_read_device(c,
 					bkey_i_to_s_c(&b->key),
-					failed, &pick, -1) == 1;
+					failed, &pick, 0, 0) == 1;
 
 		return !have_retry &&
 			(flags & FSCK_CAN_FIX) &&
@@ -269,6 +269,7 @@ int bch2_validate_bset(struct bch_fs *c, struct bch_dev *ca,
 			 "bset version %u older than superblock version_min %u",
 			 version, c->sb.version_min)) {
 		if (bch2_version_compatible(version)) {
+			guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 			guard(mutex)(&c->sb_lock);
 			c->disk_sb.sb->version_min = cpu_to_le16(version);
 			bch2_write_super(c);
@@ -285,6 +286,7 @@ int bch2_validate_bset(struct bch_fs *c, struct bch_dev *ca,
 			 btree_node_bset_newer_than_sb,
 			 "bset version %u newer than superblock version %u",
 			 version, c->sb.version)) {
+		guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 		guard(mutex)(&c->sb_lock);
 		c->disk_sb.sb->version = cpu_to_le16(version);
 		bch2_write_super(c);
@@ -565,20 +567,6 @@ got_good_key:
 	}
 fsck_err:
 	return ret;
-}
-
-static bool btree_node_degraded(struct bch_fs *c, struct btree *b)
-{
-	guard(rcu)();
-	bkey_for_each_ptr(bch2_bkey_ptrs(bkey_i_to_s(&b->key)), ptr) {
-		if (ptr->dev == BCH_SB_MEMBER_INVALID)
-			continue;
-
-		struct bch_dev *ca = bch2_dev_rcu(c, ptr->dev);
-		if (!ca || ca->mi.state != BCH_MEMBER_STATE_rw)
-			return true;
-	}
-	return false;
 }
 
 int bch2_btree_node_read_done(struct bch_fs *c, struct bch_dev *ca,
@@ -922,7 +910,7 @@ static void btree_node_read_work(struct work_struct *work)
 		if (!ret ||
 		    bch2_bkey_pick_read_device(c,
 					       bkey_i_to_s_c(&b->key),
-					       &failed, &rb->pick, -1) <= 0)
+					       &failed, &rb->pick, 0, 0) <= 0)
 			break;
 
 		ca = bch2_dev_get_ioref(c, rb->pick.ptr.dev, READ, BCH_DEV_READ_REF_btree_node_read);
@@ -982,19 +970,10 @@ static void btree_node_read_work(struct work_struct *work)
 	if (!buf.suppress)
 		bch2_print_str(c, ret ? KERN_ERR : KERN_NOTICE, buf.buf);
 
-	/*
-	 * Do this late; unlike other btree_node_need_rewrite() cases if a node
-	 * is merely degraded we should rewrite it before we update it, but we
-	 * don't need to kick off an async rewrite now:
-	 */
-	if (btree_node_degraded(c, b)) {
-		set_btree_node_need_rewrite(b);
-		set_btree_node_need_rewrite_degraded(b);
-	}
-
 	async_object_list_del(c, btree_read_bio, rb->list_idx);
 	bch2_time_stats_update(&c->times[BCH_TIME_btree_node_read],
 			       rb->start_time);
+
 	bio_put(&rb->bio);
 	clear_btree_node_read_in_flight(b);
 	smp_mb__after_atomic();
@@ -1033,7 +1012,7 @@ void bch2_btree_node_read(struct btree_trans *trans, struct btree *b,
 	trace_btree_node(c, b, btree_node_read);
 
 	ret = bch2_bkey_pick_read_device(c, bkey_i_to_s_c(&b->key),
-					 NULL, &pick, -1);
+					 NULL, &pick, 0, 0);
 
 	if (ret <= 0) {
 		CLASS(bch_log_msg_ratelimited, msg)(c);
@@ -1265,7 +1244,8 @@ int bch2_btree_node_scrub(struct btree_trans *trans,
 		return bch_err_throw(c, erofs_no_writes);
 
 	struct extent_ptr_decoded pick;
-	int ret = bch2_bkey_pick_read_device(c, k, NULL, &pick, dev);
+	int ret = bch2_bkey_pick_read_device(c, k, NULL, &pick,
+				dev, BCH_READ_hard_require_read_device);
 	if (ret <= 0)
 		goto err;
 

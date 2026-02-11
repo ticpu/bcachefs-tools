@@ -19,8 +19,8 @@
 #include "btree/update.h"
 
 #include "data/copygc.h"
-#include "data/ec.h"
-#include "data/reconcile.h"
+#include "data/ec/trigger.h"
+#include "data/reconcile/trigger.h"
 #include "data/reflink.h"
 
 #include "fs/inode.h"
@@ -279,6 +279,61 @@ static int bch2_check_fix_ptr(struct btree_trans *trans,
 	return 0;
 }
 
+static int bch2_no_valid_pointers_repair(struct btree_trans *trans,
+					 enum btree_id btree, struct bkey_s_c *k)
+{
+	struct bch_fs *c = trans->c;
+	struct bkey_i *new =
+		errptr_try(bch2_trans_kmalloc(trans, BKEY_EXTENT_U64s_MAX * sizeof(u64)));
+	bkey_reassemble(new, *k);
+	*k = bkey_i_to_s_c(new);
+
+	bool found_good_cached_pointer = false;
+	scoped_guard(rcu) {
+		/*
+		 * We can only flip a pointer from cached -> dirty
+		 * without contortions here, when we're also repairing
+		 * alloc info - to do this at runtime we'd have to pin
+		 * the bucket with an open_bucket
+		 */
+
+		bkey_for_each_ptr(bch2_bkey_ptrs(bkey_i_to_s(new)), ptr) {
+			struct bch_dev *ca;
+			if (ptr->cached &&
+			    (ca = bch2_dev_rcu_noerror(c, ptr->dev)) &&
+			     !dev_ptr_stale_rcu(ca, ptr)) {
+				ptr->cached = false;
+				found_good_cached_pointer = true;
+			}
+		}
+	}
+
+	CLASS(printbuf, buf)();
+	bch2_bkey_val_to_text(&buf, c, *k);
+
+	if (found_good_cached_pointer) {
+		ret_fsck_err(trans, extent_ptrs_all_invalid_but_cached,
+			     "extent without valid dirty pointers\n%s", buf.buf);
+
+		struct bch_inode_opts opts;
+		try(bch2_bkey_get_io_opts(trans, NULL, *k, &opts));
+		try(bch2_bkey_set_needs_reconcile(trans, NULL, &opts, new, SET_NEEDS_RECONCILE_opt_change, 0));
+	} else {
+		ret_fsck_err(trans, extent_ptrs_all_invalid,
+			     "extent without valid pointers\n%s", buf.buf);
+		bch2_set_bkey_error(c, new, KEY_TYPE_ERROR_no_valid_pointers_repair);
+	}
+
+	CLASS(btree_node_iter, iter)(trans, btree, new->k.p, 0, 0,
+				     BTREE_ITER_intent|BTREE_ITER_all_snapshots);
+
+	try(bch2_btree_iter_traverse(&iter));
+	try(bch2_trans_update(trans, &iter, new,
+			      BTREE_UPDATE_internal_snapshot_node|
+			      BTREE_TRIGGER_norun));
+	return 0;
+}
+
 int bch2_check_fix_ptrs(struct btree_trans *trans,
 			enum btree_id btree, unsigned level, struct bkey_s_c k,
 			enum btree_iter_update_trigger_flags flags)
@@ -287,6 +342,10 @@ int bch2_check_fix_ptrs(struct btree_trans *trans,
 
 	/* We don't yet do btree key updates correctly for when we're RW */
 	BUG_ON(test_bit(BCH_FS_rw, &c->flags));
+
+	if (!bkey_is_btree_ptr(k.k) &&
+	    !bch2_bkey_can_read(c, k))
+		try(bch2_no_valid_pointers_repair(trans, btree, &k));
 
 	struct ptrs_repair r = {};
 
@@ -313,7 +372,7 @@ int bch2_check_fix_ptrs(struct btree_trans *trans,
 			guard(rcu)();
 			bkey_for_each_ptr(ptrs, ptr) {
 				if (r.reset_gen & ptr_bit) {
-					struct bch_dev *ca = bch2_dev_rcu(c, ptr->dev);
+					struct bch_dev *ca = bch2_dev_rcu_noerror(c, ptr->dev);
 					if (ca)
 						ptr->gen = PTR_GC_BUCKET(ca, ptr)->gen;
 				}
@@ -329,7 +388,7 @@ int bch2_check_fix_ptrs(struct btree_trans *trans,
 
 		struct bch_inode_opts opts;
 		try(bch2_bkey_get_io_opts(trans, NULL, k, &opts));
-		try(bch2_bkey_set_needs_reconcile(trans, NULL, &opts, new, SET_NEEDS_REBALANCE_opt_change, 0));
+		try(bch2_bkey_set_needs_reconcile(trans, NULL, &opts, new, SET_NEEDS_RECONCILE_opt_change, 0));
 
 		if (!(flags & BTREE_TRIGGER_is_root)) {
 			CLASS(btree_node_iter, iter)(trans, btree, new->k.p, 0, level,
@@ -441,6 +500,7 @@ int bch2_bucket_ref_update(struct btree_trans *trans, struct bch_dev *ca,
 				trans, stale_ptr_with_no_stale_ptrs_feature,
 				"stale cached ptr, but have no_stale_ptrs feature\n%s",
 				(bch2_bkey_val_to_text(&buf, c, k), buf.buf))) {
+			guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 			guard(mutex)(&c->sb_lock);
 			c->disk_sb.sb->compat[0] &= ~cpu_to_le64(BIT_ULL(BCH_COMPAT_no_stale_ptrs));
 			bch2_write_super(c);
@@ -564,18 +624,37 @@ static int bch2_trigger_pointer(struct btree_trans *trans,
 {
 	struct bch_fs *c = trans->c;
 	bool insert = !(flags & BTREE_TRIGGER_overwrite);
-	CLASS(printbuf, buf)();
 
 	struct bkey_i_backpointer bp;
 	bch2_extent_ptr_to_bp(c, btree_id, level, k, p, entry, &bp);
 
 	*sectors = insert ? bp.v.bucket_len : -(s64) bp.v.bucket_len;
 
-	CLASS(bch2_dev_tryget, ca)(c, p.ptr.dev);
-	if (unlikely(!ca)) {
-		if (insert && p.ptr.dev != BCH_SB_MEMBER_INVALID)
-			return bch_err_throw(c, trigger_pointer);
+	if (unlikely(p.ptr.dev == BCH_SB_MEMBER_INVALID)) {
+		if ((flags & BTREE_TRIGGER_transactional) && p.has_ec) {
+			if (!insert) {
+				bp.k.type = KEY_TYPE_deleted;
+				set_bkey_val_u64s(&bp.k, 0);
+			}
+			try(bch2_trans_update_buffered(trans, BTREE_ID_stripe_backpointers, &bp.k_i));
+		}
+
 		return 0;
+	}
+
+	CLASS(bch2_dev_tryget_noerror, ca)(c, p.ptr.dev);
+	if (unlikely(!ca)) {
+		int ret = insert
+			? bch_err_throw(c, trigger_pointer)
+			: 0;
+
+		if (p.ptr.dev != BCH_SB_MEMBER_INVALID) {
+			CLASS(bch_log_msg_ratelimited, msg)(c);
+			prt_printf(&msg.m, "Error while %s key:\n", insert ? "inserting" : "deleting");
+			ret = bch2_dev_missing_bkey_msg(c, k, p.ptr.dev, &msg.m);
+		}
+
+		return ret;
 	}
 
 	struct bpos bucket = PTR_BUCKET_POS(ca, &p.ptr);
@@ -594,6 +673,7 @@ static int bch2_trigger_pointer(struct btree_trans *trans,
 	}
 
 	if (flags & BTREE_TRIGGER_gc) {
+		CLASS(printbuf, buf)();
 		struct bucket *g = gc_bucket(ca, bucket.offset);
 		if (bch2_fs_inconsistent_on(!g, c, "reference to invalid bucket on device %u\n  %s",
 					    p.ptr.dev,
@@ -626,8 +706,7 @@ static int bch2_trigger_stripe_ptr(struct btree_trans *trans,
 	if (flags & BTREE_TRIGGER_transactional) {
 		struct bkey_i_stripe *s = bch2_bkey_get_mut_typed(trans,
 							BTREE_ID_stripes, POS(0, p.ec.idx),
-							BTREE_ITER_with_updates,
-							stripe);
+							0, stripe);
 		int ret = PTR_ERR_OR_ZERO(s);
 		if (unlikely(ret)) {
 			bch2_trans_inconsistent_on(bch2_err_matches(ret, ENOENT), trans,
@@ -961,7 +1040,7 @@ int bch2_trans_mark_metadata_bucket(struct btree_trans *trans,
 	if (flags & BTREE_TRIGGER_gc)
 		return bch2_mark_metadata_bucket(trans, ca, b, type, sectors, flags);
 	else if (flags & BTREE_TRIGGER_transactional)
-		return commit_do(trans, NULL, NULL, 0,
+		return commit_do(trans, NULL, NULL, (unsigned) BCH_WATERMARK_btree,
 				 __bch2_trans_mark_metadata_bucket(trans, ca, b, type, sectors));
 	else
 		BUG();

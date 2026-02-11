@@ -2,7 +2,7 @@
 #define _LINUX_SORT_H
 
 #include <stdlib.h>
-#include <linux/types.h>
+#include <linux/kernel.h>
 
 /**
  * cmp_int - perform a three-way comparison of the arguments

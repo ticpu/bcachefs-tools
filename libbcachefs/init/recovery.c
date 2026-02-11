@@ -16,7 +16,7 @@
 
 #include "data/move.h"
 #include "data/copygc.h"
-#include "data/reconcile.h"
+#include "data/reconcile/work.h"
 
 #include "fs/dirent.h"
 #include "fs/logged_ops.h"
@@ -49,6 +49,7 @@ int bch2_btree_lost_data(struct bch_fs *c,
 {
 	int ret = 0;
 
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
 	bool write_sb = false;
 	struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
@@ -83,6 +84,8 @@ int bch2_btree_lost_data(struct bch_fs *c,
 	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_alloc_key_dirty_sectors_wrong, ext->errors_silent);
 	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_need_discard_key_wrong, ext->errors_silent);
 	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_freespace_key_wrong, ext->errors_silent);
+	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_reconcile_work_phys_incorrectly_set, ext->errors_silent);
+	write_sb |= !__test_and_set_bit_le64(BCH_FSCK_ERR_reconcile_work_incorrectly_set, ext->errors_silent);
 
 	switch (btree) {
 	case BTREE_ID_alloc:
@@ -139,6 +142,7 @@ static void kill_btree(struct bch_fs *c, enum btree_id btree)
 /* for -o reconstruct_alloc: */
 void bch2_reconstruct_alloc(struct bch_fs *c)
 {
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
 	struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
 
@@ -717,11 +721,11 @@ use_clean:
 
 		}
 
-		journal_start.start_seq = le64_to_cpu(clean->journal_seq) + 1;
+		journal_start.cur_seq = le64_to_cpu(clean->journal_seq) + 1;
 	}
 
-	c->journal_replay_seq_start	= journal_start.seq_read_start;
-	c->journal_replay_seq_end	= journal_start.seq_read_end;
+	c->journal_replay_seq_start	= journal_start.last_seq;
+	c->journal_replay_seq_end	= journal_start.replay_end;
 
 	zero_out_btree_mem_ptr(&c->journal_keys);
 
@@ -764,20 +768,20 @@ use_clean:
 	 * journal sequence numbers:
 	 */
 	if (!c->sb.clean)
-		journal_start.start_seq += JOURNAL_BUF_NR * 4;
+		journal_start.cur_seq += JOURNAL_BUF_NR * 4;
 
-	if (journal_start.seq_read_end &&
-	    journal_start.seq_read_end + 1 != journal_start.start_seq) {
-		u64 blacklist_seq = journal_start.seq_read_end + 1;
+	if (journal_start.replay_end &&
+	    journal_start.replay_end + 1 != journal_start.cur_seq) {
+		u64 blacklist_seq = journal_start.replay_end + 1;
 		try(bch2_journal_log_msg(c, "blacklisting entries %llu-%llu",
-					 blacklist_seq, journal_start.start_seq));
-		try(bch2_journal_seq_blacklist_add(c, blacklist_seq, journal_start.start_seq));
+					 blacklist_seq, journal_start.cur_seq));
+		try(bch2_journal_seq_blacklist_add(c, blacklist_seq, journal_start.cur_seq));
 	}
 
 	try(bch2_journal_log_msg(c, "starting journal at entry %llu, replaying %llu-%llu",
-				 journal_start.start_seq,
-				 journal_start.seq_read_start,
-				 journal_start.seq_read_end));
+				 journal_start.cur_seq,
+				 journal_start.last_seq,
+				 journal_start.replay_end));
 	try(bch2_fs_journal_start(&c->journal, journal_start));
 
 	/*
@@ -936,7 +940,8 @@ int bch2_fs_initialize(struct bch_fs *c)
 	bch_notice(c, "initializing new filesystem");
 	set_bit(BCH_FS_new_fs, &c->flags);
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		c->disk_sb.sb->compat[0] |= cpu_to_le64(BIT_ULL(BCH_COMPAT_extents_above_btree_updates_done));
 		c->disk_sb.sb->compat[0] |= cpu_to_le64(BIT_ULL(BCH_COMPAT_bformat_overflow_done));
 		c->disk_sb.sb->compat[0] |= cpu_to_le64(BIT_ULL(BCH_COMPAT_no_stale_ptrs));
@@ -981,7 +986,7 @@ int bch2_fs_initialize(struct bch_fs *c)
 	 * journal_res_get() will crash if called before this has
 	 * set up the journal.pin FIFO and journal.cur pointer:
 	 */
-	struct journal_start_info journal_start = { .start_seq = 1 };
+	struct journal_start_info journal_start = { .cur_seq = 1 };
 	try(bch2_fs_journal_start(&c->journal, journal_start));
 
 	try(bch2_set_may_go_rw(c));
@@ -1027,7 +1032,8 @@ int bch2_fs_initialize(struct bch_fs *c)
 	if (ret)
 		return ret;
 
-	scoped_guard(mutex, &c->sb_lock) {
+	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
+		guard(mutex)(&c->sb_lock);
 		SET_BCH_SB_INITIALIZED(c->disk_sb.sb, true);
 		SET_BCH_SB_CLEAN(c->disk_sb.sb, false);
 

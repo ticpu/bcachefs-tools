@@ -4,5 +4,5 @@ usr/sbin/fsck.bcachefs
 usr/sbin/mkfs.bcachefs
 usr/sbin/mount.bcachefs
 usr/share/man/man8/bcachefs.8
+usr/share/bash-completion/completions/bcachefs
 usr/share/initramfs-tools/hooks/bcachefs
-usr/share/initramfs-tools/scripts/local-premount/bcachefs

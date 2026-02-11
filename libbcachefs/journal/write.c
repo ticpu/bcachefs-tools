@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include "bcachefs.h"
 
-#include "alloc/background.h"
+#include "alloc/discard.h"
 #include "alloc/disk_groups.h"
 #include "alloc/foreground.h"
 #include "alloc/replicas.h"
@@ -114,8 +114,6 @@ static int journal_write_alloc(struct journal *j, struct journal_buf *w,
 	unsigned target = c->opts.metadata_target ?:
 		c->opts.foreground_target;
 	unsigned replicas_want = READ_ONCE(c->opts.metadata_replicas);
-	unsigned replicas_need = min_t(unsigned, replicas_want,
-				       READ_ONCE(c->opts.metadata_replicas_required));
 	bool advance_done = false;
 
 retry_target:
@@ -152,7 +150,7 @@ done:
 	}
 #endif
 
-	return *replicas >= replicas_need ? 0 : -BCH_ERR_insufficient_journal_devices;
+	return *replicas ? 0 : -BCH_ERR_insufficient_journal_devices;
 }
 
 static void journal_buf_realloc(struct journal *j, struct journal_buf *buf)
@@ -291,7 +289,7 @@ static CLOSURE_CALLBACK(journal_write_done)
 				 * can return an error if appending to
 				 * replicas_refs failed, but we don't
 				 * care - it's a preallocated darray so
-				 * it'll allways be able to do some
+				 * it'll always be able to do some
 				 * work, and we have to retry anyways,
 				 * because we have to drop j->lock to
 				 * put the replicas refs before updating
@@ -309,12 +307,12 @@ static CLOSURE_CALLBACK(journal_write_done)
 					continue;
 				}
 
-				BUG_ON(j->last_seq > j->last_seq);
+				BUG_ON(w->last_seq > j->last_seq);
 				j->last_seq_ondisk = w->last_seq;
 				last_seq_ondisk_updated = true;
 			}
 
-			/* replicas refs eed to be put first */
+			/* replicas refs need to be put first */
 			j->flushed_seq_ondisk = seq;
 		}
 
@@ -485,7 +483,9 @@ static CLOSURE_CALLBACK(journal_write_preflush)
 					   BCH_DEV_WRITE_REF_journal_write);
 
 			struct journal_device *ja = &ca->journal;
-			struct bio *bio = &ja->bio[w->idx]->bio;
+			struct journal_bio *jbio = ja->bio[w->idx];
+			struct bio *bio = &jbio->bio;
+			jbio->submit_time	= local_clock();
 			bio_reset(bio, ca->disk_sb.bdev,
 				  REQ_OP_WRITE|REQ_SYNC|REQ_META|REQ_PREFLUSH);
 			bio->bi_end_io		= journal_write_endio;
@@ -711,6 +711,8 @@ CLOSURE_CALLBACK(bch2_journal_write)
 	BUG_ON(w->write_allocated);
 	BUG_ON(w->write_done);
 	BUG_ON(journal_last_unallocated_seq(j) != le64_to_cpu(w->data->seq));
+
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 
 	j->write_start_time = local_clock();
 

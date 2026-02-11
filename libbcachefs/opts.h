@@ -162,21 +162,11 @@ enum fsck_err_opts {
 	  OPT_UINT(1, BCH_REPLICAS_MAX + 1),				\
 	  BCH_SB_DATA_REPLICAS_WANT,	1,				\
 	  "#",		"Number of data replicas")			\
-	x(metadata_replicas_required, u8,				\
-	  OPT_FS|OPT_FORMAT|OPT_MOUNT,					\
-	  OPT_UINT(1, BCH_REPLICAS_MAX),				\
-	  BCH_SB_META_REPLICAS_REQ,	1,				\
-	  "#",		NULL)						\
-	x(data_replicas_required,	u8,				\
-	  OPT_FS|OPT_FORMAT|OPT_MOUNT,					\
-	  OPT_UINT(1, BCH_REPLICAS_MAX + 1),				\
-	  BCH_SB_DATA_REPLICAS_REQ,	1,				\
-	  "#",		NULL)						\
 	x(encoded_extent_max,		u32,				\
 	  OPT_FS|OPT_FORMAT|						\
 	  OPT_HUMAN_READABLE|OPT_MUST_BE_POW_2|OPT_SB_FIELD_SECTORS|OPT_SB_FIELD_ILOG2,\
 	  OPT_UINT(4096, 2U << 20),					\
-	  BCH_SB_ENCODED_EXTENT_MAX_BITS, 64 << 10,			\
+	  BCH_SB_ENCODED_EXTENT_MAX_BITS, 256 << 10,			\
 	  "size",	"Maximum size of checksummed/compressed extents")\
 	x(metadata_checksum,		u8,				\
 	  OPT_FS|OPT_FORMAT|OPT_MOUNT_OLD|OPT_RUNTIME,			\
@@ -360,12 +350,12 @@ enum fsck_err_opts {
 	x(move_bytes_in_flight,		u32,				\
 	  OPT_HUMAN_READABLE|OPT_FS|OPT_MOUNT|OPT_RUNTIME,		\
 	  OPT_UINT(1024, U32_MAX),					\
-	  BCH2_NO_SB_OPT,		1U << 20,			\
+	  BCH2_NO_SB_OPT,		64U << 20,			\
 	  NULL,		"Maximum Amount of IO to keep in flight by the move path")\
 	x(move_ios_in_flight,		u32,				\
 	  OPT_FS|OPT_MOUNT|OPT_RUNTIME,					\
 	  OPT_UINT(1, 1024),						\
-	  BCH2_NO_SB_OPT,		32,				\
+	  BCH2_NO_SB_OPT,		64,				\
 	  NULL,		"Maximum number of IOs to keep in flight by the move path")\
 	x(fsck,				u8,				\
 	  OPT_FS|OPT_MOUNT,						\
@@ -569,6 +559,17 @@ enum fsck_err_opts {
 	  NULL,		"BTREE_ITER_prefetch causes btree nodes to be\n"\
 	  " prefetched sequentially")
 
+enum bch_opt_id {
+#define x(_name, ...)	Opt_##_name,
+	BCH_OPTS()
+#undef x
+	bch2_opts_nr
+};
+
+struct bch_opts_mask {
+	unsigned long	d[BITS_TO_LONGS(bch2_opts_nr)];
+};
+
 struct bch_opts {
 #define x(_name, _bits, ...)	unsigned _name##_defined:1;
 	BCH_OPTS()
@@ -605,13 +606,6 @@ static inline struct bch_opts bch2_opts_empty(void)
 }
 
 void bch2_opts_apply(struct bch_opts *, struct bch_opts);
-
-enum bch_opt_id {
-#define x(_name, ...)	Opt_##_name,
-	BCH_OPTS()
-#undef x
-	bch2_opts_nr
-};
 
 struct bch_fs;
 struct printbuf;
@@ -663,6 +657,7 @@ void bch2_opt_to_text(struct printbuf *, struct bch_fs *, struct bch_sb *,
 void bch2_opts_to_text(struct printbuf *,
 		       struct bch_opts,
 		       struct bch_fs *, struct bch_sb *,
+		       struct bch_opts_mask *,
 		       unsigned, unsigned, unsigned);
 
 int bch2_opt_hook_pre_set(struct bch_fs *, struct bch_dev *, u64, enum bch_opt_id, u64, bool);
@@ -704,5 +699,12 @@ static inline void bch2_io_opts_fixups(struct bch_inode_opts *opts)
 void bch2_inode_opts_get(struct bch_fs *, struct bch_inode_opts *, bool);
 bool bch2_opt_is_inode_opt(enum bch_opt_id);
 void bch2_inode_opts_to_text(struct printbuf *, struct bch_fs *, struct bch_inode_opts);
+
+void bch2_opt_change_unlock(struct bch_fs *);
+void bch2_opt_change_lock(struct bch_fs *);
+
+DEFINE_GUARD(opt_change_lock, struct bch_fs *,
+	     bch2_opt_change_lock(_T),
+	     bch2_opt_change_unlock(_T))
 
 #endif /* _BCACHEFS_OPTS_H */

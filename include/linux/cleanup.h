@@ -2,7 +2,7 @@
 #ifndef _LINUX_CLEANUP_H
 #define _LINUX_CLEANUP_H
 
-#include <linux/compiler.h>
+#include <linux/kernel.h>
 
 /**
  * DOC: scope-based cleanup helpers

@@ -8,7 +8,7 @@
 
 #include "data/extents.h"
 #include "data/io_misc.h"
-#include "data/reconcile.h"
+#include "data/reconcile/trigger.h"
 #include "data/reflink.h"
 #include "data/write.h"
 
@@ -75,6 +75,9 @@ void bch2_reflink_p_to_text(struct printbuf *out, struct bch_fs *c,
 
 	if (REFLINK_P_ERROR(p.v))
 		prt_str(out, " error");
+
+	if (REFLINK_P_MAY_UPDATE_OPTIONS(p.v))
+		prt_str(out, " may_update_opts");
 }
 
 bool bch2_reflink_p_merge(struct bch_fs *c, struct bkey_s _l, struct bkey_s_c _r)
@@ -297,8 +300,7 @@ static int trans_trigger_reflink_p_segment(struct btree_trans *trans,
 	s64 offset_into_extent = *idx - REFLINK_P_IDX(p.v);
 	CLASS(btree_iter_uninit, iter)(trans);
 	struct bkey_s_c k = bkey_try(bch2_lookup_indirect_extent(trans, &iter, &offset_into_extent, p, false,
-							BTREE_ITER_intent|
-							BTREE_ITER_with_updates));
+							BTREE_ITER_intent));
 
 	if (!bkey_refcount_c(k)) {
 		if (!(flags & BTREE_TRIGGER_overwrite))

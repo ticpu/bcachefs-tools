@@ -33,9 +33,9 @@
 static void device_add_usage(void)
 {
 	puts("bcachefs device add - add a device to an existing filesystem\n"
-	     "Usage: bcachefs device add [OPTION]... filesystem device\n"
+	     "Usage: bcachefs device add [OPTION]... <filesystem> <device>\n"
 	     "\n"
-	     "Options:\n");
+	     "Options:");
 
 	bch2_opts_usage(OPT_FORMAT|OPT_DEVICE);
 
@@ -44,6 +44,7 @@ static void device_add_usage(void)
 	     "  -h, --help                   Display this help and exit\n"
 	     "\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
 }
 
 static int cmd_device_add(int argc, char *argv[])
@@ -133,257 +134,11 @@ static int cmd_device_add(int argc, char *argv[])
 	return 0;
 }
 
-static void device_remove_usage(void)
-{
-	puts("bcachefs device_remove - remove a device from a filesystem\n"
-	     "Usage:\n"
-	     "  bcachefs device remove <device>|<devid> <path>\n"
-	     "\n"
-	     "Options:\n"
-	     "  -f, --force                  Force removal, even if some data couldn't be migrated\n"
-	     "  -F, --force-metadata         Force removal, even if some metadata couldn't be migrated\n"
-	     "  -h, --help                   Display this help and exit\n"
-	     "\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-	exit(EXIT_SUCCESS);
-}
-
-static int cmd_device_remove(int argc, char *argv[])
-{
-	static const struct option longopts[] = {
-		{ "by-id",              no_argument, NULL, 'i' },
-		{ "force",		no_argument, NULL, 'f' },
-		{ "force-metadata",	no_argument, NULL, 'F' },
-		{ "help",		no_argument, NULL, 'h' },
-		{ NULL }
-	};
-	struct bchfs_handle fs;
-	bool by_id = false;
-	int opt, flags = BCH_FORCE_IF_DEGRADED, dev_idx;
-
-	while ((opt = getopt_long(argc, argv, "fh", longopts, NULL)) != -1)
-		switch (opt) {
-		case 'f':
-			flags |= BCH_FORCE_IF_DATA_LOST;
-			break;
-		case 'F':
-			flags |= BCH_FORCE_IF_METADATA_LOST;
-			break;
-		case 'h':
-			device_remove_usage();
-		}
-	args_shift(optind);
-
-	char *dev_str = arg_pop();
-	if (!dev_str)
-		die("Please supply a device");
-
-	char *end;
-	dev_idx = strtoul(dev_str, &end, 10);
-	if (*dev_str && !*end)
-		by_id = true;
-
-	char *fs_path = arg_pop();
-	if (fs_path) {
-		fs = bcache_fs_open(fs_path);
-
-		if (!by_id) {
-			dev_idx = bchu_dev_path_to_idx(fs, dev_str);
-			if (dev_idx < 0)
-				die("%s does not seem to be a member of %s",
-				    dev_str, fs_path);
-		}
-	} else if (!by_id) {
-		fs = bchu_fs_open_by_dev(dev_str, &dev_idx);
-	} else {
-		die("Filesystem path required when specifying device by id");
-	}
-
-	bchu_disk_remove(fs, dev_idx, flags);
-	return 0;
-}
-
-static void device_online_usage(void)
-{
-	puts("bcachefs device online - readd a device to a running filesystem\n"
-	     "Usage: bcachefs device online [OPTION]... device\n"
-	     "\n"
-	     "Options:\n"
-	     "  -h, --help                   Display this help and exit\n"
-	     "\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-}
-
-static int cmd_device_online(int argc, char *argv[])
-{
-	static const struct option longopts[] = {
-		{ "help",		no_argument, NULL, 'h' },
-		{ NULL }
-	};
-	int opt;
-
-	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
-		switch (opt) {
-		case 'h':
-			device_online_usage();
-			exit(EXIT_SUCCESS);
-		}
-	args_shift(optind);
-
-	char *dev = arg_pop();
-	if (!dev)
-		die("Please supply a device");
-
-	if (argc)
-		die("too many arguments");
-
-	int dev_idx;
-	struct bchfs_handle fs = bchu_fs_open_by_dev(dev, &dev_idx);
-	bchu_disk_online(fs, dev);
-	return 0;
-}
-
-static void device_offline_usage(void)
-{
-	puts("bcachefs device offline - take a device offline, without removing it\n"
-	     "Usage: bcachefs device offline [OPTION]... device\n"
-	     "\n"
-	     "Options:\n"
-	     "  -f, --force                  Force, if data redundancy will be degraded\n"
-	     "  -h, --help                   Display this help and exit\n"
-	     "\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-}
-
-static int cmd_device_offline(int argc, char *argv[])
-{
-	static const struct option longopts[] = {
-		{ "force",		no_argument, NULL, 'f' },
-		{ "help",		no_argument, NULL, 'h' },
-		{ NULL }
-	};
-	int opt, flags = 0;
-
-	while ((opt = getopt_long(argc, argv, "fh",
-				  longopts, NULL)) != -1)
-		switch (opt) {
-		case 'f':
-			flags |= BCH_FORCE_IF_DEGRADED;
-			break;
-		case 'h':
-			device_offline_usage();
-			exit(EXIT_SUCCESS);
-		}
-	args_shift(optind);
-
-	char *dev = arg_pop();
-	if (!dev)
-		die("Please supply a device");
-
-	if (argc)
-		die("too many arguments");
-
-	int dev_idx;
-	struct bchfs_handle fs = bchu_fs_open_by_dev(dev, &dev_idx);
-	bchu_disk_offline(fs, dev_idx, flags);
-	return 0;
-}
-
-static void device_evacuate_usage(void)
-{
-	puts("bcachefs device evacuate - move data off of a given device\n"
-	     "Usage: bcachefs device evacuate [OPTION]... device\n"
-	     "\n"
-	     "Options:\n"
-	     "  -h, --help                   Display this help and exit\n"
-	     "\n"
-	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
-}
-
-static int evacuate_v0(struct bchfs_handle fs, unsigned dev_idx, const char *dev_path)
-{
-	struct bch_ioctl_dev_usage_v2 *u = bchu_dev_usage(fs, dev_idx);
-
-	if (u->state == BCH_MEMBER_STATE_rw) {
-		printf("Setting %s readonly\n", dev_path);
-		bchu_disk_set_state(fs, dev_idx, BCH_MEMBER_STATE_ro, BCH_FORCE_IF_DEGRADED);
-	}
-
-	free(u);
-
-	return bchu_data(fs, (struct bch_ioctl_data) {
-		.op		= BCH_DATA_OP_migrate,
-		.start_btree	= 0,
-		.start_pos	= POS_MIN,
-		.end_btree	= BTREE_ID_NR,
-		.end_pos	= POS_MAX,
-		.migrate.dev	= dev_idx,
-	});
-}
-
-static int cmd_device_evacuate(int argc, char *argv[])
-{
-	static const struct option longopts[] = {
-		{ "help",			no_argument,	NULL, 'h' },
-		{ NULL }
-	};
-	int opt;
-
-	while ((opt = getopt_long(argc, argv, "fh", longopts, NULL)) != -1)
-		switch (opt) {
-		case 'h':
-			device_evacuate_usage();
-			exit(EXIT_SUCCESS);
-		}
-	args_shift(optind);
-
-	char *dev_path = arg_pop();
-	if (!dev_path)
-		die("Please supply a device");
-
-	if (argc)
-		die("too many arguments");
-
-	int dev_idx;
-	struct bchfs_handle fs = bchu_fs_open_by_dev(dev_path, &dev_idx);
-
-	if (bcachefs_kernel_version() < bcachefs_metadata_version_reconcile)
-		return evacuate_v0(fs, dev_idx, dev_path);
-
-	printf("Setting %s evacuating \n", dev_path);
-	bchu_disk_set_state(fs, dev_idx, BCH_MEMBER_STATE_evacuating, BCH_FORCE_IF_DEGRADED);
-
-	while (true) {
-		struct bch_ioctl_dev_usage_v2 *u = bchu_dev_usage(fs, dev_idx);
-
-		u64 data = 0;
-		for (unsigned type = 0; type < u->nr_data_types; type++)
-			if (!data_type_is_empty(type) &&
-			    !data_type_is_hidden(type))
-				data += u->d[type].sectors;
-		free(u);
-
-		printf("\33[2K\r");
-		CLASS(printbuf, buf)();
-		prt_units_u64(&buf, data << 9);
-
-		fputs(buf.buf, stdout);
-		fflush(stdout);
-
-		if (!data)
-			return 0;
-
-		sleep(1);
-	}
-}
-
 static void device_set_state_usage(void)
 {
-	puts("bcachefs device set-state\n"
-	     "Usage: bcachefs device set-state <new-state> <device>|<devid> <path>\n"
-	     "\n"
-	     "<new-state>: one of rw, ro, evacuating or spare\n"
-	     "<path>: path to mounted filesystem, optional unless specifying device by id\n"
+	puts("bcachefs device set-state - change the state of a device\n"
+	     "Usage: bcachefs device set-state <rw|ro|evacuating|spare> <device> [path]\n"
+	     "       bcachefs device set-state <rw|ro|evacuating|spare> <dev_id> <path>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -f, --force                  Force if data redundancy will be degraded\n"
@@ -500,8 +255,8 @@ static int cmd_device_set_state(int argc, char *argv[])
 
 static void device_resize_usage(void)
 {
-	puts("bcachefs device resize \n"
-	     "Usage: bcachefs device resize device [ size ]\n"
+	puts("bcachefs device resize - resize the filesystem on a device\n"
+	     "Usage: bcachefs device resize <device> <size>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help                   Display this help and exit\n"
@@ -608,8 +363,8 @@ static int cmd_device_resize(int argc, char *argv[])
 
 static void device_resize_journal_usage(void)
 {
-	puts("bcachefs device resize-journal \n"
-	     "Usage: bcachefs device resize-journal device size\n"
+	puts("bcachefs device resize-journal - resize the journal on a device\n"
+	     "Usage: bcachefs device resize-journal <device> <size>\n"
 	     "\n"
 	     "Options:\n"
 	     "  -h, --help                   Display this help and exit\n"
@@ -708,7 +463,7 @@ static int cmd_device_resize_journal(int argc, char *argv[])
 static int device_usage(void)
 {
        puts("bcachefs device - manage devices within a running filesystem\n"
-            "Usage: bcachefs device <CMD> [OPTION]\n"
+            "Usage: bcachefs device <CMD> [OPTION]...\n"
             "\n"
             "Commands:\n"
             "  add                          Add a new device to an existing filesystem\n"
@@ -721,7 +476,7 @@ static int device_usage(void)
             "  resize-journal               Resize journal on a device\n"
             "\n"
             "Report bugs to <linux-bcachefs@vger.kernel.org>");
-       return 0;
+       exit(EXIT_SUCCESS);
 }
 
 int device_cmds(int argc, char *argv[])
@@ -732,14 +487,6 @@ int device_cmds(int argc, char *argv[])
 		return device_usage();
 	if (!strcmp(cmd, "add"))
 		return cmd_device_add(argc, argv);
-	if (!strcmp(cmd, "remove"))
-		return cmd_device_remove(argc, argv);
-	if (!strcmp(cmd, "online"))
-		return cmd_device_online(argc, argv);
-	if (!strcmp(cmd, "offline"))
-		return cmd_device_offline(argc, argv);
-	if (!strcmp(cmd, "evacuate"))
-		return cmd_device_evacuate(argc, argv);
 	if (!strcmp(cmd, "set-state"))
 		return cmd_device_set_state(argc, argv);
 	if (!strcmp(cmd, "resize"))

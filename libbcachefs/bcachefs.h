@@ -248,10 +248,10 @@
 
 #include "data/compress_types.h"
 #include "data/copygc_types.h"
-#include "data/ec_types.h"
+#include "data/ec/types.h"
 #include "data/keylist_types.h"
 #include "data/nocow_locking_types.h"
-#include "data/reconcile_types.h"
+#include "data/reconcile/types.h"
 
 #include "debug/async_objs_types.h"
 #include "debug/trace.h"
@@ -321,7 +321,7 @@ void __bch2_print(struct bch_fs *c, const char *fmt, ...);
 #define bch2_print(_c, ...) __bch2_print(maybe_dev_to_fs(_c), __VA_ARGS__)
 
 #define __bch2_ratelimit(_c, _rs)					\
-	(!(_c)->opts.ratelimit_errors || !__ratelimit(_rs))
+	((_c)->opts.ratelimit_errors && !__ratelimit(_rs))
 
 #define bch2_ratelimit(_c)						\
 ({									\
@@ -486,10 +486,14 @@ BCH_DEBUG_PARAMS_ALL()
 	x(journal_flush_write)			\
 	x(journal_noflush_write)		\
 	x(journal_flush_seq)			\
+	x(journal_pin_flush_btree)		\
+	x(journal_pin_flush_key_cache)		\
+	x(journal_pin_flush_other)		\
 	x(blocked_journal_low_on_space)		\
 	x(blocked_journal_low_on_pin)		\
 	x(blocked_journal_max_in_flight)	\
 	x(blocked_journal_max_open)		\
+	x(blocked_journal_write_buffer_flush)	\
 	x(blocked_key_cache_flush)		\
 	x(blocked_allocate)			\
 	x(blocked_allocate_open_bucket)		\
@@ -550,10 +554,11 @@ enum bch_dev_read_ref {
 
 #define BCH_DEV_WRITE_REFS()				\
 	x(journal_write)				\
-	x(journal_do_discards)				\
+	x(journal_discard)				\
 	x(dev_do_discards)				\
 	x(discard_one_bucket_fast)			\
 	x(do_invalidates)				\
+	x(stripe_update_extents)			\
 	x(nocow_flush)					\
 	x(io_write)					\
 	x(ec_block)					\
@@ -752,6 +757,7 @@ struct bch_fs {
 	struct kobject		internal;
 	struct kobject		opts_dir;
 	struct kobject		time_stats;
+	struct kobject		time_stats_json;
 	unsigned long		flags;
 
 	int			minor;
@@ -789,11 +795,10 @@ struct bch_fs {
 	struct bch_devs_mask	devs_removed;
 	struct bch_devs_mask	devs_rotational;
 
-	u8			extent_type_u64s[31];
-	u8			extent_types_known;
-
 	struct bch_opts		opts;
-	atomic_t		opt_change_cookie;
+	struct mutex		opt_change_lock;
+	u32			opt_change_cookie;
+	struct bch_opts_mask	mount_opts;
 
 	struct bch_sb_cpu	sb;
 	struct bch_sb_handle	disk_sb;
@@ -863,7 +868,7 @@ struct bch_fs {
 	mempool_t		bio_bounce_bufs;
 	struct bucket_nocow_lock_table
 				nocow_locks;
-	struct rhashtable	promote_table;
+	struct rhltable		update_table;
 
 	struct bch_key		chacha20_key;
 	bool			chacha20_key_set;
@@ -904,6 +909,7 @@ struct bch_fs {
 
 static inline int __bch2_err_throw(struct bch_fs *c, int err)
 {
+	BUG_ON(err >= 0);
 	this_cpu_inc(c->counters.now[BCH_COUNTER_error_throw]);
 	trace_error_throw(c, bch2_err_str(err));
 	return err;
@@ -989,18 +995,6 @@ static inline struct stdio_redirect *bch2_fs_stdio_redirect(struct bch_fs *c)
 	if (c->stdio_filter && c->stdio_filter != current)
 		stdio = NULL;
 	return stdio;
-}
-
-static inline unsigned metadata_replicas_required(struct bch_fs *c)
-{
-	return min(c->opts.metadata_replicas,
-		   c->opts.metadata_replicas_required);
-}
-
-static inline unsigned data_replicas_required(struct bch_fs *c)
-{
-	return min(c->opts.data_replicas,
-		   c->opts.data_replicas_required);
 }
 
 #define BKEY_PADDED_ONSTACK(key, pad)				\

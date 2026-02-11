@@ -164,14 +164,12 @@ __aligned(4)
 #define KEY_SNAPSHOT_MAX		((__u32)~0U)
 #define KEY_SIZE_MAX			((__u32)~0U)
 
-static inline struct bpos SPOS(__u64 inode, __u64 offset, __u32 snapshot)
-{
-	return (struct bpos) {
-		.inode		= inode,
-		.offset		= offset,
-		.snapshot	= snapshot,
-	};
-}
+#define SPOS(_inode, _offset, _snapshot)		\
+	((struct bpos) {				\
+		.inode		= _inode,		\
+		.offset		= _offset,		\
+		.snapshot	= _snapshot,		\
+	})
 
 #define POS_MIN				SPOS(0, 0, 0)
 #define POS_MAX				SPOS(KEY_INODE_MAX, KEY_OFFSET_MAX, 0)
@@ -453,9 +451,10 @@ struct bch_error {
 };
 
 #define KEY_TYPE_ERRORS()			\
-	x(unknown,		0)		\
-	x(device_removed,	1)		\
-	x(double_allocation,	2)
+	x(unknown,			0)	\
+	x(device_removed,		1)	\
+	x(double_allocation,		2)	\
+	x(no_valid_pointers_repair,	3)
 
 enum bch_key_type_errors {
 #define x(n, t)	KEY_TYPE_ERROR_##n = t,
@@ -494,6 +493,8 @@ struct bch_backpointer {
 } __packed __aligned(8);
 
 BITMASK(BACKPOINTER_RECONCILE_PHYS,	struct bch_backpointer, flags, 0, 2);
+BITMASK(BACKPOINTER_ERASURE_CODED,	struct bch_backpointer, flags, 2, 3);
+BITMASK(BACKPOINTER_STRIPE_PTR,		struct bch_backpointer, flags, 3, 4);
 
 /* Optional/variable size superblock sections: */
 
@@ -630,7 +631,12 @@ enum btree_id_flags {
 	  BIT_ULL(KEY_TYPE_set))						\
 	x(reconcile_hipri_phys,	25,						\
 	  BTREE_IS_write_buffer,						\
-	  BIT_ULL(KEY_TYPE_set))
+	  BIT_ULL(KEY_TYPE_set))						\
+	x(bucket_to_stripe,	26,	0,					\
+	  BIT_ULL(KEY_TYPE_set))						\
+	x(stripe_backpointers,	27,						\
+	  BTREE_IS_write_buffer,						\
+	  BIT_ULL(KEY_TYPE_backpointer))					\
 
 enum btree_id {
 #define x(name, nr, ...) BTREE_ID_##name = nr,
@@ -644,7 +650,7 @@ enum btree_id {
 #include "alloc/lru_format.h"
 #include "alloc/replicas_format.h"
 #include "alloc/format.h"
-#include "data/ec_format.h"
+#include "data/ec/format.h"
 #include "data/extents_format.h"
 #include "data/extents_sb_format.h"
 #include "data/reflink_format.h"
@@ -844,7 +850,9 @@ struct bch_sb_field_ext {
 	x(btree_node_accounting,	BCH_VERSION(1, 31))		\
 	x(sb_field_extent_type_u64s,	BCH_VERSION(1, 32))		\
 	x(reconcile,			BCH_VERSION(1, 33))		\
-	x(extented_key_type_error,	BCH_VERSION(1, 34))
+	x(extented_key_type_error,	BCH_VERSION(1, 34))		\
+	x(bucket_stripe_index,		BCH_VERSION(1, 35))		\
+	x(no_sb_user_data_replicas,	BCH_VERSION(1, 36))
 
 enum bcachefs_metadata_version {
 	bcachefs_metadata_version_min = 9,
@@ -1019,6 +1027,9 @@ LE64_BITMASK(BCH_SB_DEGRADED_ACTION,	struct bch_sb, flags[6], 20, 22);
 LE64_BITMASK(BCH_SB_CASEFOLD,		struct bch_sb, flags[6], 22, 23);
 LE64_BITMASK(BCH_SB_REBALANCE_AC_ONLY,	struct bch_sb, flags[6], 23, 24);
 LE64_BITMASK(BCH_SB_WRITEBACK_TIMEOUT,	struct bch_sb, flags[6], 24, 40);
+LE64_BITMASK(BCH_SB_EXTENT_BP_SHIFT,	struct bch_sb, flags[6], 40, 48);
+
+#define BCH_SB_EXTENT_BP_SHIFT_DEFAULT	10
 
 static inline __u64 BCH_SB_COMPRESSION_TYPE(const struct bch_sb *sb)
 {
@@ -1483,11 +1494,16 @@ static inline bool btree_id_is_alloc(enum btree_id btree)
 	switch (btree) {
 	case BTREE_ID_alloc:
 	case BTREE_ID_backpointers:
+	case BTREE_ID_stripe_backpointers:
 	case BTREE_ID_need_discard:
 	case BTREE_ID_freespace:
 	case BTREE_ID_bucket_gens:
 	case BTREE_ID_lru:
 	case BTREE_ID_accounting:
+	case BTREE_ID_reconcile_work:
+	case BTREE_ID_reconcile_hipri:
+	case BTREE_ID_reconcile_pending:
+	case BTREE_ID_reconcile_scan:
 		return true;
 	default:
 		return false;

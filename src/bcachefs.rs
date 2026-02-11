@@ -2,8 +2,10 @@ mod commands;
 mod key;
 mod dump_stack;
 mod logging;
+mod util;
 mod wrappers;
 mod device_scan;
+mod http;
 
 use std::{
     ffi::{c_char, CString},
@@ -22,6 +24,12 @@ impl std::fmt::Display for ErrnoError {
 }
 
 impl std::error::Error for ErrnoError {}
+
+fn c_command(args: Vec<String>, symlink_cmd: Option<&str>) -> ExitCode {
+    let r = handle_c_command(args, symlink_cmd);
+    debug!("return code from C command: {r}");
+    ExitCode::from(r as u8)
+}
 
 fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
     let cmd = match symlink_cmd {
@@ -50,7 +58,7 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "dump" => c::cmd_dump(argc, argv),
             "undump" => c::cmd_undump(argc, argv),
             "format" => c::cmd_format(argc, argv),
-            "fs" => c::fs_cmds(argc, argv),
+            // fs subcommand dispatch is fully in Rust now
             "fsck" => c::cmd_fsck(argc, argv),
             "recovery-pass" => c::cmd_recovery_pass(argc, argv),
             "image" => c::image_cmds(argc, argv),
@@ -60,18 +68,15 @@ fn handle_c_command(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
             "migrate-superblock" => c::cmd_migrate_superblock(argc, argv),
             "mkfs" => c::cmd_format(argc, argv),
             "reconcile" => c::reconcile_cmds(argc, argv),
-            "remove-passphrase" => c::cmd_remove_passphrase(argc, argv),
-            "reset-counters" => c::cmd_reset_counters(argc, argv),
-            "scrub" => c::cmd_scrub(argc, argv),
+            // remove-passphrase handled in Rust dispatch
+            // reset-counters handled in Rust dispatch
             "set-fs-option" => c::cmd_set_option(argc, argv),
-            "set-passphrase" => c::cmd_set_passphrase(argc, argv),
-            "set-file-option" => c::cmd_setattr(argc, argv),
+            // set-passphrase handled in Rust dispatch
+            // set-file-option handled in Rust dispatch
             "show-super" => c::cmd_show_super(argc, argv),
             "recover-super" => c::cmd_recover_super(argc, argv),
             "strip-alloc" => c::cmd_strip_alloc(argc, argv),
-            "unlock" => c::cmd_unlock(argc, argv),
-            "version" => c::cmd_version(argc, argv),
-
+            // unlock handled in Rust dispatch
             #[cfg(feature = "fuse")]
             "fusemount" => c::cmd_fusemount(argc, argv),
 
@@ -106,26 +111,75 @@ fn main() -> ExitCode {
     }
 
     unsafe { c::raid_init() };
-    unsafe { c::linux_shrinkers_init() };
 
     let cmd = match symlink_cmd {
         Some(s) => s,
         None => args[1].as_str(),
     };
 
+    // fuse will call this after daemonizing, we can't create threads before - note that mount
+    // may invoke fusemount, via -t bcachefs.fuse
+    if cmd != "mount" && cmd != "fusemount" {
+        unsafe { c::linux_shrinkers_init() };
+    }
+
     match cmd {
+        "version" => {
+            let vh = include_str!("../version.h");
+            println!("{}", vh.split('"').nth(1).unwrap_or("unknown"));
+            ExitCode::SUCCESS
+        }
         "completions" => {
             commands::completions(args[1..].to_vec());
             ExitCode::SUCCESS
         }
         "list" => commands::list(args[1..].to_vec()).report(),
         "mount" => commands::mount(args, symlink_cmd),
+        "scrub" => commands::scrub(args[1..].to_vec()).report(),
         "subvolume" => commands::subvolume(args[1..].to_vec()).report(),
-        _ => {
-            let r = handle_c_command(args, symlink_cmd);
-
-            debug!("return code from C command: {r}");
-            ExitCode::from(r as u8)
-        }
+        "data" => match args.get(2).map(|s| s.as_str()) {
+            Some("scrub") => commands::scrub(args[2..].to_vec()).report(),
+            _ => c_command(args, symlink_cmd),
+        },
+        "device" => match args.get(2).map(|s| s.as_str()) {
+            Some("online") => commands::cmd_device_online(args[2..].to_vec()).report(),
+            Some("offline") => commands::cmd_device_offline(args[2..].to_vec()).report(),
+            Some("remove") => commands::cmd_device_remove(args[2..].to_vec()).report(),
+            Some("evacuate") => commands::cmd_device_evacuate(args[2..].to_vec()).report(),
+            Some("set-state") if !args.iter().any(|a| a == "--offline" || a == "-o") =>
+                commands::cmd_device_set_state(args[2..].to_vec()).report(),
+            Some("resize") => match commands::cmd_device_resize(args[2..].to_vec()) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => c_command(args, symlink_cmd),
+                Err(e) => { eprintln!("Error: {e:#}"); ExitCode::FAILURE }
+            },
+            Some("resize-journal") => match commands::cmd_device_resize_journal(args[2..].to_vec()) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => c_command(args, symlink_cmd),
+                Err(e) => { eprintln!("Error: {e:#}"); ExitCode::FAILURE }
+            },
+            _ => c_command(args, symlink_cmd),
+        },
+        "fs" => match args.get(2).map(|s| s.as_str()) {
+            Some("timestats") => commands::timestats(args[2..].to_vec()).report(),
+            Some("top") => commands::top(args[2..].to_vec()).report(),
+            Some("usage") => commands::fs_usage::fs_usage(args[2..].to_vec()).report(),
+            _ => {
+                println!("bcachefs fs - manage a running filesystem");
+                println!("Usage: bcachefs fs <usage|top|timestats> [OPTION]...\n");
+                println!("Commands:");
+                println!("  usage                        Display detailed filesystem usage");
+                println!("  top                          Show runtime performance information");
+                println!("  timestats                    Show filesystem time statistics");
+                ExitCode::from(1)
+            }
+        },
+        "remove-passphrase" => commands::cmd_remove_passphrase(args[1..].to_vec()).report(),
+        "reset-counters" => commands::cmd_reset_counters(args[1..].to_vec()).report(),
+        "set-file-option" => commands::cmd_setattr(args[1..].to_vec()).report(),
+        "set-passphrase" => commands::cmd_set_passphrase(args[1..].to_vec()).report(),
+        "reflink-option-propagate" => commands::cmd_reflink_option_propagate(args[1..].to_vec()).report(),
+        "unlock" => commands::cmd_unlock(args[1..].to_vec()).report(),
+        _ => c_command(args, symlink_cmd),
     }
 }

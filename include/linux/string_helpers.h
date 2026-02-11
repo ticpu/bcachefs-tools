@@ -3,8 +3,8 @@
 #define _LINUX_STRING_HELPERS_H_
 
 #include <linux/ctype.h>
+#include <linux/kernel.h>
 #include <linux/string.h>
-#include <linux/types.h>
 
 
 /* Descriptions of the types of units to

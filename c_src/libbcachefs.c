@@ -83,8 +83,15 @@ void bch2_sb_layout_init(struct bch_sb_layout *l,
 	}
 }
 
+/*
+ * Clamp fs-wide bucket size for a specific device that may be too small.
+ * Prefer at least 2048 buckets per device (512 is the absolute minimum
+ * but gets dicey).  Within that constraint, try to reach at least
+ * encoded_extent_max to avoid fragmenting checksummed/compressed extents.
+ */
 static u64 dev_bucket_size_clamp(struct bch_opts fs_opts, u64 dev_size, u64 fs_bucket_size)
 {
+	/* Largest bucket size that still gives us >= 2048 buckets: */
 	u64 max_size = rounddown_pow_of_two(dev_size / (BCH_MIN_NR_NBUCKETS * 4));
 	if (opt_defined(fs_opts, btree_node_size))
 		max_size = max(max_size, fs_opts.btree_node_size);
@@ -94,11 +101,12 @@ static u64 dev_bucket_size_clamp(struct bch_opts fs_opts, u64 dev_size, u64 fs_b
 	u64 dev_bucket_size = min(max_size, fs_bucket_size);
 
 	/*
-	 * Use encoded_extent_max instead of 64k?
+	 * Buckets >= encoded_extent_max avoid fragmenting encoded
+	 * extents when they're moved, but don't push below 2048 buckets:
 	 */
-
-	while (dev_bucket_size < 64 << 10 &&
-	       dev_size / (dev_bucket_size * 2) >= BCH_MIN_NR_NBUCKETS)
+	u64 extent_min = opt_get(fs_opts, encoded_extent_max);
+	while (dev_bucket_size < extent_min &&
+	       dev_bucket_size < max_size)
 		dev_bucket_size *= 2;
 
 	return dev_bucket_size;
@@ -106,10 +114,8 @@ static u64 dev_bucket_size_clamp(struct bch_opts fs_opts, u64 dev_size, u64 fs_b
 
 u64 bch2_pick_bucket_size(struct bch_opts opts, dev_opts_list devs)
 {
-	/* Bucket size must be >= block size: */
+	/* Hard minimum: bucket must hold a btree node */
 	u64 bucket_size = opts.block_size;
-
-	/* Bucket size must be >= btree node size: */
 	if (opt_defined(opts, btree_node_size))
 		bucket_size = max_t(u64, bucket_size, opts.btree_node_size);
 
@@ -123,30 +129,40 @@ u64 bch2_pick_bucket_size(struct bch_opts opts, dev_opts_list devs)
 	darray_for_each(devs, i)
 		total_fs_size += i->fs_size;
 
-	struct sysinfo info;
-	si_meminfo(&info);
+	/*
+	 * Soft preferences below — these set the ideal bucket size,
+	 * but dev_bucket_size_clamp() may reduce per-device to keep
+	 * bucket counts reasonable on small devices:
+	 */
+
+	/* btree_node_size isn't calculated yet; use a reasonable floor: */
+	bucket_size = max(bucket_size, 256ULL << 10);
 
 	/*
-	 * Large fudge factor to allow for other fsck processes and devices
-	 * being added after creation
+	 * Avoid fragmenting encoded (checksummed/compressed) extents
+	 * when they're moved — prefer buckets large enough for several
+	 * max-size extents:
 	 */
+	bucket_size = max(bucket_size, (u64) opt_get(opts, encoded_extent_max) * 4);
+
+	/*
+	 * Prefer larger buckets up to 2MB — reduces allocator overhead.
+	 * Scales linearly with total filesystem size, reaching 2MB at 2TB:
+	 */
+	u64 perf_lower_bound = min(2ULL << 20, total_fs_size / (1ULL << 20));
+	bucket_size = max(bucket_size, perf_lower_bound);
+
+	/*
+	 * Upper bound on bucket count: ensure we can fsck with available
+	 * memory.  Large fudge factor to allow for other fsck processes
+	 * and devices being added after creation:
+	 */
+	struct sysinfo info;
+	si_meminfo(&info);
 	u64 mem_available_for_fsck = info.totalram / 8;
 	u64 buckets_can_fsck = mem_available_for_fsck / (sizeof(struct bucket) * 1.5);
 	u64 mem_lower_bound = roundup_pow_of_two(total_fs_size / buckets_can_fsck);
-
-	/*
-	 * Lower bound to avoid fragmenting encoded (checksummed, compressed)
-	 * extents too much as they're moved:
-	 */
-	bucket_size = max(bucket_size, opt_get(opts, encoded_extent_max) * 4);
-
-	/* Lower bound to ensure we can fsck: */
 	bucket_size = max(bucket_size, mem_lower_bound);
-
-	u64 perf_lower_bound = min(2ULL << 20, total_fs_size / (1ULL << 20));
-
-	/* We also prefer larger buckets for performance, up to 2MB at 2T */
-	bucket_size = max(bucket_size, perf_lower_bound);
 
 	bucket_size = roundup_pow_of_two(bucket_size);
 
@@ -260,15 +276,23 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	sb.sb->nr_devices	= devs.nr;
 	SET_BCH_SB_VERSION_INCOMPAT_ALLOWED(sb.sb, opts.version);
 
+	/* These are no longer options, only provided for compatibility with old verions */
+	SET_BCH_SB_META_REPLICAS_REQ(sb.sb, 1);
+	SET_BCH_SB_DATA_REPLICAS_REQ(sb.sb, 1);
+
+	SET_BCH_SB_EXTENT_BP_SHIFT(sb.sb, 16);
+
 	if (opts.version > bcachefs_metadata_version_disk_accounting_big_endian)
 		sb.sb->features[0] |= cpu_to_le64(BCH_SB_FEATURES_ALL);
 
 	uuid_generate(sb.sb->uuid.b);
 
-	if (opts.label)
-		memcpy(sb.sb->label,
-		       opts.label,
-		       min(strlen(opts.label), sizeof(sb.sb->label)));
+	if (opts.label) {
+		if (strlen(opts.label) >= sizeof(sb.sb->label))
+			die("filesystem label too long (max %zu characters)",
+			    sizeof(sb.sb->label) - 1);
+		memcpy(sb.sb->label, opts.label, strlen(opts.label));
+	}
 
 	bch2_opt_set_sb_all(sb.sb, -1, &fs_opts);
 
@@ -292,7 +316,12 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 		uuid_generate(m->uuid.b);
 		m->nbuckets	= cpu_to_le64(i->nbuckets);
 		m->first_bucket	= 0;
+
+		if (!opt_defined(i->opts, rotational))
+			opt_set(i->opts, rotational, !bdev_nonrot(i->bdev));
+
 		bch2_opt_set_sb_all(sb.sb, idx, &i->opts);
+		SET_BCH_MEMBER_ROTATIONAL_SET(m, true);
 	}
 
 	/* Disk labels*/

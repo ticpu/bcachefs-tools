@@ -42,7 +42,6 @@ static inline void bch2_write_op_init(struct bch_write_op *op, struct bch_fs *c,
 	op->csum_type		= bch2_data_checksum_type(c, opts);
 	op->compression_opt	= opts.compression;
 	op->nr_replicas		= 0;
-	op->nr_replicas_required = c->opts.data_replicas_required;
 	op->watermark		= BCH_WATERMARK_normal;
 	op->incompressible	= 0;
 	op->open_buckets.nr	= 0;
@@ -69,6 +68,8 @@ static inline struct bch_write_bio *wbio_init(struct bio *bio)
 	memset(&wbio->wbio, 0, sizeof(wbio->wbio));
 	return wbio;
 }
+
+extern const char * const bch2_write_flags[];
 
 void __bch2_write_op_to_text(struct printbuf *, struct bch_write_op *);
 void bch2_write_op_to_text(struct printbuf *, struct bch_write_op *);

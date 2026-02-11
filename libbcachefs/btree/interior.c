@@ -22,7 +22,7 @@
 
 #include "data/extents.h"
 #include "data/keylist.h"
-#include "data/reconcile.h"
+#include "data/reconcile/trigger.h"
 #include "data/write.h"
 
 #include "init/error.h"
@@ -305,7 +305,7 @@ static bool can_use_btree_node(struct bch_fs *c,
 	if (target && !bch2_bkey_in_target(c, k, target))
 		return false;
 
-	unsigned durability = bch2_btree_ptr_durability(c, k);
+	unsigned durability = bch2_btree_ptr_durability(c, k).online;
 
 	if (durability >= res->nr_replicas)
 		return true;
@@ -327,8 +327,7 @@ static bool can_use_btree_node(struct bch_fs *c,
 static struct btree *__bch2_btree_node_alloc(struct btree_trans *trans,
 					     struct disk_reservation *res,
 					     bool interior_node,
-					     struct alloc_request *req,
-					     struct closure *cl)
+					     struct alloc_request *req)
 {
 	struct bch_fs *c = trans->c;
 	struct write_point *wp;
@@ -342,10 +341,8 @@ static struct btree *__bch2_btree_node_alloc(struct btree_trans *trans,
 	BUG_ON(b->ob.nr);
 retry:
 	ret = bch2_alloc_sectors_req(trans, req,
-				      writepoint_ptr(&c->allocator.btree_write_point),
-				      min(res->nr_replicas,
-					  c->opts.metadata_replicas_required),
-				      cl, &wp);
+				     writepoint_ptr(&c->allocator.btree_write_point),
+				     &wp);
 	if (unlikely(ret))
 		goto err;
 
@@ -542,8 +539,7 @@ static void bch2_btree_reserve_put(struct btree_update *as, struct btree_trans *
 static int bch2_btree_reserve_get(struct btree_trans *trans,
 				  struct btree_update *as,
 				  unsigned nr_nodes[2],
-				  struct alloc_request *req,
-				  struct closure *cl)
+				  struct alloc_request *req)
 {
 	BUG_ON(nr_nodes[0] + nr_nodes[1] > BTREE_RESERVE_MAX);
 
@@ -551,7 +547,7 @@ static int bch2_btree_reserve_get(struct btree_trans *trans,
 	 * Protects reaping from the btree node cache and using the btree node
 	 * open bucket reserve:
 	 */
-	try(bch2_btree_cache_cannibalize_lock(trans, cl));
+	try(bch2_btree_cache_cannibalize_lock(trans, req->cl));
 
 	int ret = 0;
 	for (unsigned interior = 0; interior < 2; interior++) {
@@ -559,7 +555,7 @@ static int bch2_btree_reserve_get(struct btree_trans *trans,
 
 		while (p->nr < nr_nodes[interior]) {
 			struct btree *b = __bch2_btree_node_alloc(trans, &as->disk_res,
-								  interior, req, cl);
+								  interior, req);
 			ret = PTR_ERR_OR_ZERO(b);
 			if (ret)
 				goto err;
@@ -643,6 +639,7 @@ static void btree_update_new_nodes_mark_sb(struct btree_update *as)
 {
 	struct bch_fs *c = as->c;
 
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
 	bool write_sb = false;
 	darray_for_each(as->new_nodes, i)
@@ -719,7 +716,7 @@ static int btree_update_nodes_written_trans(struct btree_trans *trans,
 		bkey_strip_reconcile(c, bkey_i_to_s(&i->key));
 
 		try(bch2_bkey_set_needs_reconcile(trans, NULL, &opts, &i->key,
-						  SET_NEEDS_REBALANCE_foreground, 0));
+						  SET_NEEDS_RECONCILE_foreground, 0));
 
 		/*
 		 * This is not strictly the best way of doing this, what we
@@ -1213,6 +1210,12 @@ bch2_btree_update_start(struct btree_trans *trans, struct btree_path *path,
 
 	BUG_ON(!path->should_be_locked);
 
+	if (watermark == BCH_WATERMARK_stripe) {
+		watermark = BCH_WATERMARK_normal;
+		commit_flags &= ~BCH_WATERMARK_MASK;
+		commit_flags |= watermark;
+	}
+
 	if (watermark < BCH_WATERMARK_reclaim &&
 	    journal_low_on_space(&c->journal)) {
 		if (commit_flags & BCH_TRANS_COMMIT_journal_reclaim)
@@ -1316,14 +1319,16 @@ bch2_btree_update_start(struct btree_trans *trans, struct btree_path *path,
 				      false,
 				      &devs_have,
 				      as->disk_res.nr_replicas,
+				      as->disk_res.nr_replicas,
 				      watermark,
-				      write_flags);
+				      write_flags,
+				      NULL);
 	ret = PTR_ERR_OR_ZERO(req);
 	if (ret)
 		goto err;
 
-	ret = bch2_btree_reserve_get(trans, as, nr_nodes, req, NULL);
-	if (bch2_err_matches(ret, ENOSPC) ||
+	ret = bch2_btree_reserve_get(trans, as, nr_nodes, req);
+	if (bch2_err_matches(ret, EAGAIN) ||
 	    bch2_err_matches(ret, ENOMEM)) {
 		/*
 		 * XXX: this should probably be a separate BTREE_INSERT_NONBLOCK
@@ -1337,14 +1342,24 @@ bch2_btree_update_start(struct btree_trans *trans, struct btree_path *path,
 		}
 
 		CLASS(closure_stack, cl)();
+		req->cl = &cl;
 
 		do {
-			ret = bch2_btree_reserve_get(trans, as, nr_nodes, req, &cl);
+			ret = bch2_btree_reserve_get(trans, as, nr_nodes, req);
 			if (!bch2_err_matches(ret, BCH_ERR_operation_blocked))
 				break;
 			bch2_trans_unlock(trans);
-			bch2_wait_on_allocator(c, &cl);
+			bch2_wait_on_allocator(c, req, ret, &cl);
 		} while (1);
+
+		/*
+		 * Don't block with btree locks held
+		 *
+		 * It would be nice if we could remove closures from waitlists
+		 * without waking up the waitlist:
+		 */
+		if (closure_nr_remaining(&cl) > 1)
+			bch2_trans_unlock(trans);
 	}
 
 	if (ret) {
@@ -1962,7 +1977,6 @@ int bch2_btree_split_leaf(struct btree_trans *trans,
 	unsigned l;
 	int ret = 0;
 
-	flags = btree_update_set_watermark_hipri(flags);
 
 	as = bch2_btree_update_start(trans, trans->paths + path,
 				     trans->paths[path].level,
@@ -2065,8 +2079,6 @@ int __bch2_foreground_maybe_merge(struct btree_trans *trans,
 	btree_path_idx_t sib_path = 0, new_path = 0;
 	u64 start_time = local_clock();
 	int ret = 0;
-
-	flags = btree_update_set_watermark_hipri(flags);
 
 	bch2_trans_verify_not_unlocked_or_in_restart(trans);
 	BUG_ON(!trans->paths[path].should_be_locked);
@@ -2738,12 +2750,6 @@ void bch2_btree_updates_to_text(struct printbuf *out, struct bch_fs *c)
 	guard(mutex)(&c->btree.interior_updates.lock);
 	list_for_each_entry(as, &c->btree.interior_updates.list, list)
 		bch2_btree_update_to_text(out, as);
-}
-
-static bool bch2_btree_interior_updates_pending(struct bch_fs *c)
-{
-	guard(mutex)(&c->btree.interior_updates.lock);
-	return !list_empty(&c->btree.interior_updates.list);
 }
 
 bool bch2_btree_interior_updates_flush(struct bch_fs *c)

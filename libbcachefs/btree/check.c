@@ -23,7 +23,7 @@
 #include "btree/journal_overlay.h"
 #include "btree/read.h"
 
-#include "data/ec.h"
+#include "data/ec/trigger.h"
 #include "data/extents.h"
 #include "data/keylist.h"
 #include "data/move.h"
@@ -827,7 +827,7 @@ static inline bool bch2_alloc_v4_cmp(struct bch_alloc_v4 l,
 		l.dirty_sectors	!= r.dirty_sectors	||
 		l.stripe_sectors != r.stripe_sectors	||
 		l.cached_sectors != r.cached_sectors	 ||
-		l.stripe != r.stripe;
+		l.stripe_refcount != r.stripe_refcount;
 }
 
 static int bch2_alloc_write_key(struct btree_trans *trans,
@@ -901,7 +901,7 @@ static int bch2_alloc_write_key(struct btree_trans *trans,
 	copy_bucket_field(alloc_key_dirty_sectors_wrong,	dirty_sectors);
 	copy_bucket_field(alloc_key_stripe_sectors_wrong,	stripe_sectors);
 	copy_bucket_field(alloc_key_cached_sectors_wrong,	cached_sectors);
-	copy_bucket_field(alloc_key_stripe_wrong,		stripe);
+	copy_bucket_field(alloc_key_stripe_wrong,		stripe_refcount);
 #undef copy_bucket_field
 
 	if (!bch2_alloc_v4_cmp(*old, new))
@@ -1057,6 +1057,8 @@ int bch2_check_allocations(struct bch_fs *c)
 		bch2_gc_reflink_done(c);
 out:
 	scoped_guard(percpu_write, &c->capacity.mark_lock) {
+		guard(memalloc_flags)(PF_MEMALLOC_NOFS);
+
 		/* Indicates that gc is no longer in progress: */
 		__gc_pos_set(c, gc_phase(GC_PHASE_not_running));
 		bch2_gc_free(c);
@@ -1180,6 +1182,7 @@ int bch2_gc_gens(struct bch_fs *c)
 	event_inc_trace(c, gc_gens_end, buf);
 
 	if (!(c->sb.compat & BIT_ULL(BCH_COMPAT_no_stale_ptrs))) {
+		guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 		guard(mutex)(&c->sb_lock);
 		c->disk_sb.sb->compat[0] |= cpu_to_le64(BIT_ULL(BCH_COMPAT_no_stale_ptrs));
 		bch2_write_super(c);

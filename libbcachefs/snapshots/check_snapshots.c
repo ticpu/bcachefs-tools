@@ -72,7 +72,7 @@ static int bch2_snapshot_tree_master_subvol(struct btree_trans *trans,
 			continue;
 
 		struct bkey_s_c_subvolume s = bkey_s_c_to_subvolume(k);
-		if (!bch2_snapshot_is_ancestor(c, le32_to_cpu(s.v->snapshot), snapshot_root))
+		if (!bch2_snapshot_is_ancestor(trans, le32_to_cpu(s.v->snapshot), snapshot_root))
 			continue;
 		if (!BCH_SUBVOLUME_SNAP(s.v)) {
 			*subvol_id = s.k->p.offset;
@@ -141,7 +141,7 @@ static int check_snapshot_tree(struct btree_trans *trans,
 			"snapshot tree points to missing subvolume:\n%s",
 			(printbuf_reset(&buf),
 			 bch2_bkey_val_to_text(&buf, c, st.s_c), buf.buf)) ||
-	    fsck_err_on(!bch2_snapshot_is_ancestor(c,
+	    fsck_err_on(!bch2_snapshot_is_ancestor(trans,
 						le32_to_cpu(subvol.snapshot),
 						root_id),
 			trans, snapshot_tree_to_wrong_subvol,
@@ -233,8 +233,7 @@ static int snapshot_tree_ptr_repair(struct btree_trans *trans,
 	struct bch_fs *c = trans->c;
 	u32 root_id = bch2_snapshot_root(c, k.k->p.offset);
 
-	CLASS(btree_iter, root_iter)(trans, BTREE_ID_snapshots, POS(0, root_id),
-				     BTREE_ITER_with_updates);
+	CLASS(btree_iter, root_iter)(trans, BTREE_ID_snapshots, POS(0, root_id), 0);
 	struct bkey_s_c_snapshot root = bkey_try(bch2_bkey_get_typed(&root_iter, snapshot));
 
 	u32 tree_id = le32_to_cpu(root.v->tree);
@@ -513,17 +512,6 @@ static inline bool snapshot_id_lists_have_common(snapshot_id_list *l, snapshot_i
 	return darray_find_p(*l, i, snapshot_list_has_id(r, *i)) != NULL;
 }
 
-static void snapshot_id_list_to_text(struct printbuf *out, snapshot_id_list *s)
-{
-	bool first = true;
-	darray_for_each(*s, i) {
-		if (!first)
-			prt_char(out, ' ');
-		first = false;
-		prt_printf(out, "%u", *i);
-	}
-}
-
 static int snapshot_tree_reconstruct_next(struct bch_fs *c, struct snapshot_tree_reconstruct *r)
 {
 	if (r->cur_ids.nr) {
@@ -574,7 +562,7 @@ int bch2_reconstruct_snapshots(struct bch_fs *c)
 
 	darray_for_each(r.trees, t) {
 		printbuf_reset(&buf);
-		snapshot_id_list_to_text(&buf, t);
+		bch2_snapshot_id_list_to_text(&buf, t);
 
 		darray_for_each(*t, id) {
 			if (fsck_err_on(bch2_snapshot_id_state(c, *id) == SNAPSHOT_ID_empty,
@@ -602,6 +590,10 @@ int __bch2_check_key_has_snapshot(struct btree_trans *trans,
 	CLASS(printbuf, buf)();
 	int ret = 0;
 	enum snapshot_id_state state = bch2_snapshot_id_state(c, k.k->p.snapshot);
+
+	/* promote path - can't do repair */
+	if (!iter)
+		return 1;
 
 	/* Snapshot was definitively deleted, this error is marked autofix */
 	if (fsck_err_on(state == SNAPSHOT_ID_deleted,

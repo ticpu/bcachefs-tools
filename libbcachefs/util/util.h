@@ -56,6 +56,8 @@ static inline struct bio_vec *bio_inline_vecs(struct bio *bio)
 }
 #endif
 
+DEFINE_FREE(bio_put, struct bio *, if (_T) bio_put(_T))
+
 /* Userspace doesn't align allocations as nicely as the kernel allocators: */
 static inline size_t buf_pages(void *p, size_t len)
 {
@@ -245,6 +247,8 @@ static inline void prt_bdevname(struct printbuf *out, struct block_device *bdev)
 }
 
 void bch2_time_stats_to_text(struct printbuf *, struct bch2_time_stats *);
+void bch2_time_stats_json_to_text(struct printbuf *, struct bch2_time_stats *,
+				  const char *epoch_name, unsigned int flags);
 
 #define ewma_add(ewma, val, weight)					\
 ({									\
@@ -822,6 +826,26 @@ DEFINE_CLASS(memalloc_flags, struct memalloc_flags,
 	     memalloc_flags_restore(_T.flags),
 	     (struct memalloc_flags) { memalloc_flags_save(_flags) },
 	     unsigned _flags)
+__DEFINE_CLASS_IS_CONDITIONAL(memalloc_flags, false);
 
+static inline void *class_memalloc_flags_lock_ptr(class_memalloc_flags_t *_T)
+{
+	return _T;
+}
+
+#if !defined(__KERNEL__) || LINUX_VERSION_CODE >= KERNEL_VERSION(6,19,0)
+void *mempool_kvmalloc(gfp_t gfp_mask, void *pool_data);
+void mempool_kvfree(void *element, void *pool_data);
+
+static inline int mempool_init_kvmalloc_pool(mempool_t *pool, int min_nr, size_t size)
+{
+        return mempool_init(pool, min_nr, mempool_kvmalloc, mempool_kvfree, (void *) size);
+}
+
+static inline mempool_t *mempool_create_kvmalloc_pool(int min_nr, size_t size)
+{
+        return mempool_create(min_nr, mempool_kvmalloc, mempool_kvfree, (void *) size);
+}
+#endif
 
 #endif /* _BCACHEFS_UTIL_H */

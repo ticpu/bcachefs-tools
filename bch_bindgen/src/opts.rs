@@ -39,7 +39,7 @@ macro_rules! opt_get {
 }
 
 pub fn parse_mount_opts(fs: Option<&mut Fs>, optstr: Option<&str>, ignore_unknown: bool)
-        -> Result<c::bch_opts, c::bch_errcode> {
+        -> Result<c::bch_opts, crate::errcode::BchError> {
     let mut opts: c::bch_opts = Default::default();
 
     if let Some(optstr) = optstr {
@@ -57,8 +57,7 @@ pub fn parse_mount_opts(fs: Option<&mut Fs>, optstr: Option<&str>, ignore_unknow
         drop(optstr);
 
         if ret != 0 {
-            let err: c::bch_errcode = unsafe { std::mem::transmute(-ret) };
-            return Err(err);
+            return Err(crate::errcode::BchError::from_raw(-ret));
         }
     }
     Ok(opts)

@@ -109,4 +109,9 @@ static inline size_t list_count_nodes(struct list_head *head)
 	return count;
 }
 
+static inline int list_is_last(const struct list_head *list, const struct list_head *head)
+{
+	return list->next == head;
+}
+
 #endif /* _LIST_LIST_H */

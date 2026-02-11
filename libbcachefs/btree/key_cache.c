@@ -165,9 +165,10 @@ bkey_cached_alloc(struct btree_trans *trans, struct btree_path *path, unsigned k
 	ck = allocate_dropping_locks(trans, ret,
 				     __bkey_cached_alloc(key_u64s, _gfp));
 	if (ret) {
-		if (ck)
+		if (ck) {
 			kfree(ck->k);
-		kmem_cache_free(bch2_key_cache, ck);
+			kmem_cache_free(bch2_key_cache, ck);
+		}
 		return ERR_PTR(ret);
 	}
 
@@ -233,7 +234,7 @@ static int btree_key_cache_create(struct btree_trans *trans,
 	} else {
 		ck = bkey_cached_reuse(bc);
 		if (unlikely(!ck)) {
-			bch_err(c, "error allocating memory for key cache item, btree %s",
+			bch_err_ratelimited(c, "error allocating memory for key cache item, btree %s",
 				bch2_btree_id_str(ck_path->btree_id));
 			return bch_err_throw(c, ENOMEM_btree_key_cache_create);
 		}
@@ -252,7 +253,7 @@ static int btree_key_cache_create(struct btree_trans *trans,
 		struct bkey_i *new_k = allocate_dropping_locks(trans, ret,
 				kmalloc(key_u64s * sizeof(u64), _gfp));
 		if (unlikely(!new_k && !ret)) {
-			bch_err(trans->c, "error allocating memory for key cache key, btree %s u64s %u",
+			bch_err_ratelimited(trans->c, "error allocating memory for key cache key, btree %s u64s %u",
 				bch2_btree_id_str(ck->key.btree_id), key_u64s);
 			ret = bch_err_throw(c, ENOMEM_btree_key_cache_fill);
 		}
@@ -450,6 +451,8 @@ static int btree_key_cache_flush_pos(struct btree_trans *trans,
 		 */
 		if (ck->journal.seq == j->last_seq)
 			commit_flags |= BCH_WATERMARK_reclaim;
+		else
+			commit_flags |= BCH_WATERMARK_btree;
 
 		if (ck->journal.seq != j->last_seq ||
 		    !journal_low_on_space(&c->journal))

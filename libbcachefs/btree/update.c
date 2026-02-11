@@ -107,7 +107,7 @@ static int need_whiteout_for_snapshot(struct btree_trans *trans,
 		if (!bkey_eq(k.k->p, pos))
 			break;
 
-		if (bch2_snapshot_is_ancestor(trans->c, snapshot,
+		if (bch2_snapshot_is_ancestor(trans, snapshot,
 					      k.k->p.snapshot)) {
 			ret = !bkey_whiteout(k.k);
 			break;
@@ -121,37 +121,26 @@ int __bch2_insert_snapshot_whiteouts(struct btree_trans *trans,
 				     enum btree_id btree, struct bpos pos,
 				     snapshot_id_list *s)
 {
-	int ret = 0;
-
 	darray_for_each(*s, id) {
 		pos.snapshot = *id;
 
 		CLASS(btree_iter, iter)(trans, btree, pos, BTREE_ITER_not_extents|BTREE_ITER_intent);
-		struct bkey_s_c k = bch2_btree_iter_peek_slot(&iter);
-		ret = bkey_err(k);
-		if (ret)
-			break;
+		struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_slot(&iter));
 
 		if (k.k->type == KEY_TYPE_deleted) {
-			struct bkey_i *update = bch2_trans_kmalloc(trans, sizeof(struct bkey_i));
-			ret = PTR_ERR_OR_ZERO(update);
-			if (ret)
-				break;
+			struct bkey_i *update =
+				errptr_try(bch2_trans_kmalloc(trans, sizeof(struct bkey_i)));
 
 			bkey_init(&update->k);
 			update->k.p		= pos;
 			update->k.type		= KEY_TYPE_whiteout;
 
-			ret = bch2_trans_update(trans, &iter, update,
-						BTREE_UPDATE_internal_snapshot_node);
+			try(bch2_trans_update(trans, &iter, update,
+					      BTREE_UPDATE_internal_snapshot_node));
 		}
-
-		if (ret)
-			break;
 	}
 
-	darray_exit(s);
-	return ret;
+	return 0;
 }
 
 int bch2_trans_update_extent_overwrite(struct btree_trans *trans,
@@ -243,7 +232,6 @@ static int bch2_trans_update_extent(struct btree_trans *trans,
 
 	CLASS(btree_iter, iter)(trans, btree_id, bkey_start_pos(&insert->k),
 				BTREE_ITER_intent|
-				BTREE_ITER_with_updates|
 				BTREE_ITER_not_extents|
 				BTREE_ITER_nofilter_whiteouts);
 	struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_max(&iter, POS(insert->k.p.inode, U64_MAX)));
@@ -574,7 +562,7 @@ void *__bch2_trans_subbuf_alloc(struct btree_trans *trans,
 int bch2_bkey_get_empty_slot(struct btree_trans *trans, struct btree_iter *iter,
 			     enum btree_id btree, struct bpos start, struct bpos end)
 {
-	bch2_trans_iter_init(trans, iter, btree, end, BTREE_ITER_intent|BTREE_ITER_with_updates);
+	bch2_trans_iter_init(trans, iter, btree, end, BTREE_ITER_intent);
 	struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_prev(iter));
 
 	if (bpos_lt(iter->pos, start))
