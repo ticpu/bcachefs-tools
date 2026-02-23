@@ -23,6 +23,19 @@ struct bch_csum rust_csum_vstruct_sb(struct bch_sb *sb);
  */
 int rust_fmt_build_fs(struct bch_fs *c, const char *src_path);
 
+/*
+ * copy_fs shim for migrate — constructs copy_fs_state from flat parameters
+ * so Rust doesn't need to deal with rhashtable or darray internals.
+ */
+struct range;
+int rust_migrate_copy_fs(struct bch_fs *c,
+			 int src_fd,
+			 const char *fs_path,
+			 __u64 bcachefs_inum,
+			 dev_t dev,
+			 struct range *extent_array,
+			 size_t nr_extents,
+			 __u64 reserve_start);
 
 /*
  * Strip alloc info from a clean filesystem: removes alloc btree roots
@@ -83,20 +96,6 @@ int rust_bdev_open(struct dev_opts *dev, unsigned int mode);
 void rust_set_bit(unsigned long nr, unsigned long *addr);
 
 /*
- * copy_fs shim for migrate — constructs copy_fs_state from flat parameters
- * so Rust doesn't need to deal with rhashtable or darray internals.
- */
-struct range;
-int rust_migrate_copy_fs(struct bch_fs *c,
-			 int src_fd,
-			 const char *fs_path,
-			 __u64 bcachefs_inum,
-			 dev_t dev,
-			 struct range *extent_array,
-			 size_t nr_extents,
-			 __u64 reserve_start);
-
-/*
  * Device reference shims — wraps static inline bch2_dev_tryget_noerror()
  * and bch2_dev_put() for Rust.
  */
@@ -124,5 +123,15 @@ int rust_read_data(struct bch_fs *c,
 		   __u64 inum, __u32 subvol,
 		   __u64 offset,
 		   void *buf, size_t len);
+
+/*
+ * Extent construction for migrate — wraps bkey_extent_init,
+ * bch2_bkey_append_ptr, bucket_gen, bch2_disk_reservation_get/put,
+ * bch2_btree_insert. All static inlines or macro-generated,
+ * not available through bindgen.
+ */
+int rust_link_data(struct bch_fs *c,
+		   __u64 dst_inum, __s64 *sectors_delta,
+		   __u64 logical, __u64 physical, __u64 length);
 
 #endif /* _RUST_SHIMS_H */

@@ -21,15 +21,10 @@
 #include "libbcachefs/journal/journal.h"
 #include "libbcachefs/sb/clean.h"
 #include "libbcachefs/alloc/foreground.h"
+#include "libbcachefs/btree/update.h"
+#include "libbcachefs/data/extents.h"
 #include "posix_to_bcachefs.h"
 #include "rust_shims.h"
-
-struct bch_csum rust_csum_vstruct_sb(struct bch_sb *sb)
-{
-	struct nonce nonce = { 0 };
-
-	return csum_vstruct(NULL, BCH_SB_CSUM_TYPE(sb), nonce, sb);
-}
 
 int rust_fmt_build_fs(struct bch_fs *c, const char *src_path)
 {
@@ -41,6 +36,13 @@ int rust_fmt_build_fs(struct bch_fs *c, const char *src_path)
 	int ret = copy_fs(c, &s, src_fd, src_path);
 	close(src_fd);
 	return ret;
+}
+
+struct bch_csum rust_csum_vstruct_sb(struct bch_sb *sb)
+{
+	struct nonce nonce = { 0 };
+
+	return csum_vstruct(NULL, BCH_SB_CSUM_TYPE(sb), nonce, sb);
 }
 
 
@@ -148,7 +150,6 @@ int rust_bset_decrypt(struct bch_fs *c, struct bset *i, unsigned offset)
 	return bset_encrypt(c, i, offset);
 }
 
-/* copy_fs shim for migrate — constructs copy_fs_state from flat parameters */
 
 int rust_migrate_copy_fs(struct bch_fs *c,
 			 int src_fd,
@@ -300,4 +301,73 @@ int rust_read_data(struct bch_fs *c,
 	closure_sync(&cl);
 
 	return rbio.ret;
+}
+
+/*
+ * Extent construction for migrate — creates bkey extents pointing at
+ * existing on-disk data. Handles bucket boundary splitting, generation
+ * numbers, disk reservations, and btree insertion.
+ *
+ * All byte offsets; returns 0 on success. Updates *sectors_delta with
+ * the total sectors linked.
+ */
+int rust_link_data(struct bch_fs *c,
+		   u64 dst_inum, s64 *sectors_delta,
+		   u64 logical, u64 physical, u64 length)
+{
+	struct bch_dev *ca = c->devs[0];
+
+	BUG_ON(logical	& (block_bytes(c) - 1));
+	BUG_ON(physical & (block_bytes(c) - 1));
+	BUG_ON(length	& (block_bytes(c) - 1));
+
+	logical		>>= 9;
+	physical	>>= 9;
+	length		>>= 9;
+
+	BUG_ON(physical + length > bucket_to_sector(ca, ca->mi.nbuckets));
+
+	*sectors_delta = 0;
+
+	while (length) {
+		struct bkey_i_extent *e;
+		BKEY_PADDED_ONSTACK(k, BKEY_EXTENT_VAL_U64s_MAX) k;
+		u64 b = sector_to_bucket(ca, physical);
+		struct disk_reservation res;
+		unsigned sectors;
+		int ret;
+
+		sectors = min(ca->mi.bucket_size -
+			      (physical & (ca->mi.bucket_size - 1)),
+			      length);
+
+		e = bkey_extent_init(&k.k);
+		e->k.p.inode	= dst_inum;
+		e->k.p.offset	= logical + sectors;
+		e->k.p.snapshot	= U32_MAX;
+		e->k.size	= sectors;
+		bch2_bkey_append_ptr(c, &e->k_i, (struct bch_extent_ptr) {
+					.offset = physical,
+					.dev = 0,
+					.gen = *bucket_gen(ca, b),
+				  });
+
+		ret = bch2_disk_reservation_get(c, &res, sectors, 1,
+						BCH_DISK_RESERVATION_NOFAIL);
+		if (ret)
+			return ret;
+
+		ret = bch2_btree_insert(c, BTREE_ID_extents, &e->k_i, &res, 0, 0);
+		bch2_disk_reservation_put(c, &res);
+
+		if (ret)
+			return ret;
+
+		*sectors_delta	+= sectors;
+		logical		+= sectors;
+		physical	+= sectors;
+		length		-= sectors;
+	}
+
+	return 0;
 }
