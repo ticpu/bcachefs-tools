@@ -26,7 +26,7 @@
 #include "sb/io.h"
 
 #include "alloc/disk_groups.h"
-#include "cmds.h"
+#include "tools-util.h"
 #include "crypto.h"
 #include "libbcachefs.h"
 #include "raid/raid.h"

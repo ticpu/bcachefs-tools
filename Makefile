@@ -144,7 +144,6 @@ tags:
 	ctags -R .
 
 SRCS:=$(sort $(shell find . -type f ! -path '*/.*/*' -iname '*.c'))
-SRCS:=$(filter-out ./c_src/cmd_fusemount.c,$(SRCS))
 DEPS:=$(SRCS:.c=.d)
 -include $(DEPS)
 
