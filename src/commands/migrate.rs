@@ -2,8 +2,7 @@
 //
 // bcachefs migrate — convert an existing filesystem to bcachefs in place.
 //
-// Reimplements c_src/cmd_migrate.c in Rust. The heavy lifting (copy_fs)
-// remains in C (posix_to_bcachefs.c) and is reached via a shim.
+// Reimplements c_src/cmd_migrate.c in Rust.
 
 use std::ffi::{CString, c_char, c_ulong};
 use std::fs;
@@ -28,16 +27,6 @@ use crate::wrappers::super_io;
 extern "C" {
     fn rust_bdev_open(dev: *mut c::dev_opts, mode: c::blk_mode_t) -> i32;
     fn rust_set_bit(nr: c_ulong, addr: *mut c_ulong);
-    fn rust_migrate_copy_fs(
-        c: *mut c::bch_fs,
-        src_fd: i32,
-        fs_path: *const c_char,
-        bcachefs_inum: u64,
-        dev: libc::dev_t,
-        extent_array: *const CRange,
-        nr_extents: usize,
-        reserve_start: u64,
-    ) -> i32;
 }
 
 use fiemap::FiemapExtentFlags;
@@ -462,25 +451,22 @@ fn migrate_fs(
         .div_ceil(bucket_bytes)) * bucket_bytes;
 
     // Copy the filesystem tree
-    let ret = unsafe {
-        rust_migrate_copy_fs(
-            fs.raw,
-            fs_fd,
-            fs_path_cstr.as_ptr(),
-            bcachefs_inum,
-            stat.st_dev,
-            extents.as_ptr(),
-            extents.len(),
-            reserve_start,
-        )
-    };
+    let mut s = crate::copy_fs::CopyFsState::new_migrate(
+        bcachefs_inum,
+        stat.st_dev,
+        reserve_start,
+    );
+    // Pre-populate with metadata reservation ranges
+    for e in &extents {
+        s.extents.push((e.start, e.end));
+    }
+
+    let copy_ret = crate::copy_fs::copy_fs(&fs, &mut s, fs_fd, &fs_path_cstr);
 
     let exit_ret = fs.exit();
     unsafe { libc::close(fs_fd) };
 
-    if ret != 0 {
-        bail!("Error copying filesystem (ret={})", ret);
-    }
+    copy_ret.map_err(|e| anyhow!("Error copying filesystem: {}", e))?;
     if exit_ret != 0 {
         bail!("Error closing filesystem (ret={})", exit_ret);
     }

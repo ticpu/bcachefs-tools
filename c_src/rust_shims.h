@@ -18,26 +18,6 @@ struct bch_csum;
 struct bch_csum rust_csum_vstruct_sb(struct bch_sb *sb);
 
 /*
- * Wrapper around copy_fs() for format --source: opens src_path,
- * creates a zeroed copy_fs_state, and copies the directory tree.
- */
-int rust_fmt_build_fs(struct bch_fs *c, const char *src_path);
-
-/*
- * copy_fs shim for migrate — constructs copy_fs_state from flat parameters
- * so Rust doesn't need to deal with rhashtable or darray internals.
- */
-struct range;
-int rust_migrate_copy_fs(struct bch_fs *c,
-			 int src_fd,
-			 const char *fs_path,
-			 __u64 bcachefs_inum,
-			 dev_t dev,
-			 struct range *extent_array,
-			 size_t nr_extents,
-			 __u64 reserve_start);
-
-/*
  * Strip alloc info from a clean filesystem: removes alloc btree roots
  * from the clean section, replicas, and journal fields.
  */
@@ -153,13 +133,5 @@ int rust_link_data(struct bch_fs *c,
 struct bpos;
 void rust_accounting_mem_read(struct bch_fs *c, struct bpos p,
 			      __u64 *v, unsigned nr);
-
-/*
- * copy_fs shim — wraps C copy_fs (posix_to_bcachefs.c) with a simpler
- * interface for Rust. Allocates copy_fs_state on the stack.
- * Removed when image command switches to Rust copy_fs.
- */
-int rust_copy_fs(struct bch_fs *c, int src_fd,
-		 const char *src_path, unsigned verbosity);
 
 #endif /* _RUST_SHIMS_H */

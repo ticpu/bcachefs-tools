@@ -1,4 +1,5 @@
 mod commands;
+mod copy_fs;
 mod key;
 mod dump_stack;
 mod logging;

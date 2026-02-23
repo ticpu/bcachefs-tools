@@ -24,20 +24,7 @@
 #include "libbcachefs/btree/update.h"
 #include "libbcachefs/data/extents.h"
 #include "libbcachefs/alloc/accounting.h"
-#include "posix_to_bcachefs.h"
 #include "rust_shims.h"
-
-int rust_fmt_build_fs(struct bch_fs *c, const char *src_path)
-{
-	struct copy_fs_state s = {};
-	int src_fd = open(src_path, O_RDONLY|O_NOATIME);
-	if (src_fd < 0)
-		return -errno;
-
-	int ret = copy_fs(c, &s, src_fd, src_path);
-	close(src_fd);
-	return ret;
-}
 
 struct bch_csum rust_csum_vstruct_sb(struct bch_sb *sb)
 {
@@ -151,33 +138,6 @@ int rust_bset_decrypt(struct bch_fs *c, struct bset *i, unsigned offset)
 	return bset_encrypt(c, i, offset);
 }
 
-
-int rust_migrate_copy_fs(struct bch_fs *c,
-			 int src_fd,
-			 const char *fs_path,
-			 u64 bcachefs_inum,
-			 dev_t dev,
-			 struct range *extent_array,
-			 size_t nr_extents,
-			 u64 reserve_start)
-{
-	ranges extents = {};
-
-	for (size_t i = 0; i < nr_extents; i++)
-		darray_push(&extents, extent_array[i]);
-
-	struct copy_fs_state s = {
-		.bcachefs_inum	= bcachefs_inum,
-		.dev		= dev,
-		.extents	= extents,
-		.type		= BCH_MIGRATE_migrate,
-		.reserve_start	= reserve_start,
-	};
-
-	BUG_ON(!s.reserve_start);
-
-	return copy_fs(c, &s, src_fd, fs_path);
-}
 
 /* Open a block device without blkid probe (for migrate, not format) */
 
@@ -326,7 +286,15 @@ int rust_link_data(struct bch_fs *c,
 		if (ret)
 			return ret;
 
-		ret = bch2_btree_insert(c, BTREE_ID_extents, &e->k_i, &res, 0, 0);
+		CLASS(btree_trans, trans)(c);
+
+		struct bch_inode_opts opts;
+		ret = commit_do(trans, &res, NULL, 0, ({
+			bch2_bkey_get_io_opts(trans, NULL, bkey_i_to_s_c(&e->k_i), &opts) ?:
+			bch2_bkey_set_needs_reconcile(trans, NULL, &opts, &e->k_i,
+						      SET_NEEDS_RECONCILE_opt_change, 0) ?:
+			bch2_btree_insert(c, BTREE_ID_extents, &e->k_i, &res, 0, 0);
+		}));
 		bch2_disk_reservation_put(c, &res);
 
 		if (ret)
@@ -347,14 +315,4 @@ void rust_accounting_mem_read(struct bch_fs *c, struct bpos p,
 			      u64 *v, unsigned nr)
 {
 	bch2_accounting_mem_read(c, p, v, nr);
-}
-
-/* copy_fs shim — wraps C copy_fs with a simpler interface for Rust.
- * Removed when image command switches to Rust copy_fs. */
-
-int rust_copy_fs(struct bch_fs *c, int src_fd,
-		 const char *src_path, unsigned verbosity)
-{
-	struct copy_fs_state s = { .verbosity = verbosity };
-	return copy_fs(c, &s, src_fd, src_path);
 }

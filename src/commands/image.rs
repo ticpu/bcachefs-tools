@@ -13,9 +13,7 @@ use anyhow::{anyhow, bail, Result};
 use bch_bindgen::accounting::DiskAccountingKind;
 use bch_bindgen::btree::{BtreeIter, BtreeTrans, lockrestart_do};
 use bch_bindgen::c;
-extern "C" {
-    fn rust_copy_fs(c: *mut c::bch_fs, src_fd: i32, src_path: *const c_char, verbosity: u32) -> i32;
-}
+use crate::copy_fs::{CopyFsState, copy_fs};
 use bch_bindgen::data::moving::MovingContext;
 use bch_bindgen::fs::{Fs, btree_id_is_alloc, bucket_bytes, bucket_to_sector, dev_to_target,
                       writepoint_hashed};
@@ -554,6 +552,8 @@ fn image_create_inner(
     fs.start().map_err(|e| anyhow!("starting fs: {}", e))?;
 
     let src_cstr = CString::new(src_path)?;
+    let mut state = CopyFsState::new_copy();
+    state.verbosity = verbosity;
 
     let src_fd = unsafe { libc::open(src_cstr.as_ptr(), libc::O_RDONLY) };
     if src_fd < 0 {
@@ -561,10 +561,8 @@ fn image_create_inner(
     }
 
     let result = (|| -> Result<()> {
-        let ret = unsafe { rust_copy_fs(fs.raw, src_fd, src_cstr.as_ptr(), verbosity) };
-        if ret != 0 {
-            bail!("syncing data: {}", std::io::Error::from_raw_os_error(-ret));
-        }
+        copy_fs(&fs, &mut state, src_fd, &src_cstr)
+            .map_err(|e| anyhow!("syncing data: {}", e))?;
         finish_image(&fs, keep_alloc, verbosity)?;
         Ok(())
     })();
@@ -697,6 +695,8 @@ fn image_update_inner(
     }
 
     let src_cstr = CString::new(src_path)?;
+    let mut state = CopyFsState::new_copy();
+    state.verbosity = verbosity;
 
     let src_fd = unsafe { libc::open(src_cstr.as_ptr(), libc::O_RDONLY) };
     if src_fd < 0 {
@@ -704,10 +704,8 @@ fn image_update_inner(
     }
 
     let result = (|| -> Result<()> {
-        let ret = unsafe { rust_copy_fs(fs.raw, src_fd, src_cstr.as_ptr(), verbosity) };
-        if ret != 0 {
-            bail!("syncing data: {}", std::io::Error::from_raw_os_error(-ret));
-        }
+        copy_fs(&fs, &mut state, src_fd, &src_cstr)
+            .map_err(|e| anyhow!("syncing data: {}", e))?;
         finish_image(&fs, keep_alloc, verbosity)?;
         Ok(())
     })();
