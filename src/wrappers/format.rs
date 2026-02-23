@@ -539,14 +539,14 @@ pub fn check_bucket_size(opts: &c::bch_opts, dev: &c::dev_opts) {
     }
 }
 
-/// C-compatible wrapper for cmd_migrate.c.
+/// C-compatible wrapper.
 #[no_mangle]
 pub extern "C" fn bch2_pick_bucket_size(opts: c::bch_opts, devs: c::dev_opts_list) -> u64 {
     let dev_slice = unsafe { std::slice::from_raw_parts(devs.data, devs.nr) };
     pick_bucket_size(&opts, dev_slice)
 }
 
-/// C-compatible wrapper for cmd_migrate.c.
+/// C-compatible wrapper.
 #[no_mangle]
 pub extern "C" fn bch2_check_bucket_size(opts: c::bch_opts, dev: *mut c::dev_opts) {
     check_bucket_size(&opts, unsafe { &*dev });

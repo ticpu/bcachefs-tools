@@ -100,6 +100,7 @@ dependencies = [
  "either",
  "env_logger",
  "errno",
+ "fiemap",
  "fuser",
  "libc",
  "log",
@@ -339,6 +340,15 @@ checksum = "534c5cf6194dfab3db3242765c03bbe257cf92f22b38f6bc0c58d59108a820ba"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "fiemap"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d478c866a54b882388a2a3eb441e7ab6feb6348b174284fd95f23fa47cb46441"
+dependencies = [
+ "bitflags 2.11.0",
 ]
 
 [[package]]

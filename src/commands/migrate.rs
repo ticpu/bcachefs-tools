@@ -1,29 +1,310 @@
-use std::ffi::{CString, c_char};
-use std::process;
+// SPDX-License-Identifier: GPL-2.0
+//
+// bcachefs migrate — convert an existing filesystem to bcachefs in place.
+//
+// Reimplements c_src/cmd_migrate.c in Rust. The heavy lifting (copy_fs)
+// remains in C (posix_to_bcachefs.c) and is reached via a shim.
+
+use std::ffi::{CString, c_char, c_ulong};
+use std::fs;
+use std::io;
+use std::os::fd::BorrowedFd;
+use std::os::unix::io::RawFd;
 
 use anyhow::{anyhow, bail, Result};
 use bch_bindgen::c;
+use bch_bindgen::fs::Fs;
+use bch_bindgen::opt_set;
 use clap::Parser;
 
 use crate::commands::format::take_opt_value;
 use crate::commands::opts::{bch_opt_lookup, parse_opt_val};
 use crate::key::Passphrase;
 use crate::wrappers::format::format_opts_default;
+use crate::wrappers::super_io;
+
+// ---- C shim declarations ----
 
 extern "C" {
-    fn rust_migrate_fs(
+    fn rust_bdev_open(dev: *mut c::dev_opts, mode: c::blk_mode_t) -> i32;
+    fn rust_set_bit(nr: c_ulong, addr: *mut c_ulong);
+    fn rust_migrate_copy_fs(
+        c: *mut c::bch_fs,
+        src_fd: i32,
         fs_path: *const c_char,
-        fs_opt_strs: c::bch_opt_strs,
-        fs_opts: c::bch_opts,
-        format_opts: c::format_opts,
-        force: bool,
-    ) -> i32;
-
-    fn rust_migrate_superblock(
-        dev_path: *const c_char,
-        sb_offset: u64,
+        bcachefs_inum: u64,
+        dev: libc::dev_t,
+        extent_array: *const CRange,
+        nr_extents: usize,
+        reserve_start: u64,
     ) -> i32;
 }
+
+use fiemap::FiemapExtentFlags;
+
+/// Iterate over physical extents of a file via FIEMAP ioctl.
+fn fiemap_iter(fd: RawFd) -> Result<Vec<CRange>> {
+    let bad_flags = FiemapExtentFlags::UNKNOWN
+        | FiemapExtentFlags::ENCODED
+        | FiemapExtentFlags::NOT_ALIGNED
+        | FiemapExtentFlags::DATA_INLINE;
+
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let mut ranges = Vec::new();
+
+    for extent in fiemap::Fiemap::new(borrowed) {
+        let e = extent?;
+        if e.fe_flags.intersects(bad_flags) {
+            bail!("Unable to continue: metadata file not fully mapped");
+        }
+        ranges.push(CRange { start: e.fe_physical, end: e.fe_physical + e.fe_length });
+    }
+
+    ranges_sort_merge(&mut ranges);
+    Ok(ranges)
+}
+
+// ---- Range utilities ----
+
+/// Matches the C `struct range { u64 start; u64 end; }`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CRange {
+    start: u64,
+    end:   u64,
+}
+
+fn ranges_sort_merge(ranges: &mut Vec<CRange>) {
+    ranges.sort_by_key(|r| r.start);
+    let mut merged = Vec::with_capacity(ranges.len());
+    for r in ranges.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            let last: &mut CRange = last;
+            if last.end >= r.start {
+                last.end = last.end.max(r.end);
+                continue;
+            }
+        }
+        merged.push(r);
+    }
+    *ranges = merged;
+}
+
+/// Iterate over holes in the range [0, max) not covered by `ranges`.
+/// `ranges` must be sorted and non-overlapping.
+fn for_each_hole(ranges: &[CRange], max: u64) -> Vec<CRange> {
+    let mut holes = Vec::new();
+    let mut pos = 0u64;
+    for r in ranges {
+        if r.start > pos {
+            holes.push(CRange { start: pos, end: r.start });
+        }
+        pos = r.end;
+    }
+    if pos < max {
+        holes.push(CRange { start: pos, end: max });
+    }
+    holes
+}
+
+// ---- Utility functions ----
+
+/// Resolve a dev_t to a device path via /sys/dev/block/.
+fn dev_t_to_path(dev: libc::dev_t) -> Result<String> {
+    let major = libc::major(dev);
+    let minor = libc::minor(dev);
+    let sysfs = format!("/sys/dev/block/{}:{}", major, minor);
+
+    let link = fs::read_link(&sysfs)
+        .map_err(|e| anyhow!("readlink error looking up block device {}: {}", sysfs, e))?;
+
+    let name = link.file_name()
+        .ok_or_else(|| anyhow!("error looking up device name from {}", link.display()))?;
+
+    Ok(format!("/dev/{}", name.to_string_lossy()))
+}
+
+/// Check if a path is a filesystem mount point.
+fn path_is_fs_root(path: &str) -> Result<bool> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|e| anyhow!("Error reading mount information: {}", e))?;
+
+    for line in mountinfo.lines() {
+        // Fields: mount_id parent_id dev root mount_point ...
+        let mut fields = line.split(' ');
+        let _mount_id = fields.next();
+        let _parent_id = fields.next();
+        let _dev = fields.next();
+        let _root = fields.next();
+        if let Some(mount_point) = fields.next() {
+            if mount_point == path {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// sector_to_bucket: sector / bucket_size
+fn sector_to_bucket(bucket_size: u32, sector: u64) -> u64 {
+    sector / bucket_size as u64
+}
+
+/// bucket_to_sector: bucket * bucket_size
+fn bucket_to_sector(bucket_size: u32, bucket: u64) -> u64 {
+    bucket * bucket_size as u64
+}
+
+/// Mark a range of buckets as nouse.
+unsafe fn mark_nouse_range(ca: *const c::bch_dev, sector_from: u64, sector_to: u64) {
+    let bucket_size = (*ca).mi.bucket_size as u32;
+    let nouse = (*ca).buckets_nouse;
+    let mut b = sector_to_bucket(bucket_size, sector_from);
+    loop {
+        rust_set_bit(b as c_ulong, nouse);
+        b += 1;
+        if bucket_to_sector(bucket_size, b) >= sector_to {
+            break;
+        }
+    }
+}
+
+/// Mark all space NOT covered by the reserved extents as nouse,
+/// plus the space for the default superblock layout.
+unsafe fn mark_unreserved_space(fs: *mut c::bch_fs, extents: &[CRange]) {
+    let ca = (*fs).devs[0];
+    let bucket_size = (*ca).mi.bucket_size as u32;
+    let nbuckets = (*ca).mi.nbuckets;
+
+    // Byte-addressed max for hole iteration
+    let max_bytes = bucket_to_sector(bucket_size, nbuckets) << 9;
+
+    for hole in for_each_hole(extents, max_bytes) {
+        if hole.start == hole.end {
+            continue;
+        }
+        mark_nouse_range(
+            ca,
+            hole.start >> 9,
+            (hole.end + (1 << 9) - 1) >> 9,
+        );
+    }
+
+    // Also mark space for the default sb layout
+    let sb_size = 1u64 << (*(*ca).disk_sb.sb).layout.sb_max_size_bits;
+    mark_nouse_range(ca, 0, c::BCH_SB_SECTOR as u64 + sb_size * 2);
+}
+
+/// Reserve space for bcachefs metadata file, return extents and inode number.
+///
+/// Tries to reserve as much space as possible on the host filesystem, starting
+/// from dev_size and halving on ENOSPC until we get at least 1/10th of the device.
+fn reserve_new_fs_space(
+    file_path: &str,
+    block_size: u32,  // in sectors
+    dev_size: u64,
+    dev: libc::dev_t,
+    force: bool,
+) -> Result<(Vec<CRange>, u64)> {
+    let flags = libc::O_RDWR | libc::O_CREAT | if force { 0 } else { libc::O_EXCL };
+    let file_cstr = CString::new(file_path)?;
+    let fd = unsafe { libc::open(file_cstr.as_ptr(), flags, 0o600 as libc::mode_t) };
+    if fd < 0 {
+        bail!("Error creating {} for bcachefs metadata: {}", file_path, io::Error::last_os_error());
+    }
+
+    struct FdGuard(RawFd);
+    impl Drop for FdGuard {
+        fn drop(&mut self) { unsafe { libc::close(self.0); } }
+    }
+    let _close_guard = FdGuard(fd);
+
+    let mut statbuf: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut statbuf) } != 0 {
+        bail!("fstat: {}", io::Error::last_os_error());
+    }
+    if statbuf.st_dev != dev {
+        bail!("bcachefs file has incorrect device");
+    }
+    let bcachefs_inum = statbuf.st_ino;
+
+    let min_size = dev_size / 10;
+    let mut size = dev_size;
+
+    loop {
+        if unsafe { libc::fallocate(fd, 0, 0, size as libc::off_t) } == 0 {
+            break;
+        }
+
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOSPC) || size <= min_size {
+            bail!("Error reserving space ({} bytes) for bcachefs metadata: {}", size, err);
+        }
+
+        size /= 2;
+        size = size.max(min_size);
+    }
+    unsafe { libc::fsync(fd) };
+
+    let extents = fiemap_iter(fd)?;
+
+    // Check alignment
+    let block_bytes = (block_size as u64) << 9;
+    for r in &extents {
+        if (r.start & (block_bytes - 1)) != 0 || ((r.end - r.start) & (block_bytes - 1)) != 0 {
+            bail!("Unable to continue: unaligned extents in metadata file");
+        }
+    }
+
+    Ok((extents, bcachefs_inum))
+}
+
+/// Find space within the reserved extents for the superblock.
+fn find_superblock_space(extents: &[CRange], sb_size: u32, bucket_size: u32) -> Result<(u64, u64)> {
+    let bucket_bytes = (bucket_size as u64) << 9;
+    let sb_bytes = (sb_size as u64) << 9;
+
+    for r in extents {
+        let start = std::cmp::max(256 << 10, r.start)
+            .div_ceil(bucket_bytes) * bucket_bytes;
+        let end = (r.end / bucket_bytes) * bucket_bytes;
+
+        // Need space for two superblocks
+        if start + sb_bytes * 2 <= end {
+            return Ok((start >> 9, (start >> 9) + sb_size as u64 * 2));
+        }
+    }
+    bail!("Couldn't find a valid location for superblock");
+}
+
+/// Add default superblock layout entries (sector 8 and sector 8+sb_size).
+/// Returns the sb_size.
+fn add_default_sb_layout(sb: &mut c::bch_sb) -> Result<u32> {
+    let sb_size = 1u32 << sb.layout.sb_max_size_bits;
+    let bch_sb_sector = c::BCH_SB_SECTOR as u64;
+
+    if sb.layout.nr_superblocks as usize >= sb.layout.sb_offset.len() {
+        bail!("Can't add superblock: no space left in superblock layout");
+    }
+
+    for i in 0..sb.layout.nr_superblocks as usize {
+        let off = u64::from_le(sb.layout.sb_offset[i]);
+        if off == bch_sb_sector || off == bch_sb_sector + sb_size as u64 {
+            bail!("Superblock layout already has default superblocks");
+        }
+    }
+
+    // Shift existing entries down by 2
+    let nr = sb.layout.nr_superblocks as usize;
+    sb.layout.sb_offset.copy_within(0..nr, 2);
+    sb.layout.nr_superblocks += 2;
+    sb.layout.sb_offset[0] = bch_sb_sector.to_le();
+    sb.layout.sb_offset[1] = (bch_sb_sector + sb_size as u64).to_le();
+
+    Ok(sb_size)
+}
+
+// ---- Main commands ----
 
 fn migrate_usage() {
     print!("\
@@ -40,6 +321,277 @@ Options:
 Report bugs to <linux-bcachefs@vger.kernel.org>
 ");
 }
+
+fn migrate_fs(
+    fs_path: &str,
+    fs_opt_strs: c::bch_opt_strs,
+    mut fs_opts: c::bch_opts,
+    format_opts: c::format_opts,
+    force: bool,
+) -> Result<()> {
+    if !path_is_fs_root(fs_path)? {
+        bail!("{} is not a filesystem root", fs_path);
+    }
+
+    let fs_path_cstr = CString::new(fs_path)?;
+    let fs_fd = unsafe { libc::open(fs_path_cstr.as_ptr(), libc::O_RDONLY | libc::O_NOATIME) };
+    if fs_fd < 0 {
+        bail!("Error opening {}: {}", fs_path, io::Error::last_os_error());
+    }
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fs_fd, &mut stat) } != 0 {
+        unsafe { libc::close(fs_fd) };
+        bail!("fstat: {}", io::Error::last_os_error());
+    }
+
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+        unsafe { libc::close(fs_fd) };
+        bail!("{} is not a directory", fs_path);
+    }
+
+    // Find the underlying block device
+    let dev_path = dev_t_to_path(stat.st_dev)?;
+    let dev_path_cstr = CString::new(dev_path.as_str())?;
+
+    // Set up dev_opts and open the device
+    let mut c_dev = c::dev_opts {
+        path: dev_path_cstr.as_ptr(),
+        ..Default::default()
+    };
+
+    let ret = unsafe { rust_bdev_open(&mut c_dev, c::BLK_OPEN_READ | c::BLK_OPEN_WRITE) };
+    if ret < 0 {
+        unsafe { libc::close(fs_fd) };
+        bail!("Error opening device to format {}: {}", dev_path,
+              io::Error::from_raw_os_error(-ret));
+    }
+
+    let bdev_fd = unsafe { (*c_dev.bdev).bd_fd };
+    let block_size = unsafe { c::get_blocksize(bdev_fd) };
+    opt_set!(fs_opts, block_size, block_size as u16);
+
+    let file_path = format!("{}/bcachefs", fs_path);
+    println!("Creating new filesystem on {} in space reserved at {}", dev_path, file_path);
+
+    let dev_size = unsafe { c::get_size(bdev_fd) };
+    c_dev.fs_size = dev_size;
+
+    // Build a dev_opts_list for bch2_pick_bucket_size
+    let dev_list = c::dev_opts_list {
+        nr: 1,
+        size: 1,
+        data: &mut c_dev,
+        preallocated: Default::default(),
+    };
+
+    let bucket_size = unsafe { c::bch2_pick_bucket_size(fs_opts, dev_list) };
+    {
+        let dev_opts = &mut c_dev.opts;
+        opt_set!(dev_opts, bucket_size, bucket_size as u32);
+    }
+    c_dev.nbuckets = c_dev.fs_size / c_dev.opts.bucket_size as u64;
+
+    unsafe { c::bch2_check_bucket_size(fs_opts, &mut c_dev) };
+
+    // Reserve space for bcachefs metadata — grab as much as we can
+    let (extents, bcachefs_inum) = reserve_new_fs_space(
+        &file_path,
+        block_size >> 9,
+        dev_size,
+        stat.st_dev,
+        force,
+    )?;
+
+    // Find superblock location within reserved extents
+    let (sb_offset, sb_end) = find_superblock_space(
+        &extents,
+        format_opts.superblock_size,
+        c_dev.opts.bucket_size,
+    )?;
+    c_dev.sb_offset = sb_offset;
+    c_dev.sb_end = sb_end;
+
+    // Format the filesystem
+    let dev_list = c::dev_opts_list {
+        nr: 1,
+        size: 1,
+        data: &mut c_dev,
+        preallocated: Default::default(),
+    };
+
+    let sb = crate::wrappers::format::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
+    if sb.is_null() {
+        unsafe { libc::close(fs_fd) };
+        bail!("bch2_format failed");
+    }
+
+    let sb_offset_val = u64::from_le(unsafe { (*sb).layout.sb_offset[0] });
+
+    // Add encryption key if needed
+    if !format_opts.passphrase.is_null() {
+        let type_cstr = CString::new("user").unwrap();
+        let desc_cstr = CString::new("user").unwrap();
+        unsafe { c::bch2_add_key(sb, type_cstr.as_ptr(), desc_cstr.as_ptr(), format_opts.passphrase) };
+    }
+
+    unsafe { libc::free(sb as *mut _) };
+
+    // Open the new filesystem
+    let dev_path_pb = std::path::PathBuf::from(&dev_path);
+    let mut opts: c::bch_opts = Default::default();
+    opt_set!(opts, sb, sb_offset_val);
+    opt_set!(opts, nostart, true as u8);
+    opt_set!(opts, noexcl, true as u8);
+
+    let fs = Fs::open(std::slice::from_ref(&dev_path_pb), opts)
+        .map_err(|e| anyhow!("Error opening new filesystem: {}", e))?;
+
+    fs.buckets_nouse_alloc()
+        .map_err(|e| anyhow!("Error allocating buckets_nouse: {}", e))?;
+
+    unsafe { mark_unreserved_space(fs.raw, &extents) };
+
+    fs.start()
+        .map_err(|e| anyhow!("Error starting new filesystem: {}", e))?;
+
+    // Calculate reserve_start: round up (superblock_size * 2 + BCH_SB_SECTOR) sectors
+    // to bucket boundary (in bytes)
+    let bucket_bytes = unsafe { (*(*fs.raw).devs[0]).mi.bucket_size as u64 } << 9;
+    let reserve_start = (((format_opts.superblock_size as u64 * 2 + c::BCH_SB_SECTOR as u64) << 9)
+        .div_ceil(bucket_bytes)) * bucket_bytes;
+
+    // Copy the filesystem tree
+    let ret = unsafe {
+        rust_migrate_copy_fs(
+            fs.raw,
+            fs_fd,
+            fs_path_cstr.as_ptr(),
+            bcachefs_inum,
+            stat.st_dev,
+            extents.as_ptr(),
+            extents.len(),
+            reserve_start,
+        )
+    };
+
+    let exit_ret = fs.exit();
+    unsafe { libc::close(fs_fd) };
+
+    if ret != 0 {
+        bail!("Error copying filesystem (ret={})", ret);
+    }
+    if exit_ret != 0 {
+        bail!("Error closing filesystem (ret={})", exit_ret);
+    }
+
+    // Run fsck on the new filesystem
+    println!("Migrate complete, running fsck:");
+    let mut fsck_opts: c::bch_opts = Default::default();
+    opt_set!(fsck_opts, sb, sb_offset_val);
+    opt_set!(fsck_opts, noexcl, true as u8);
+    opt_set!(fsck_opts, nochanges, true as u8);
+    opt_set!(fsck_opts, read_only, true as u8);
+
+    let fs = Fs::open(std::slice::from_ref(&dev_path_pb), fsck_opts)
+        .map_err(|e| anyhow!("Error opening new filesystem for fsck: {}", e))?;
+    drop(fs);
+    println!("fsck complete");
+
+    println!(
+        "To mount the new filesystem, run\n\
+         \x20 mount -t bcachefs -o sb={sb} {dev} dir\n\
+         \n\
+         After verifying that the new filesystem is correct, to create a\n\
+         superblock at the default offset and finish the migration run\n\
+         \x20 bcachefs migrate-superblock -d {dev} -o {sb}\n\
+         \n\
+         The new filesystem will have a file at /old_migrated_filesystem\n\
+         referencing all disk space that might be used by the existing\n\
+         filesystem. That file can be deleted once the old filesystem is\n\
+         no longer needed (and should be deleted prior to running\n\
+         bcachefs migrate-superblock)",
+        sb = sb_offset_val,
+        dev = dev_path,
+    );
+
+    Ok(())
+}
+
+fn migrate_superblock(dev_path: &str, sb_offset: u64) -> Result<()> {
+    let dev_cstr = CString::new(dev_path)?;
+
+    // Open device and read existing superblock
+    let fd = unsafe { libc::open(dev_cstr.as_ptr(), libc::O_RDWR | libc::O_EXCL) };
+    if fd < 0 {
+        bail!("Error opening {}: {}", dev_path, io::Error::last_os_error());
+    }
+
+    let sb = super_io::__bch2_super_read(fd, sb_offset);
+    let sb_ref = unsafe { &mut *sb };
+
+    // Validate and add default layout (catches errors early)
+    let sb_size = add_default_sb_layout(sb_ref)?;
+
+    // Zero the start of the disk to blow away the old superblock
+    let zeroes_len = ((c::BCH_SB_SECTOR as usize) << 9) + std::mem::size_of::<c::bch_sb>();
+    let zeroes = vec![0u8; zeroes_len];
+    {
+        let file = super_io::borrowed_file(fd);
+        use std::os::unix::fs::FileExt;
+        file.write_all_at(&zeroes, 0)
+            .map_err(|e| anyhow!("Error zeroing start of disk: {}", e))?;
+    }
+    unsafe { libc::close(fd) };
+    unsafe { libc::free(sb as *mut _) };
+
+    // Open the filesystem with nostart + sb offset
+    let dev_path_pb = std::path::PathBuf::from(dev_path);
+    let mut opts: c::bch_opts = Default::default();
+    opt_set!(opts, nostart, true as u8);
+    opt_set!(opts, sb, sb_offset);
+
+    let fs = Fs::open(&[dev_path_pb], opts)
+        .map_err(|e| anyhow!("Error opening filesystem: {}", e))?;
+
+    fs.buckets_nouse_alloc()
+        .map_err(|e| anyhow!("Error allocating buckets_nouse: {}", e))?;
+
+    // Mark the new sb bucket range as nouse
+    let ca = unsafe { (*fs.raw).devs[0] };
+    unsafe { mark_nouse_range(ca, 0, c::BCH_SB_SECTOR as u64 + sb_size as u64 * 2) };
+
+    fs.start()
+        .map_err(|e| anyhow!("Error starting filesystem: {}", e))?;
+
+    // Verify sb_size consistency
+    let actual_sb_size = 1u32 << unsafe { (*(*ca).disk_sb.sb).layout.sb_max_size_bits };
+    assert_eq!(actual_sb_size, sb_size, "sb_max_size_bits mismatch after recovery");
+
+    // Apply superblock layout changes (FS is already RW)
+    let sb_ref = unsafe { &mut *(*ca).disk_sb.sb };
+    add_default_sb_layout(sb_ref)?;
+
+    {
+        let _lock = fs.sb_lock();
+        fs.write_super_ret()
+            .map_err(|e| anyhow!("Error writing superblock: {}", e))?;
+    }
+
+    // Mark the new sb buckets in FS metadata
+    let ca_ref = fs.dev_get(0)
+        .ok_or_else(|| anyhow!("device 0 not found"))?;
+    fs.trans_mark_dev_sb(
+        &ca_ref,
+        c::btree_iter_update_trigger_flags::BTREE_TRIGGER_transactional,
+    ).map_err(|e| anyhow!("Error marking superblock buckets: {}", e))?;
+    drop(ca_ref);
+
+    drop(fs);
+    Ok(())
+}
+
+// ---- Public command entry points ----
 
 pub fn cmd_migrate(argv: Vec<String>) -> Result<()> {
     let opt_flags = c::opt_flags::OPT_FORMAT as u32;
@@ -142,8 +694,6 @@ pub fn cmd_migrate(argv: Vec<String>) -> Result<()> {
         fmt_opts.passphrase = p.get().as_ptr() as *mut c_char;
     }
 
-    let fs_path_cstr = CString::new(fs_path.as_str())?;
-
     // Build bch_opt_strs for deferred options
     let mut fs_opt_strs: c::bch_opt_strs = Default::default();
     for &(id, ref val) in &deferred_opts {
@@ -152,23 +702,11 @@ pub fn cmd_migrate(argv: Vec<String>) -> Result<()> {
         unsafe { fs_opt_strs.__bindgen_anon_1.by_id[id] = ptr };
     }
 
-    let ret = unsafe {
-        rust_migrate_fs(
-            fs_path_cstr.as_ptr(),
-            fs_opt_strs,
-            fs_opts,
-            fmt_opts,
-            force,
-        )
-    };
+    let result = migrate_fs(&fs_path, fs_opt_strs, fs_opts, fmt_opts, force);
 
     unsafe { c::bch2_opt_strs_free(&mut fs_opt_strs) };
 
-    if ret != 0 {
-        process::exit(1);
-    }
-
-    Ok(())
+    result
 }
 
 /// Migrate superblock to standard location
@@ -186,16 +724,5 @@ pub struct MigrateSuperblockCli {
 
 pub fn cmd_migrate_superblock(argv: Vec<String>) -> Result<()> {
     let cli = MigrateSuperblockCli::parse_from(argv);
-
-    let dev_cstr = CString::new(cli.device.as_str())?;
-
-    let ret = unsafe {
-        rust_migrate_superblock(dev_cstr.as_ptr(), cli.offset)
-    };
-
-    if ret != 0 {
-        process::exit(ret);
-    }
-
-    Ok(())
+    migrate_superblock(&cli.device, cli.offset)
 }
