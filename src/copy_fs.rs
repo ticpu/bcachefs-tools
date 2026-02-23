@@ -270,6 +270,7 @@ fn create_or_update_link(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_or_update_file(
     fs: &Fs,
     dir_inum: c::subvol_inum,

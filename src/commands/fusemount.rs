@@ -1,18 +1,18 @@
-/// FUSE mount for bcachefs.
-///
-/// Implements the fuser::Filesystem trait over bcachefs's internal btree
-/// operations, allowing a bcachefs filesystem to be mounted without kernel
-/// support. Uses the fuser crate (pure Rust FUSE implementation).
-///
-/// Key design notes:
-/// - Inode numbers: FUSE uses flat u64. bcachefs uses (subvol, inum) pairs.
-///   Currently hardcoded to subvolume 1 with root inum 4096 mapped to FUSE
-///   ino 1. This is a FUSE protocol limitation — snapshot subvolumes with
-///   colliding inode numbers cannot be represented in a single FUSE mount.
-/// - Daemonization: Must fork() before spawning threads (Linux constraint).
-///   bcachefs's shrinker threads and fs_start happen after fork.
-/// - I/O alignment: All reads and writes must be block-aligned. Unaligned
-///   requests get read-modify-write treatment in the C shim layer.
+// FUSE mount for bcachefs.
+//
+// Implements the fuser::Filesystem trait over bcachefs's internal btree
+// operations, allowing a bcachefs filesystem to be mounted without kernel
+// support. Uses the fuser crate (pure Rust FUSE implementation).
+//
+// Key design notes:
+// - Inode numbers: FUSE uses flat u64. bcachefs uses (subvol, inum) pairs.
+//   Currently hardcoded to subvolume 1 with root inum 4096 mapped to FUSE
+//   ino 1. This is a FUSE protocol limitation — snapshot subvolumes with
+//   colliding inode numbers cannot be represented in a single FUSE mount.
+// - Daemonization: Must fork() before spawning threads (Linux constraint).
+//   bcachefs's shrinker threads and fs_start happen after fork.
+// - I/O alignment: All reads and writes must be block-aligned. Unaligned
+//   requests get read-modify-write treatment in the C shim layer.
 
 use std::cell::Cell;
 use std::ffi::OsStr;

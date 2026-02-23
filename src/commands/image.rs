@@ -628,8 +628,10 @@ fn image_update_inner(
     let metadata_path = format!("{}.metadata", dst_image);
     let metadata_path_cstr = CString::new(metadata_path.as_str())?;
 
-    let mut dev_opts: c::dev_opts = Default::default();
-    dev_opts.path = metadata_path_cstr.as_ptr();
+    let mut dev_opts = c::dev_opts {
+        path: metadata_path_cstr.as_ptr(),
+        ..Default::default()
+    };
 
     let ret = unsafe { c::open_for_format(&mut dev_opts, c::BLK_OPEN_CREAT, false) };
     if ret != 0 {
