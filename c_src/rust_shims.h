@@ -134,4 +134,12 @@ int rust_link_data(struct bch_fs *c,
 		   __u64 dst_inum, __s64 *sectors_delta,
 		   __u64 logical, __u64 physical, __u64 length);
 
+/*
+ * Accounting read shim — wraps the static inline bch2_accounting_mem_read
+ * which uses percpu_read guard + eytzinger search.
+ */
+struct bpos;
+void rust_accounting_mem_read(struct bch_fs *c, struct bpos p,
+			      __u64 *v, unsigned nr);
+
 #endif /* _RUST_SHIMS_H */

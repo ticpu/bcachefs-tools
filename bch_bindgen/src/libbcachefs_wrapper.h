@@ -6,6 +6,8 @@
 #include "btree/iter.h"
 #include "data/checksum.h"
 #include "data/io_misc.h"
+#include "data/move.h"
+#include "data/update.h"
 #include "debug/debug.h"
 #include "init/dev.h"
 #include "init/error.h"
@@ -17,10 +19,12 @@
 #include "fs/inode.h"
 #include "fs/xattr.h"
 #include "alloc/accounting.h"
+#include "alloc/background.h"
 #include "alloc/buckets.h"
 #include "data/read.h"
 #include "data/write.h"
 #include "journal/init.h"
+#include "journal/reclaim.h"
 #include "journal/read.h"
 #include "journal/seq_blacklist.h"
 #include "sb/io.h"
@@ -56,4 +60,5 @@
 MARK_FIX_753(blk_mode_t, BLK_OPEN_READ);
 MARK_FIX_753(blk_mode_t, BLK_OPEN_WRITE);
 MARK_FIX_753(blk_mode_t, BLK_OPEN_EXCL);
+MARK_FIX_753(blk_mode_t, BLK_OPEN_CREAT);
 

@@ -33,6 +33,18 @@ pub unsafe fn sb_field_get_mut<'a, F: SbField>(sb: *mut c::bch_sb) -> Option<&'a
     if ptr.is_null() { None } else { Some(&mut *(ptr as *mut F)) }
 }
 
+/// Resize a typed superblock field.
+///
+/// # Safety
+/// Caller must hold sb_lock.
+pub unsafe fn sb_field_resize<F: SbField>(
+    disk_sb: &mut c::bch_sb_handle,
+    u64s: u32,
+) -> Option<&mut F> {
+    let ptr = c::bch2_sb_field_resize_id(disk_sb, F::FIELD_TYPE, u64s);
+    if ptr.is_null() { None } else { Some(&mut *(ptr as *mut F)) }
+}
+
 // LE64_BITMASK accessors — pure Rust replacements for C shims in rust_shims.c.
 // Each field is defined by: struct type, flags field + index, C constant prefix.
 
@@ -52,7 +64,8 @@ bitmask_accessors! {
         BCH_SB_BACKGROUND_TARGET  => (sb_background_target, set_sb_background_target);
 
     bch_sb, flags[3],
-        BCH_SB_METADATA_TARGET    => (sb_metadata_target, set_sb_metadata_target);
+        BCH_SB_METADATA_TARGET    => (sb_metadata_target, set_sb_metadata_target),
+        BCH_SB_MULTI_DEVICE       => (sb_multi_device, set_sb_multi_device);
 
     bch_sb, flags[5],
         BCH_SB_VERSION_INCOMPAT_ALLOWED => (sb_version_incompat_allowed, set_sb_version_incompat_allowed);
@@ -63,6 +76,8 @@ bitmask_accessors! {
     bch_member, flags,
         BCH_MEMBER_STATE          => (member_state, set_member_state),
         BCH_MEMBER_GROUP          => (member_group, set_member_group),
+        BCH_MEMBER_DATA_ALLOWED   => (member_data_allowed, set_member_data_allowed),
+        BCH_MEMBER_RESIZE_ON_MOUNT => (member_resize_on_mount, set_member_resize_on_mount),
         BCH_MEMBER_ROTATIONAL_SET => (member_rotational_set, set_member_rotational_set),
         BCH_MEMBER_FREESPACE_INITIALIZED => (member_freespace_initialized, set_member_freespace_initialized);
 }

@@ -22,6 +22,12 @@ extern "C" {
     fn rust_dev_put(ca: *mut c::bch_dev);
     fn pthread_mutex_lock(mutex: *mut c::pthread_mutex_t) -> i32;
     fn pthread_mutex_unlock(mutex: *mut c::pthread_mutex_t) -> i32;
+    fn rust_accounting_mem_read(
+        c: *mut c::bch_fs,
+        p: c::bpos,
+        v: *mut u64,
+        nr: u32,
+    );
 }
 
 /// RAII guard for a device reference. Calls bch2_dev_put on drop.
@@ -230,10 +236,144 @@ impl Fs {
                 && !c.devs[dev as usize].is_null()
         }
     }
+
+    /// Transition filesystem to read-only mode.
+    pub fn read_only(&self) {
+        unsafe { c::bch2_fs_read_only(self.raw) };
+    }
+
+    /// Set a device's allocator to RW or RO.
+    pub fn dev_allocator_set_rw(&self, dev: u32, rw: bool) {
+        unsafe {
+            let ca = (*self.raw).devs[dev as usize];
+            if !ca.is_null() {
+                c::bch2_dev_allocator_set_rw(self.raw, ca, rw);
+            }
+        }
+    }
+
+    /// Flush all journal pins (equivalent to bch2_journal_flush_all_pins).
+    pub fn journal_flush_all_pins(&self) {
+        unsafe {
+            c::bch2_journal_flush_pins(
+                &mut (*self.raw).journal,
+                u64::MAX,
+            );
+        }
+    }
+
+    /// Delete a range of keys in a btree.
+    pub fn btree_delete_range(
+        &self,
+        btree_id: c::btree_id,
+        start: c::bpos,
+        end: c::bpos,
+        flags: c::btree_iter_update_trigger_flags,
+    ) -> Result<(), BchError> {
+        ret_to_result(unsafe {
+            c::bch2_btree_delete_range(self.raw, btree_id, start, end, flags)
+        })
+    }
+
+    /// Read accounting counters for a given bpos key.
+    pub fn accounting_mem_read(&self, pos: c::bpos, nr: u32) -> Vec<u64> {
+        let mut v = vec![0u64; nr as usize];
+        unsafe {
+            rust_accounting_mem_read(self.raw, pos, v.as_mut_ptr(), nr);
+        }
+        v
+    }
+
+    /// Read full device usage stats.
+    pub fn dev_usage_full_read(&self, dev: u32) -> c::bch_dev_usage_full {
+        unsafe {
+            let ca = (*self.raw).devs[dev as usize];
+            let mut usage: c::bch_dev_usage_full = std::mem::zeroed();
+            c::bch2_dev_usage_full_read_fast(ca, &mut usage);
+            usage
+        }
+    }
+
+    /// Get the raw device pointer by index.
+    ///
+    /// # Safety
+    /// Caller must ensure the device exists and the pointer is valid.
+    pub unsafe fn dev_raw(&self, dev: u32) -> *mut c::bch_dev {
+        (*self.raw).devs[dev as usize]
+    }
+
+    /// Access the mutable superblock handle for resize operations.
+    ///
+    /// # Safety
+    /// Caller must hold sb_lock.
+    #[allow(clippy::mut_from_ref)] // interior mutability guarded by sb_lock
+    pub unsafe fn disk_sb_mut(&self) -> &mut c::bch_sb_handle {
+        &mut (*self.raw).disk_sb
+    }
+
+    /// Set the filesystem log level.
+    pub fn set_loglevel(&self, level: u32) {
+        unsafe { (*self.raw).loglevel = level; }
+    }
+
+    /// Add a device to the filesystem.
+    pub fn dev_add(&self, path: &str) -> Result<(), BchError> {
+        let path_cstr = CString::new(path).unwrap();
+        let mut err = c::printbuf::new();
+        let ret = unsafe { c::bch2_dev_add(self.raw, path_cstr.as_ptr(), &mut err) };
+        if ret != 0 {
+            let msg = unsafe { std::ffi::CStr::from_ptr(err.buf) }
+                .to_string_lossy();
+            eprintln!("error adding device: {}", msg);
+        }
+        ret_to_result(ret)
+    }
 }
 
 impl Drop for Fs {
     fn drop(&mut self) {
         unsafe { c::bch2_fs_exit(self.raw); }
     }
+}
+
+// Standalone helpers — pure Rust reimplementations of C static inlines.
+
+/// Sector offset of bucket `b` on device `ca`.
+pub fn bucket_to_sector(ca: &c::bch_dev, b: u64) -> u64 {
+    b * ca.mi.bucket_size as u64
+}
+
+/// Size of one bucket in bytes.
+pub fn bucket_bytes(ca: &c::bch_dev) -> u64 {
+    ca.mi.bucket_size as u64 * 512
+}
+
+/// Build a hashed writepoint specifier (sets low bit to mark as hashed).
+pub fn writepoint_hashed(v: u64) -> c::write_point_specifier {
+    c::write_point_specifier { v: v | 1 }
+}
+
+/// Convert a device index to a target (TARGET_DEV_START = 1).
+pub fn dev_to_target(dev: u32) -> u16 {
+    1 + dev as u16
+}
+
+/// Check if a btree ID is an allocator btree.
+pub fn btree_id_is_alloc(id: u32) -> bool {
+    use c::btree_id::*;
+    matches!(
+        c::btree_id::from_raw(id),
+        Some(BTREE_ID_alloc
+            | BTREE_ID_backpointers
+            | BTREE_ID_stripe_backpointers
+            | BTREE_ID_need_discard
+            | BTREE_ID_freespace
+            | BTREE_ID_bucket_gens
+            | BTREE_ID_lru
+            | BTREE_ID_accounting
+            | BTREE_ID_reconcile_work
+            | BTREE_ID_reconcile_hipri
+            | BTREE_ID_reconcile_pending
+            | BTREE_ID_reconcile_scan)
+    )
 }
