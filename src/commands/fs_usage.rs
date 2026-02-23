@@ -559,7 +559,7 @@ fn dev_usage_full_to_text(out: &mut Printbuf, d: &DevContext) {
     let pct = if capacity > 0 { used * 100 / capacity } else { 0 };
 
     out.aligned(|sub| {
-        write!(sub, "{} (device {}):\t{}\t{}\t{:>2}%\n", label, d.info.idx, d.info.dev, state, pct).unwrap();
+        writeln!(sub, "{} (device {}):\t{}\t{}\t{:>2}%", label, d.info.idx, d.info.dev, state, pct).unwrap();
 
         {
             let sub = &mut *sub.indent(2);

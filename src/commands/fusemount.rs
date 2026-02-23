@@ -83,14 +83,14 @@ fn unmap_root_ino(ino: u64) -> u64 {
 }
 
 fn mode_to_filetype(mode: u32) -> FileType {
-    match mode & libc::S_IFMT as u32 {
-        m if m == libc::S_IFREG as u32 => FileType::RegularFile,
-        m if m == libc::S_IFDIR as u32 => FileType::Directory,
-        m if m == libc::S_IFLNK as u32 => FileType::Symlink,
-        m if m == libc::S_IFBLK as u32 => FileType::BlockDevice,
-        m if m == libc::S_IFCHR as u32 => FileType::CharDevice,
-        m if m == libc::S_IFIFO as u32 => FileType::NamedPipe,
-        m if m == libc::S_IFSOCK as u32 => FileType::Socket,
+    match mode & libc::S_IFMT {
+        m if m == libc::S_IFREG => FileType::RegularFile,
+        m if m == libc::S_IFDIR => FileType::Directory,
+        m if m == libc::S_IFLNK => FileType::Symlink,
+        m if m == libc::S_IFBLK => FileType::BlockDevice,
+        m if m == libc::S_IFCHR => FileType::CharDevice,
+        m if m == libc::S_IFIFO => FileType::NamedPipe,
+        m if m == libc::S_IFSOCK => FileType::Socket,
         _ => FileType::RegularFile,
     }
 }
@@ -127,11 +127,11 @@ impl BcachefsFs {
             ctime: ts_to_systime(ts_c),
             crtime: UNIX_EPOCH,
             kind: mode_to_filetype(bi.bi_mode as u32),
-            perm: (bi.bi_mode & 0o7777) as u16,
+            perm: (bi.bi_mode & 0o7777),
             nlink,
             uid: bi.bi_uid,
             gid: bi.bi_gid,
-            rdev: bi.bi_dev as u32,
+            rdev: bi.bi_dev,
             blksize,
             flags: 0,
         }
@@ -186,7 +186,7 @@ impl Filesystem for BcachefsFs {
         if ret != 0 {
             eprintln!("  lookup -> err {}", ret);
             // Negative dentry caching: return empty entry for ENOENT
-            if ret == -(libc::ENOENT as i32) {
+            if ret == -libc::ENOENT {
                 let attr = FileAttr {
                     ino: INodeNo(0),
                     size: 0, blocks: 0,
@@ -371,7 +371,7 @@ impl Filesystem for BcachefsFs {
         reply: ReplyEntry,
     ) {
         eprintln!("fuse_mkdir(dir={}, name={:?})", parent.0, name);
-        self.mknod(req, parent, name, mode | libc::S_IFDIR as u32, umask, 0, reply);
+        self.mknod(req, parent, name, mode | libc::S_IFDIR, umask, 0, reply);
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
@@ -648,7 +648,7 @@ impl Filesystem for BcachefsFs {
                 std::slice::from_raw_parts(name as *const u8, name_len as usize)
             };
             let name_str = OsStr::from_bytes(name_bytes);
-            let file_type = match dtype as u32 {
+            let file_type = match dtype {
                 t if t == libc::DT_DIR as u32 => FileType::Directory,
                 t if t == libc::DT_REG as u32 => FileType::RegularFile,
                 t if t == libc::DT_LNK as u32 => FileType::Symlink,

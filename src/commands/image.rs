@@ -715,9 +715,7 @@ fn image_update_inner(
     let exit_ret = fs.exit();
     let _ = std::fs::remove_file(&metadata_path);
 
-    if let Err(e) = result {
-        return Err(e);
-    }
+    result?;
     if exit_ret != 0 {
         bail!(
             "error shutting down filesystem: {}",
