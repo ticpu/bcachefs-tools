@@ -142,4 +142,12 @@ struct bpos;
 void rust_accounting_mem_read(struct bch_fs *c, struct bpos p,
 			      __u64 *v, unsigned nr);
 
+/*
+ * copy_fs shim — wraps C copy_fs (posix_to_bcachefs.c) with a simpler
+ * interface for Rust. Allocates copy_fs_state on the stack.
+ * Removed when image command switches to Rust copy_fs.
+ */
+int rust_copy_fs(struct bch_fs *c, int src_fd,
+		 const char *src_path, unsigned verbosity);
+
 #endif /* _RUST_SHIMS_H */

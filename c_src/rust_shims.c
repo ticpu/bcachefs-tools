@@ -390,3 +390,13 @@ void rust_accounting_mem_read(struct bch_fs *c, struct bpos p,
 {
 	bch2_accounting_mem_read(c, p, v, nr);
 }
+
+/* copy_fs shim — wraps C copy_fs with a simpler interface for Rust.
+ * Removed when image command switches to Rust copy_fs. */
+
+int rust_copy_fs(struct bch_fs *c, int src_fd,
+		 const char *src_path, unsigned verbosity)
+{
+	struct copy_fs_state s = { .verbosity = verbosity };
+	return copy_fs(c, &s, src_fd, src_path);
+}

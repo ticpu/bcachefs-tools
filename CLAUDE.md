@@ -149,7 +149,7 @@ clean and make it easy to compare old vs new or revert.
   (LE64_BITMASK setters, `for_each_member_device`, btree node walking,
   crypto operations)
 - **C commands**: Only `cmd_fusemount.c` remains as a pure C command.
-  `cmd_image.c` and `cmd_migrate.c` have Rust arg parsing but C cores.
+  `cmd_migrate.c` has Rust arg parsing but a C core.
 - `bch_bindgen` generates Rust bindings via bindgen, plus hand-written
   safe wrappers for btree iteration, journal parsing, extent iteration,
   printbuf, and superblock access

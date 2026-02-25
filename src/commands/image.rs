@@ -1,9 +1,28 @@
-use std::ffi::{CString, c_char};
+// Image create/update commands — converted from c_src/cmd_image.c.
+//
+// Uses a temporary second device for metadata, writes data sequentially to the
+// primary device, then migrates metadata to the primary and drops the temp device.
+
+use std::ffi::{CStr, CString, c_char, c_void};
+use std::fmt::Write;
+use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::process;
 
 use anyhow::{anyhow, bail, Result};
+use bch_bindgen::accounting::DiskAccountingKind;
+use bch_bindgen::btree::{BtreeIter, BtreeTrans, lockrestart_do};
 use bch_bindgen::c;
+extern "C" {
+    fn rust_copy_fs(c: *mut c::bch_fs, src_fd: i32, src_path: *const c_char, verbosity: u32) -> i32;
+}
+use bch_bindgen::data::moving::MovingContext;
+use bch_bindgen::fs::{Fs, btree_id_is_alloc, bucket_bytes, bucket_to_sector, dev_to_target,
+                      writepoint_hashed};
 use bch_bindgen::opt_set;
+use bch_bindgen::printbuf::Printbuf;
+use bch_bindgen::sb;
+use bch_bindgen::{POS_MIN, SPOS_MAX, pos};
 use clap::Parser;
 
 use crate::commands::format::{
@@ -16,25 +35,693 @@ use crate::wrappers::super_io::SUPERBLOCK_SIZE_DEFAULT;
 use crate::wrappers::sysfs;
 
 const BCH_REPLICAS_MAX: u32 = 4;
+const BTREE_MAX_DEPTH: u32 = 4;
 
 extern "C" {
-    fn rust_image_create(
-        fs_opt_strs: c::bch_opt_strs,
-        fs_opts: c::bch_opts,
-        format_opts: c::format_opts,
-        dev_opts: c::dev_opts,
-        src_path: *const c_char,
-        keep_alloc: bool,
-        verbosity: u32,
+    fn strip_fs_alloc(c: *mut c::bch_fs);
+}
+
+// --- Core logic, converted from C ---
+
+/// Recursively count allocated bytes in a directory tree.
+fn count_input_size(dir: &std::fs::File) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut bytes = 0u64;
+    let path = format!("/proc/self/fd/{}", dir.as_raw_fd());
+    let entries = match std::fs::read_dir(&path) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == "." || name_str == ".." || name_str == "lost+found" {
+            continue;
+        }
+
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        bytes += meta.blocks() * 512;
+
+        if meta.is_dir() {
+            if let Ok(subdir) = std::fs::File::open(entry.path()) {
+                bytes += count_input_size(&subdir);
+            }
+        }
+    }
+
+    bytes
+}
+
+/// Set data_allowed on both devices for image update:
+/// dev 0 gets user data only, dev 1 gets journal+btree.
+fn set_data_allowed_for_image_update(fs: &Fs) {
+    let _lock = fs.sb_lock();
+
+    let m0 = unsafe { fs.members_v2_get_mut(0) };
+    m0.set_member_data_allowed(1 << c::bch_data_type::BCH_DATA_user as u64);
+
+    let m1 = unsafe { fs.members_v2_get_mut(1) };
+    m1.set_member_data_allowed(
+        (1 << c::bch_data_type::BCH_DATA_journal as u64)
+            | (1 << c::bch_data_type::BCH_DATA_btree as u64),
     );
 
-    fn rust_image_update(
-        src_path: *const c_char,
-        dst_image: *const c_char,
-        keep_alloc: bool,
-        verbosity: u32,
-    ) -> i32;
+    fs.write_super();
+    drop(_lock);
+
+    fs.dev_allocator_set_rw(0, true);
+    fs.dev_allocator_set_rw(1, true);
 }
+
+/// Arguments passed through void* to the move predicate callback.
+struct MoveBtreeArgs {
+    move_alloc: bool,
+    target: u16,
+}
+
+/// Predicate for btree node moves — decides whether to move each btree node.
+unsafe extern "C" fn move_btree_pred(
+    _trans: *mut c::btree_trans,
+    arg: *mut c_void,
+    btree: c::btree_id,
+    k: c::bkey_s_c,
+    _io_opts: *mut c::bch_inode_opts,
+    data_opts: *mut c::data_update_opts,
+) -> i32 {
+    let args = &*(arg as *const MoveBtreeArgs);
+    let opts = &mut *data_opts;
+
+    opts.target = args.target;
+
+    if (*k.k).type_ != c::bch_bkey_type::KEY_TYPE_btree_ptr_v2 as u8 {
+        return 0;
+    }
+
+    if !args.move_alloc && btree_id_is_alloc(btree as u32) {
+        return 0;
+    }
+
+    opts.write_flags = unsafe {
+        std::mem::transmute::<u32, c::bch_write_flags>(
+            opts.write_flags as u32
+                | c::bch_write_flags::BCH_WRITE_only_specified_devs as u32,
+        )
+    };
+    1
+}
+
+/// Move btree nodes to a target device. Flushes journal pins first.
+fn move_btree(fs: &Fs, move_alloc: bool, target_dev: u32) -> Result<(), anyhow::Error> {
+    fs.journal_flush_all_pins();
+
+    let mut args = MoveBtreeArgs {
+        move_alloc,
+        target: dev_to_target(target_dev),
+    };
+
+    let mut ctxt = MovingContext::new(fs, writepoint_hashed(1), false);
+    let btree_id_nr = c::btree_id::BTREE_ID_NR as u32;
+
+    for btree in 0..btree_id_nr {
+        if !move_alloc && btree_id_is_alloc(btree) {
+            continue;
+        }
+
+        let btree_id = unsafe { std::mem::transmute::<u32, c::btree_id>(btree) };
+
+        for level in 1..BTREE_MAX_DEPTH {
+            unsafe {
+                ctxt.move_data_btree(
+                    POS_MIN,
+                    SPOS_MAX,
+                    Some(move_btree_pred),
+                    &mut args as *mut MoveBtreeArgs as *mut c_void,
+                    btree_id,
+                    level,
+                )
+            }
+            .map_err(|e| anyhow!("moving btree {}: {}", btree_id, e))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Look up the last alloc key to find how many buckets are used.
+fn get_nbuckets_used(fs: &Fs) -> Result<u64, anyhow::Error> {
+    let trans = BtreeTrans::new(fs);
+    let mut iter = BtreeIter::new(
+        &trans,
+        c::btree_id::BTREE_ID_alloc,
+        pos(0, u64::MAX),
+        bch_bindgen::btree::BtreeIterFlags::empty(),
+    );
+
+    // Extract type and offset inside the closure to avoid lifetime escape
+    let result: Result<(u8, u64), _> = lockrestart_do(&trans, || {
+        let k = iter.peek_prev()?;
+        match k {
+            Some(k) => Ok((k.k.type_, k.k.p.offset)),
+            None => Err(bch_bindgen::errcode::BchError::from_raw(-libc::ENOENT)),
+        }
+    });
+
+    let (key_type, offset) = result
+        .map_err(|e| anyhow!("error looking up last alloc key: {}", e))?;
+
+    if key_type == c::bch_bkey_type::KEY_TYPE_alloc_v4 as u8 {
+        Ok(offset + 1)
+    } else {
+        bail!("error looking up last alloc key: no alloc_v4 found")
+    }
+}
+
+/// Print sector count formatted as human-readable bytes.
+fn prt_sectors(out: &mut Printbuf, v: u64) {
+    write!(out, "\t").ok();
+    out.human_readable_u64(v << 9);
+    write!(out, "\r\n").ok();
+}
+
+/// Print usage for a specific data type on a device.
+fn print_data_type_usage(
+    out: &mut Printbuf,
+    ca: &c::bch_dev,
+    usage: &c::bch_dev_usage_full,
+    data_type: u32,
+) {
+    let d = &usage.d[data_type as usize];
+    if d.buckets != 0 {
+        bch_bindgen::accounting::prt_data_type(out, unsafe {
+            std::mem::transmute::<u32, c::bch_data_type>(data_type)
+        });
+        prt_sectors(out, bucket_to_sector(ca, d.buckets));
+    }
+    if d.fragmented != 0 {
+        bch_bindgen::accounting::prt_data_type(out, unsafe {
+            std::mem::transmute::<u32, c::bch_data_type>(data_type)
+        });
+        write!(out, " fragmented").ok();
+        prt_sectors(out, d.fragmented);
+    }
+}
+
+/// Print image usage summary.
+fn print_image_usage(fs: &Fs, keep_alloc: bool, nbuckets: u64) {
+    let mut buf = Printbuf::new();
+    buf.set_human_readable(true);
+
+    let usage = fs.dev_usage_full_read(0);
+    let ca = unsafe { &*fs.dev_raw(0) };
+
+    print_data_type_usage(&mut buf, ca, &usage, c::bch_data_type::BCH_DATA_sb as u32);
+    print_data_type_usage(&mut buf, ca, &usage, c::bch_data_type::BCH_DATA_journal as u32);
+    print_data_type_usage(&mut buf, ca, &usage, c::bch_data_type::BCH_DATA_btree as u32);
+
+    {
+        let mut indented = buf.indent(2);
+
+        let btree_id_nr = c::btree_id::BTREE_ID_NR as u32;
+        for i in 0..btree_id_nr {
+            if btree_id_is_alloc(i) && !keep_alloc {
+                continue;
+            }
+
+            let acc_pos = DiskAccountingKind::Btree { id: i }.encode();
+            let v = fs.accounting_mem_read(acc_pos.as_bpos(), 1);
+
+            if v[0] != 0 {
+                unsafe { c::bch2_btree_id_to_text(indented.as_raw(), std::mem::transmute::<u32, c::btree_id>(i)) };
+                prt_sectors(&mut indented, v[0]);
+            }
+        }
+    }
+
+    // User data via replicas accounting
+    let acc_pos = DiskAccountingKind::Replicas {
+        data_type: c::bch_data_type::BCH_DATA_user,
+        nr_devs: 1,
+        nr_required: 1,
+        devs: {
+            let mut d = [0u8; 20];
+            d[0] = 0; // dev 0
+            d
+        },
+    }
+    .encode();
+
+    let v = fs.accounting_mem_read(acc_pos.as_bpos(), 1);
+    write!(&mut buf, "user").ok();
+    prt_sectors(&mut buf, v[0]);
+
+    let user_idx = c::bch_data_type::BCH_DATA_user as usize;
+    if usage.d[user_idx].fragmented != 0 {
+        write!(&mut buf, "user fragmented").ok();
+        prt_sectors(&mut buf, usage.d[user_idx].fragmented);
+    }
+
+    buf.tabstop_align();
+
+    // Compression stats
+    let mut compression_header = false;
+    let comp_nr = c::bch_compression_type::BCH_COMPRESSION_TYPE_NR as u32;
+    for i in 1..comp_nr {
+        let acc_pos = DiskAccountingKind::Compression {
+            compression_type: unsafe { std::mem::transmute::<u32, c::bch_compression_type>(i) },
+        }
+        .encode();
+
+        let v = fs.accounting_mem_read(acc_pos.as_bpos(), 3);
+
+        if v[0] == 0 {
+            continue;
+        }
+
+        if !compression_header {
+            write!(&mut buf, "compression type\tcompressed\runcompressed\rratio\r\n").ok();
+            buf.indent_add(2);
+        }
+        compression_header = true;
+
+        let sectors_uncompressed = v[1];
+        let sectors_compressed = v[2];
+
+        bch_bindgen::accounting::prt_compression_type(&mut buf, unsafe {
+            std::mem::transmute::<u32, c::bch_compression_type>(i)
+        });
+        write!(&mut buf, "\t").ok();
+
+        buf.human_readable_u64(sectors_compressed << 9);
+        write!(&mut buf, "\r").ok();
+
+        if i == c::bch_compression_type::BCH_COMPRESSION_TYPE_incompressible as u32 {
+            buf.newline();
+            continue;
+        }
+
+        buf.human_readable_u64(sectors_uncompressed << 9);
+        if sectors_uncompressed > 0 {
+            write!(&mut buf, "\r{}%\r\n", sectors_compressed * 100 / sectors_uncompressed).ok();
+        } else {
+            write!(&mut buf, "\r\n").ok();
+        }
+    }
+
+    if compression_header {
+        buf.tabstop_align();
+        buf.indent_sub(2);
+    }
+
+    write!(&mut buf, "image size").ok();
+    prt_sectors(&mut buf, bucket_to_sector(ca, nbuckets));
+
+    buf.tabstop_align();
+    print!("{}", buf);
+}
+
+/// Finalize image: move btree to primary device, truncate, strip alloc info.
+fn finish_image(fs: &Fs, keep_alloc: bool, verbosity: u32) -> Result<(), anyhow::Error> {
+    if verbosity > 1 {
+        println!(
+            "moving {}tree to primary device",
+            if keep_alloc { "" } else { "non-alloc " }
+        );
+    }
+
+    // Allow btree data on primary device
+    {
+        let _lock = fs.sb_lock();
+        let m = unsafe { fs.members_v2_get_mut(0) };
+        let allowed = m.member_data_allowed() | (1 << c::bch_data_type::BCH_DATA_btree as u64);
+        m.set_member_data_allowed(allowed);
+        fs.write_super();
+    }
+
+    fs.dev_allocator_set_rw(0, true);
+
+    move_btree(fs, keep_alloc, 0)
+        .map_err(|e| anyhow!("migrating btree from temporary device: {}", e))?;
+
+    fs.read_only();
+
+    let nbuckets = get_nbuckets_used(fs)?;
+
+    if verbosity > 0 {
+        print_image_usage(fs, keep_alloc, nbuckets);
+    }
+
+    // Truncate image to used size
+    let ca = unsafe { &*fs.dev_raw(0) };
+    let image_size = nbuckets * bucket_bytes(ca);
+    let fd = unsafe { (*ca.disk_sb.bdev).bd_fd };
+    if unsafe { libc::ftruncate(fd, image_size as i64) } != 0 {
+        bail!("truncate error: {}", std::io::Error::last_os_error());
+    }
+
+    // Lock sb and finalize
+    let _lock = fs.sb_lock();
+
+    if !keep_alloc {
+        if verbosity > 1 {
+            println!("Stripping alloc info");
+        }
+        unsafe { strip_fs_alloc(fs.raw) };
+    }
+
+    // Drop temp device
+    unsafe { (*fs.raw).devs[1] = std::ptr::null_mut() };
+
+    // Allow journal on primary device
+    let m = unsafe { fs.members_v2_get_mut(0) };
+    let allowed = m.member_data_allowed() | (1 << c::bch_data_type::BCH_DATA_journal as u64);
+    m.set_member_data_allowed(allowed);
+
+    // Set nbuckets
+    unsafe { fs.members_v2_get_mut(0) }.nbuckets = nbuckets.to_le();
+
+    // Set resize_on_mount for all online members
+    let _ = fs.for_each_online_member(|ca| {
+        let m = unsafe { fs.members_v2_get_mut(ca.dev_idx as u32) };
+        m.set_member_resize_on_mount(1);
+        std::ops::ControlFlow::Continue(())
+    });
+
+    // Set small_image feature
+    let sb = unsafe { &mut *(*fs.raw).disk_sb.sb };
+    sb.features[0] |= (1u64 << c::bch_sb_feature::BCH_FEATURE_small_image as u64).to_le();
+
+    // Resize members_v2 to contain only one device
+    let mi: &c::bch_sb_field_members_v2 = sb::sb_field_get(sb)
+        .expect("members_v2 field missing");
+    let member_bytes = u16::from_le(mi.member_bytes);
+    let u64s = (std::mem::size_of::<c::bch_sb_field_members_v2>() as u32 + member_bytes as u32)
+        .div_ceil(8) as u32;
+    let disk_sb = unsafe { fs.disk_sb_mut() };
+    unsafe {
+        sb::sb_field_resize::<c::bch_sb_field_members_v2>(disk_sb, u64s);
+    }
+    unsafe { (*disk_sb.sb).nr_devices = 1 };
+    unsafe { (*disk_sb.sb).set_sb_multi_device(0) };
+
+    fs.write_super();
+
+    Ok(())
+}
+
+/// Create a new filesystem image from a directory.
+fn image_create_inner(
+    fs_opt_strs: c::bch_opt_strs,
+    fs_opts: c::bch_opts,
+    mut format_opts: c::format_opts,
+    dev_opts: c::dev_opts,
+    src_path: &str,
+    keep_alloc: bool,
+    verbosity: u32,
+) -> Result<()> {
+    let src_dir = std::fs::File::open(src_path)?;
+    let meta = src_dir.metadata()?;
+    if !meta.is_dir() {
+        bail!("{} is not a directory", src_path);
+    }
+
+    let input_bytes = count_input_size(&src_dir);
+
+    // Set up two devices: primary for data, temp for metadata
+    let primary_path = unsafe { CStr::from_ptr(dev_opts.path) }
+        .to_string_lossy()
+        .into_owned();
+    let metadata_path = format!("{}.metadata", primary_path);
+    let metadata_path_cstr = CString::new(metadata_path.as_str())?;
+
+    let mut devs = vec![dev_opts];
+    let mut meta_dev = c::dev_opts {
+        path: metadata_path_cstr.as_ptr(),
+        ..Default::default()
+    };
+    // data_allowed will be set below via opt_set
+
+    // Check temp file doesn't exist
+    if std::path::Path::new(&metadata_path).exists() {
+        bail!("temporary metadata device {} already exists", metadata_path);
+    }
+
+    {
+        let dev0_opts = &mut devs[0].opts;
+        opt_set!(dev0_opts, data_allowed, (1u64 << c::bch_data_type::BCH_DATA_user as u64) as u8);
+    }
+    {
+        let meta_opts = &mut meta_dev.opts;
+        opt_set!(
+            meta_opts,
+            data_allowed,
+            ((1u64 << c::bch_data_type::BCH_DATA_journal as u64)
+                | (1u64 << c::bch_data_type::BCH_DATA_btree as u64)) as u8
+        );
+    }
+    devs.push(meta_dev);
+
+    // Open devices for format
+    let target_size = input_bytes * 2;
+    for dev in &mut devs {
+        let ret = unsafe { c::open_for_format(dev, c::BLK_OPEN_CREAT, false) };
+        if ret != 0 {
+            let path = unsafe { CStr::from_ptr(dev.path) }.to_string_lossy();
+            bail!("Error opening {}: {}", path, std::io::Error::from_raw_os_error(-ret));
+        }
+        if unsafe { libc::ftruncate((*dev.bdev).bd_fd, target_size as i64) } != 0 {
+            bail!("ftruncate error: {}", std::io::Error::last_os_error());
+        }
+    }
+
+    format_opts.no_sb_at_end = true;
+
+    let dev_list = c::dev_opts_list {
+        nr: devs.len(),
+        size: devs.len(),
+        data: devs.as_mut_ptr(),
+        preallocated: Default::default(),
+    };
+
+    let sb = crate::wrappers::format::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
+    if sb.is_null() {
+        bail!("bch2_format returned null");
+    }
+
+    if verbosity > 1 {
+        let mut buf = Printbuf::new();
+        buf.set_human_readable(true);
+        unsafe {
+            buf.sb_to_text(
+                std::ptr::null_mut(),
+                &*sb,
+                false,
+                1 << c::bch_sb_field_type::BCH_SB_FIELD_members_v2 as u32,
+            );
+        }
+        print!("{}", buf);
+    }
+
+    // Open filesystem
+    let device_paths: Vec<PathBuf> = devs
+        .iter()
+        .map(|d| {
+            let s = unsafe { CStr::from_ptr(d.path) }.to_string_lossy();
+            PathBuf::from(s.as_ref())
+        })
+        .collect();
+
+    let mut opts: c::bch_opts = Default::default();
+    opt_set!(opts, copygc_enabled, 0u8);
+    opt_set!(opts, reconcile_enabled, 0u8);
+    opt_set!(opts, nostart, 1u8);
+
+    let fs = Fs::open(&device_paths, opts)
+        .map_err(|e| anyhow!("error opening {}: {}", device_paths[0].display(), e))?;
+
+    fs.set_loglevel(5 + verbosity.saturating_sub(1));
+
+    // Delete temp metadata file now that it's open
+    let _ = std::fs::remove_file(&metadata_path);
+
+    fs.start().map_err(|e| anyhow!("starting fs: {}", e))?;
+
+    let src_cstr = CString::new(src_path)?;
+
+    let src_fd = unsafe { libc::open(src_cstr.as_ptr(), libc::O_RDONLY) };
+    if src_fd < 0 {
+        bail!("error opening {}: {}", src_path, std::io::Error::last_os_error());
+    }
+
+    let result = (|| -> Result<()> {
+        let ret = unsafe { rust_copy_fs(fs.raw, src_fd, src_cstr.as_ptr(), verbosity) };
+        if ret != 0 {
+            bail!("syncing data: {}", std::io::Error::from_raw_os_error(-ret));
+        }
+        finish_image(&fs, keep_alloc, verbosity)?;
+        Ok(())
+    })();
+
+    unsafe { libc::close(src_fd) };
+
+    if let Err(e) = result {
+        for d in &devs {
+            let path = unsafe { CStr::from_ptr(d.path) }.to_string_lossy();
+            let _ = std::fs::remove_file(path.as_ref());
+        }
+        return Err(e);
+    }
+
+    let ret = fs.exit();
+    if ret != 0 {
+        bail!(
+            "error shutting down new filesystem: {}",
+            unsafe { CStr::from_ptr(c::bch2_err_str(ret)) }.to_string_lossy()
+        );
+    }
+
+    Ok(())
+}
+
+/// Update an existing filesystem image from a directory.
+fn image_update_inner(
+    src_path: &str,
+    dst_image: &str,
+    keep_alloc: bool,
+    verbosity: u32,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let src_dir = std::fs::File::open(src_path)?;
+    let meta = src_dir.metadata()?;
+    if !meta.is_dir() {
+        bail!("{} is not a directory", src_path);
+    }
+
+    let input_bytes = count_input_size(&src_dir);
+    drop(src_dir);
+
+    // Grow existing image to make room
+    let dst_meta = std::fs::metadata(dst_image)?;
+    let new_size = dst_meta.size() + input_bytes * 2;
+    if unsafe { libc::truncate(CString::new(dst_image)?.as_ptr(), new_size as i64) } != 0 {
+        bail!("truncate error: {}", std::io::Error::last_os_error());
+    }
+
+    // Open filesystem
+    let mut opts: c::bch_opts = Default::default();
+    opt_set!(opts, copygc_enabled, 0u8);
+    opt_set!(opts, reconcile_enabled, 0u8);
+    opt_set!(opts, nostart, 1u8);
+
+    let fs = Fs::open(&[PathBuf::from(dst_image)], opts)
+        .map_err(|e| anyhow!("error opening image: {}", e))?;
+
+    fs.set_loglevel(5 + verbosity.saturating_sub(1));
+
+    // Add temporary metadata device
+    let metadata_path = format!("{}.metadata", dst_image);
+    let metadata_path_cstr = CString::new(metadata_path.as_str())?;
+
+    let mut dev_opts: c::dev_opts = Default::default();
+    dev_opts.path = metadata_path_cstr.as_ptr();
+
+    let ret = unsafe { c::open_for_format(&mut dev_opts, c::BLK_OPEN_CREAT, false) };
+    if ret != 0 {
+        bail!("error opening {}: {}", metadata_path, std::io::Error::last_os_error());
+    }
+
+    let metadata_dev_size = std::cmp::max(
+        input_bytes,
+        unsafe { (*fs.raw).opts.btree_node_size as u64 * c::BCH_MIN_NR_NBUCKETS as u64 },
+    );
+
+    if unsafe { libc::ftruncate((*dev_opts.bdev).bd_fd, metadata_dev_size as i64) } != 0 {
+        bail!("ftruncate error: {}", std::io::Error::last_os_error());
+    }
+
+    let ret = unsafe {
+        c::bch2_format_for_device_add(
+            &mut dev_opts,
+            (*fs.raw).opts.block_size as u32,
+            (*fs.raw).opts.btree_node_size,
+        )
+    };
+    if ret != 0 {
+        bail!("formatting metadata device: {}", unsafe {
+            CStr::from_ptr(c::bch2_err_str(ret))
+        }.to_string_lossy());
+    }
+
+    fs.dev_add(&metadata_path)
+        .map_err(|e| anyhow!("error adding metadata device: {}", e))?;
+
+    set_data_allowed_for_image_update(&fs);
+
+    fs.start().map_err(|e| anyhow!("starting fs: {}", e))?;
+
+    if verbosity > 1 {
+        println!("Moving btree to temp device");
+    }
+    move_btree(&fs, true, 1)
+        .map_err(|e| anyhow!("migrating btree to temp device: {}", e))?;
+
+    // Delete xattrs — they will be recreated
+    if verbosity > 1 {
+        println!("Deleting xattrs");
+    }
+    fs.btree_delete_range(
+        c::btree_id::BTREE_ID_xattrs,
+        POS_MIN,
+        SPOS_MAX,
+        c::btree_iter_update_trigger_flags::BTREE_ITER_all_snapshots,
+    )
+    .map_err(|e| anyhow!("deleting xattrs: {}", e))?;
+
+    if verbosity > 1 {
+        println!("Syncing data");
+    }
+
+    let src_cstr = CString::new(src_path)?;
+
+    let src_fd = unsafe { libc::open(src_cstr.as_ptr(), libc::O_RDONLY) };
+    if src_fd < 0 {
+        bail!("error opening {}: {}", src_path, std::io::Error::last_os_error());
+    }
+
+    let result = (|| -> Result<()> {
+        let ret = unsafe { rust_copy_fs(fs.raw, src_fd, src_cstr.as_ptr(), verbosity) };
+        if ret != 0 {
+            bail!("syncing data: {}", std::io::Error::from_raw_os_error(-ret));
+        }
+        finish_image(&fs, keep_alloc, verbosity)?;
+        Ok(())
+    })();
+
+    unsafe { libc::close(src_fd) };
+
+    let exit_ret = fs.exit();
+    let _ = std::fs::remove_file(&metadata_path);
+
+    if let Err(e) = result {
+        return Err(e);
+    }
+    if exit_ret != 0 {
+        bail!(
+            "error shutting down filesystem: {}",
+            unsafe { CStr::from_ptr(c::bch2_err_str(exit_ret)) }.to_string_lossy()
+        );
+    }
+
+    Ok(())
+}
+
+// --- Argument parsing (unchanged) ---
 
 fn image_create_usage() {
     let fs_opts = opts_usage_str(
@@ -289,7 +976,6 @@ pub fn cmd_image_create(argv: Vec<String>) -> Result<()> {
     // Build C format_opts
     let label_cstr = fs_label.as_ref().map(|l| CString::new(l.as_str())).transpose()?;
     let dev_label_cstr = dev_label.as_ref().map(|l| CString::new(l.as_str())).transpose()?;
-    let source_cstr = CString::new(source.as_str())?;
     let path_cstr = CString::new(image_path.as_str())?;
 
     let mut fmt_opts = c::format_opts {
@@ -327,22 +1013,19 @@ pub fn cmd_image_create(argv: Vec<String>) -> Result<()> {
         c_dev_opts.label = l.as_ptr();
     }
 
-    // rust_image_create either returns on success or calls exit() on error
-    unsafe {
-        rust_image_create(
-            fs_opt_strs,
-            fs_opts,
-            fmt_opts,
-            c_dev_opts,
-            source_cstr.as_ptr(),
-            keep_alloc,
-            verbosity,
-        );
-    }
+    let result = image_create_inner(
+        fs_opt_strs,
+        fs_opts,
+        fmt_opts,
+        c_dev_opts,
+        &source,
+        keep_alloc,
+        verbosity,
+    );
 
     unsafe { c::bch2_opt_strs_free(&mut fs_opt_strs) };
 
-    Ok(())
+    result
 }
 
 /// Update a filesystem image, minimizing changes
@@ -379,22 +1062,5 @@ pub fn cmd_image_update(argv: Vec<String>) -> Result<()> {
         1 + cli.verbose as u32
     };
 
-    let source_cstr = CString::new(cli.source.as_str())?;
-    let image_cstr = CString::new(cli.image.as_str())?;
-
-    let ret = unsafe {
-        rust_image_update(
-            source_cstr.as_ptr(),
-            image_cstr.as_ptr(),
-            cli.keep_alloc,
-            verbosity,
-        )
-    };
-
-    if ret != 0 {
-        // Error messages already printed by C code
-        process::exit(ret);
-    }
-
-    Ok(())
+    image_update_inner(&cli.source, &cli.image, cli.keep_alloc, verbosity)
 }
