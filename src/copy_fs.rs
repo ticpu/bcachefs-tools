@@ -185,7 +185,7 @@ fn unlink_and_rm(
         fs,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
-        c::bch_trans_commit_flags::BCH_TRANS_COMMIT_no_enospc,
+        c::bch_trans_commit_flags::BCH_TRANS_COMMIT_no_enospc as u32,
         |trans| {
             ret_to_result(unsafe {
                 c::bch2_unlink_trans(
@@ -219,7 +219,7 @@ fn update_inode(fs: &Fs, inode: &c::bch_inode_unpacked) -> Result<(), BchError> 
             c::btree_id::BTREE_ID_inodes,
             packed.inode.__bindgen_anon_1.k_i.as_mut(),
             std::ptr::null_mut(),
-            std::mem::transmute::<u32, c::bch_trans_commit_flags>(0),
+            std::mem::transmute::<u32, c::bch_trans_commit_flags>(0u32),
             c::btree_iter_update_trigger_flags::BTREE_ITER_cached,
         ))
     }
@@ -261,7 +261,7 @@ fn create_or_update_link(
         fs,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
-        unsafe { std::mem::transmute::<u32, c::bch_trans_commit_flags>(0) },
+        0u32,
         |trans| {
             ret_to_result(unsafe {
                 c::bch2_link_trans(trans.raw(), dir_inum, &mut dir_u, inum, &mut inode, &qstr)
@@ -318,7 +318,7 @@ fn create_or_update_file(
             fs,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            unsafe { std::mem::transmute::<u32, c::bch_trans_commit_flags>(0) },
+            0u32,
             |trans| {
                 ret_to_result(unsafe {
                     c::bch2_create_trans(
@@ -415,7 +415,7 @@ fn copy_xattrs(
             fs,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            unsafe { std::mem::transmute::<u32, c::bch_trans_commit_flags>(0) },
+            0u32,
             |trans| {
                 ret_to_result(unsafe {
                     c::bch2_xattr_set(
