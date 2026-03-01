@@ -247,7 +247,7 @@ int rust_write_data(struct bch_fs *c,
 	op.nr_replicas	= replicas;
 	op.subvol	= subvol;
 	op.pos		= SPOS(inum, offset >> 9, U32_MAX);
-	op.flags	|= BCH_WRITE_sync;
+	op.flags	|= BCH_WRITE_sync|BCH_WRITE_only_specified_devs;
 
 	int ret = bch2_disk_reservation_get(c, &op.res, len >> 9,
 					    replicas, 0);
@@ -291,8 +291,11 @@ int rust_read_data(struct bch_fs *c,
 	struct bch_inode_unpacked inode;
 	subvol_inum si = { .subvol = subvol, .inum = inum };
 	int ret = bch2_inode_find_by_inum(c, si, &inode);
-	if (ret)
+	if (ret) {
+		fprintf(stderr, "rust_read_data: inode lookup failed inum=%llu subvol=%u: %s\n",
+			(unsigned long long)inum, subvol, bch2_err_str(ret));
 		return ret;
+	}
 
 	struct bch_inode_opts opts;
 	bch2_inode_opts_get_inode(c, &inode, &opts);
@@ -300,6 +303,13 @@ int rust_read_data(struct bch_fs *c,
 	closure_get(&cl);
 	bch2_read(c, rbio_init(&rbio.bio, c, opts, rust_read_endio), si);
 	closure_sync(&cl);
+
+	if (rbio.ret)
+		fprintf(stderr, "rust_read_data: read failed inum=%llu subvol=%u offset=%llu len=%zu bi_size=%llu: %s\n",
+			(unsigned long long)inum, subvol,
+			(unsigned long long)offset, len,
+			(unsigned long long)inode.bi_size,
+			bch2_err_str(rbio.ret));
 
 	return rbio.ret;
 }
