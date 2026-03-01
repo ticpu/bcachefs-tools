@@ -304,7 +304,7 @@ impl Passphrase {
 
         ensure!(
             sb_key.magic != bch_key_magic,
-            "filesystem does not have encryption key"
+            "filesystem encryption key is not passphrase-protected"
         );
 
         let mut passphrase_key: bch_key = self.derive(crypt);

@@ -92,8 +92,11 @@ fn open_nostart(devs: &[PathBuf]) -> Result<Fs> {
         .map_err(|e| anyhow::anyhow!("Error opening {:?}: {}", devs, e))
 }
 
-/// Open filesystem, verify encryption is enabled, and verify the current passphrase.
-/// Returns the open filesystem and the decrypted raw key.
+/// Open filesystem, verify encryption is enabled, and obtain the raw key.
+///
+/// If the key is encrypted (passphrase-protected), prompts for and verifies
+/// the current passphrase. If the key is unencrypted (formatted with
+/// --no_passphrase), reads the raw key directly.
 fn open_and_verify(devs: &[PathBuf]) -> Result<(Fs, bch_key)> {
     let fs = open_nostart(devs)?;
     let sb_handle = fs.sb_handle();
@@ -102,13 +105,17 @@ fn open_and_verify(devs: &[PathBuf]) -> Result<(Fs, bch_key)> {
         bail!("Filesystem does not have encryption enabled");
     }
 
-    let uuid = sb_handle.sb().uuid();
-    let old_passphrase = Passphrase::new_from_prompt(&uuid)
-        .context("reading current passphrase")?;
-    let (_, sb_key) = old_passphrase.check(sb_handle)
-        .context("verifying current passphrase")?;
-
-    Ok((fs, sb_key.key))
+    if sb_is_encrypted(sb_handle) {
+        let uuid = sb_handle.sb().uuid();
+        let old_passphrase = Passphrase::new_from_prompt(&uuid)
+            .context("reading current passphrase")?;
+        let (_, sb_key) = old_passphrase.check(sb_handle)
+            .context("verifying current passphrase")?;
+        Ok((fs, sb_key.key))
+    } else {
+        let raw_key = sb_handle.sb().crypt().unwrap().key().key;
+        Ok((fs, raw_key))
+    }
 }
 
 /// Write a new encrypted key to the crypt superblock field.
