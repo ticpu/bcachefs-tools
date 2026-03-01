@@ -486,8 +486,10 @@ fn image_create_inner(
     }
     devs.push(meta_dev);
 
-    // Open devices for format
-    let target_size = input_bytes * 2;
+    // Open devices for format — both primary and metadata get the same
+    // initial size. 64MB floor ensures the metadata device has enough
+    // journal capacity for finish_image's btree migration.
+    let target_size = std::cmp::max(input_bytes * 2, 64 << 20);
     for dev in &mut devs {
         let ret = unsafe { c::open_for_format(dev, c::BLK_OPEN_CREAT, false) };
         if ret != 0 {
@@ -636,9 +638,16 @@ fn image_update_inner(
         bail!("error opening {}: {}", metadata_path, std::io::Error::last_os_error());
     }
 
+    // Temp device needs enough space for btree nodes AND adequate journal
+    // for the btree migration workload. With small bucket sizes, the
+    // journal gets 1/128th of the device (min 8 buckets), which can be
+    // far too little. 64MB floor ensures reasonable journal capacity.
     let metadata_dev_size = std::cmp::max(
         input_bytes,
-        unsafe { (*fs.raw).opts.btree_node_size as u64 * c::BCH_MIN_NR_NBUCKETS as u64 },
+        std::cmp::max(
+            unsafe { (*fs.raw).opts.btree_node_size as u64 * c::BCH_MIN_NR_NBUCKETS as u64 },
+            64 << 20,
+        ),
     );
 
     if unsafe { libc::ftruncate((*dev_opts.bdev).bd_fd, metadata_dev_size as i64) } != 0 {
