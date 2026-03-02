@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use bch_bindgen::c;
 use bch_bindgen::opt_set;
-use bch_bindgen::fs::Fs;
 use anyhow::bail;
 use crate::wrappers::bch_err_str;
 
@@ -42,7 +41,7 @@ pub fn cmd_strip_alloc(argv: Vec<String>) -> anyhow::Result<()> {
         let mut opts: c::bch_opts = Default::default();
         opt_set!(opts, nostart, 1);
 
-        let fs = Fs::open(&devs, opts)
+        let fs = crate::device_scan::open_scan(&devs, opts)
             .map_err(|e| anyhow::anyhow!("Error opening filesystem: {}", e))?;
 
         if unsafe { (*fs.raw).sb.clean } == 0 {

@@ -655,6 +655,6 @@ pub fn cmd_dump(argv: Vec<String>) -> Result<()> {
         opt_set!(opts, verbose, 1);
     }
 
-    let fs = Fs::open(&devs, opts)?;
+    let fs = crate::device_scan::open_scan(&devs, opts)?;
     dump_fs(&fs, &cli, sanitize, sanitize_filenames)
 }

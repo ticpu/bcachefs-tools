@@ -3,7 +3,6 @@ use std::fmt::Write;
 use anyhow::{bail, Result};
 use bch_bindgen::bcachefs;
 use bch_bindgen::c;
-use bch_bindgen::fs::Fs;
 use bch_bindgen::opt_set;
 use clap::Parser;
 
@@ -50,7 +49,7 @@ pub fn cmd_recovery_pass(argv: Vec<String>) -> Result<()> {
     let mut fs_opts = bcachefs::bch_opts::default();
     opt_set!(fs_opts, nostart, 1);
 
-    let fs = Fs::open(&devs, fs_opts)?;
+    let fs = crate::device_scan::open_scan(&devs, fs_opts)?;
 
     unsafe {
         let _sb_lock = crate::wrappers::sb_lock(fs.raw);

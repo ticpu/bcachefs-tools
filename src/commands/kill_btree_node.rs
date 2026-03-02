@@ -17,7 +17,6 @@ use bch_bindgen::bkey::BkeySC;
 use bch_bindgen::btree::{BtreeIterFlags, BtreeNodeIter, BtreeTrans};
 use bch_bindgen::c;
 use bch_bindgen::data::extents::bkey_ptrs;
-use bch_bindgen::fs::Fs;
 use bch_bindgen::opt_set;
 use clap::Parser;
 
@@ -90,7 +89,7 @@ pub fn cmd_kill_btree_node(argv: Vec<String>) -> Result<()> {
     let mut fs_opts = bcachefs::bch_opts::default();
     opt_set!(fs_opts, read_only, 1);
 
-    let fs = Fs::open(&cli.devices, fs_opts)?;
+    let fs = crate::device_scan::open_scan(&cli.devices, fs_opts)?;
 
     let block_size = unsafe { (*fs.raw).opts.block_size } as usize;
     let dev_idx = cli.dev.unwrap_or(-1);

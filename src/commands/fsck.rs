@@ -15,6 +15,7 @@ use rustix::event::{poll, PollFd, PollFlags};
 use crate::wrappers::handle::BcachefsHandle;
 use bch_bindgen::printbuf::Printbuf;
 use crate::wrappers::sysfs;
+use crate::device_scan;
 
 // _IOW(0xbc, 19, struct bch_ioctl_fsck_offline) — sizeof = 24
 const BCH_IOCTL_FSCK_OFFLINE: libc::c_ulong = 0x4018bc13;
@@ -279,6 +280,23 @@ pub fn cmd_fsck(argv: Vec<String>) -> Result<()> {
         }
     }
 
+    // Discover all devices in a multi-device filesystem. When the user
+    // specifies a single device, scan for other members by UUID — same
+    // as mount does.
+    let devices: Vec<String> = if devices.len() == 1 {
+        let scan_opts = bch_bindgen::opts::parse_mount_opts(None, None, true)
+            .unwrap_or_default();
+        match device_scan::scan_sbs(&devices[0], &scan_opts) {
+            Ok(sbs) => sbs.into_iter()
+                .map(|(p, _)| p.to_string_lossy().into_owned())
+                .collect(),
+            Err(_) => devices.clone(),
+        }
+    } else {
+        devices.clone()
+    };
+    let devices = &devices;
+
     if kernel == Some(true) {
         let _ = std::process::Command::new("modprobe")
             .arg("bcachefs")
@@ -391,7 +409,7 @@ fn run_userspace_fsck(devices: &[String], opts_str: &str) -> Result<()> {
         process::exit(ret);
     }
 
-    let fs = Fs::open(&dev_paths, fs_opts)?;
+    let fs = device_scan::open_scan(&dev_paths, fs_opts)?;
 
     let mut buf = Printbuf::new();
     let ret = unsafe { c::bch2_fs_fsck_errcode(fs.raw, buf.as_raw()) };

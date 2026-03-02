@@ -88,7 +88,7 @@ fn parse_device_list(args: &[String]) -> Vec<PathBuf> {
 fn open_nostart(devs: &[PathBuf]) -> Result<Fs> {
     let mut opts = c::bch_opts::default();
     opt_set!(opts, nostart, 1);
-    Fs::open(devs, opts)
+    crate::device_scan::open_scan(devs, opts)
         .map_err(|e| anyhow::anyhow!("Error opening {:?}: {}", devs, e))
 }
 

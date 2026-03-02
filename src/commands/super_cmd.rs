@@ -14,7 +14,6 @@ use std::ops::ControlFlow;
 use anyhow::{anyhow, Result};
 use bch_bindgen::bcachefs;
 use bch_bindgen::c;
-use bch_bindgen::fs::Fs;
 use bch_bindgen::opt_set;
 use clap::Parser;
 
@@ -86,7 +85,7 @@ pub fn cmd_show_super(argv: Vec<String>) -> Result<()> {
     opt_set!(fs_opts, no_version_check, 1);
     opt_set!(fs_opts, nostart, 1);
 
-    let fs = Fs::open(&[std::path::PathBuf::from(&cli.device)], fs_opts)?;
+    let fs = bch_bindgen::fs::Fs::open(&[std::path::PathBuf::from(&cli.device)], fs_opts)?;
 
     // Use the per-device superblock, not c->disk_sb.sb — the filesystem-level
     // copy omits fields like magic and layout that __copy_super doesn't transfer.

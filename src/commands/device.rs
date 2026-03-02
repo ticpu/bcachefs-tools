@@ -323,7 +323,7 @@ fn set_state_offline(device: &str, new_state: u32) -> Result<()> {
     let dev_idx = unsafe { (*sb_handle.sb).dev_idx as u32 };
     unsafe { c::bch2_free_super(&mut sb_handle) };
 
-    let fs = Fs::open(&[PathBuf::from(device)], opts)
+    let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
         .map_err(|e| anyhow!("Error opening filesystem: {}", e))?;
 
     {
@@ -407,7 +407,7 @@ fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
     use bch_bindgen::printbuf::Printbuf;
 
     let opts: c::bch_opts = Default::default();
-    let fs = Fs::open(&[PathBuf::from(device)], opts)
+    let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
         .map_err(|e| anyhow!("error opening {}: {}", device, e))?;
 
     let ca = find_single_online_dev(&fs)?;
@@ -469,7 +469,7 @@ pub fn cmd_device_resize_journal(argv: Vec<String>) -> Result<()> {
 
 fn resize_journal_offline(device: &str, size_sectors: u64) -> Result<()> {
     let opts: c::bch_opts = Default::default();
-    let fs = Fs::open(&[PathBuf::from(device)], opts)
+    let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
         .map_err(|e| anyhow!("error opening {}: {}", device, e))?;
 
     let ca = find_single_online_dev(&fs)?;

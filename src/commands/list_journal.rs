@@ -9,7 +9,6 @@ use bch_bindgen::journal::{
     jset_vstruct_bytes, jset_vstruct_sectors, jset_no_flush,
 };
 use bch_bindgen::opt_set;
-use bch_bindgen::fs::Fs;
 use clap::Parser;
 
 use bch_bindgen::printbuf::Printbuf;
@@ -695,7 +694,7 @@ pub fn cmd_list_journal(argv: Vec<String>) -> Result<()> {
     }
 
     let devs: Vec<std::path::PathBuf> = cli.devices.iter().map(std::path::PathBuf::from).collect();
-    let fs = Fs::open(&devs, opts)
+    let fs = crate::device_scan::open_scan(&devs, opts)
         .map_err(|e| anyhow::anyhow!("error opening {}: {}", cli.devices[0], e))?;
 
     let c_fs = fs.raw;
