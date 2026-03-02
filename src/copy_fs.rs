@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use bch_bindgen::btree;
 use bch_bindgen::c;
@@ -72,6 +73,27 @@ impl Drop for AlignedBuf {
 
 fn ret_to_result(ret: i32) -> Result<(), BchError> {
     errcode::ret_to_result(ret).map(|_| ())
+}
+
+/// Convert the last OS error (errno) into a BchError.
+fn last_err() -> BchError {
+    BchError::from_raw(-std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+}
+
+/// Convert a rustix error into a BchError.
+fn rustix_err(e: rustix::io::Errno) -> BchError {
+    BchError::from_raw(-e.raw_os_error())
+}
+
+/// Convert a rustix FileType to a DT_* constant.
+fn file_type_to_dtype(ft: rustix::fs::FileType) -> u8 {
+    use rustix::fs::FileType;
+    match ft {
+        FileType::RegularFile     => DT_REG,
+        FileType::Directory       => DT_DIR,
+        FileType::Symlink         => DT_LNK,
+        _                         => 0, // DT_UNKNOWN
+    }
 }
 
 extern "C" {
@@ -179,7 +201,7 @@ fn unlink_and_rm(
     child_name: &CStr,
 ) -> Result<(), BchError> {
     let qstr = make_qstr(child_name);
-    let mut child: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+    let mut child: c::bch_inode_unpacked = Default::default();
 
     btree::trans_commit_do(
         fs,
@@ -211,7 +233,7 @@ fn unlink_and_rm(
 
 fn update_inode(fs: &Fs, inode: &c::bch_inode_unpacked) -> Result<(), BchError> {
     unsafe {
-        let mut packed: c::bkey_inode_buf = std::mem::zeroed();
+        let mut packed: c::bkey_inode_buf = Default::default();
         c::bch2_inode_pack(&mut packed, inode);
         packed.inode.__bindgen_anon_1.k.as_mut().p.snapshot = u32::MAX;
         ret_to_result(c::bch2_btree_insert(
@@ -233,11 +255,11 @@ fn create_or_update_link(
     inum: c::subvol_inum,
     _mode: u32,
 ) -> Result<(), BchError> {
-    let mut dir_hash: c::bch_hash_info = unsafe { std::mem::zeroed() };
+    let mut dir_hash: c::bch_hash_info = Default::default();
     ret_to_result(unsafe { c::bch2_hash_info_init(fs.raw, dir, &mut dir_hash) })?;
 
     let qstr = make_qstr(name);
-    let mut old_inum: c::subvol_inum = unsafe { std::mem::zeroed() };
+    let mut old_inum: c::subvol_inum = Default::default();
     let ret = unsafe { c::bch2_dirent_lookup(fs.raw, dir_inum, &dir_hash, &qstr, &mut old_inum) };
     let lookup_err = errcode::ret_to_result(ret as i32);
 
@@ -254,8 +276,8 @@ fn create_or_update_link(
         }
     }
 
-    let mut dir_u: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
-    let mut inode: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+    let mut dir_u: c::bch_inode_unpacked = Default::default();
+    let mut inode: c::bch_inode_unpacked = Default::default();
 
     btree::trans_commit_do(
         fs,
@@ -281,17 +303,17 @@ fn create_or_update_file(
     mode: u32,
     rdev: u64,
 ) -> Result<c::bch_inode_unpacked, BchError> {
-    let mut dir_hash: c::bch_hash_info = unsafe { std::mem::zeroed() };
+    let mut dir_hash: c::bch_hash_info = Default::default();
     ret_to_result(unsafe { c::bch2_hash_info_init(fs.raw, dir, &mut dir_hash) })?;
 
     let qname = make_qstr(name);
-    let mut child_inum: c::subvol_inum = unsafe { std::mem::zeroed() };
+    let mut child_inum: c::subvol_inum = Default::default();
 
     let ret = unsafe {
         c::bch2_dirent_lookup(fs.raw, dir_inum, &dir_hash, &qname, &mut child_inum)
     };
 
-    let mut child_inode: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+    let mut child_inode: c::bch_inode_unpacked = Default::default();
 
     if errcode::ret_to_result(ret as i32).is_ok() {
         // Already exists — update
@@ -457,7 +479,7 @@ fn copy_data(
     start: u64,
     end: u64,
 ) -> Result<(), BchError> {
-    let block_size = unsafe { c::rust_block_bytes(fs.raw) } as u64;
+    let block_size = fs.block_bytes();
     let mut pos = start;
 
     while pos < end {
@@ -467,7 +489,7 @@ fn copy_data(
         let mut buf = AlignedBuf::new(padded);
         let nread = unsafe { libc::pread(src_fd, buf.as_mut_ptr() as *mut libc::c_void, len, pos as i64) };
         if nread < 0 {
-            return Err(BchError::from_raw(-(unsafe { *libc::__errno_location() })));
+            return Err(last_err());
         }
 
         write_data(fs, dst_inode, pos, &buf)?;
@@ -498,7 +520,7 @@ fn copy_link(
     dst: &mut c::bch_inode_unpacked,
     src: &CStr,
 ) -> Result<(), BchError> {
-    let block_size = unsafe { c::rust_block_bytes(fs.raw) } as u64;
+    let block_size = fs.block_bytes();
 
     let mut i_sectors_delta: i64 = 0;
     ret_to_result(unsafe {
@@ -511,7 +533,7 @@ fn copy_link(
         libc::readlink(src.as_ptr(), buf.as_mut_ptr() as *mut i8, buf.len())
     };
     if ret < 0 {
-        return Err(BchError::from_raw(-(unsafe { *libc::__errno_location() })));
+        return Err(last_err());
     }
     let link_len = ret as u64;
     let padded = (link_len.div_ceil(block_size) * block_size) as usize;
@@ -527,7 +549,7 @@ fn link_file_data(
     src_path: &CStr,
     src_size: u64,
 ) -> Result<(), BchError> {
-    let block_size = unsafe { c::rust_block_bytes(fs.raw) } as u64;
+    let block_size = fs.block_bytes();
 
     // First pass: check for unknown extents and fsync if found
     let f = unsafe { std::os::fd::BorrowedFd::borrow_raw(src_fd) };
@@ -706,7 +728,7 @@ fn copy_sync_file_range(
     src_size: u64,
     range: &Range,
 ) -> Result<(), BchError> {
-    let block_size = unsafe { c::rust_block_bytes(fs.raw) } as u64;
+    let block_size = fs.block_bytes();
     let mut start = range.start;
 
     while start != range.end {
@@ -745,7 +767,7 @@ fn copy_sync_file_data(
     src_fd: i32,
     src_size: u64,
 ) -> Result<(), BchError> {
-    let block_size = unsafe { c::rust_block_bytes(fs.raw) } as u64;
+    let block_size = fs.block_bytes();
     let mut i_sectors_delta: i64 = 0;
 
     let mut prev = Range { start: 0, end: 0 };
@@ -810,7 +832,7 @@ fn simple_readdir(
     dir_inum: c::subvol_inum,
     dir: &mut c::bch_inode_unpacked,
 ) -> Result<Vec<DirEntry>, BchError> {
-    let mut hash_info: c::bch_hash_info = unsafe { std::mem::zeroed() };
+    let mut hash_info: c::bch_hash_info = Default::default();
     ret_to_result(unsafe { c::bch2_hash_info_init(fs.raw, dir, &mut hash_info) })?;
 
     let mut entries = Vec::new();
@@ -842,7 +864,7 @@ fn recursive_remove(
 ) -> Result<(), BchError> {
     let child_inum = c::subvol_inum { subvol: dir_inum.subvol, inum: d.inum };
 
-    let mut child: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+    let mut child: c::bch_inode_unpacked = Default::default();
     ret_to_result(unsafe { c::bch2_inode_find_by_inum(fs.raw, child_inum, &mut child) })?;
 
     if (child.bi_mode as u32 & libc::S_IFMT) == libc::S_IFDIR {
@@ -912,47 +934,37 @@ fn copy_dir(
     fs: &Fs,
     s: &mut CopyFsState,
     dst: &mut c::bch_inode_unpacked,
-    src_fd: i32,
+    src_fd: OwnedFd,
     src_path: &CStr,
 ) -> Result<(), BchError> {
-    unsafe { libc::lseek(src_fd, 0, libc::SEEK_SET) };
-
-    let dir = unsafe { libc::fdopendir(src_fd) };
-    if dir.is_null() {
-        return Err(BchError::from_raw(-libc::ENOMEM));
-    }
+    // Dir::read_from borrows the fd (creating an internal dup for iteration),
+    // so src_fd remains available for fstatat/openat/fchdir below.
+    let mut dir = rustix::fs::Dir::read_from(&src_fd).map_err(rustix_err)?;
 
     let mut dirents = Vec::new();
 
-    loop {
-        unsafe { *libc::__errno_location() = 0 };
-        let d = unsafe { libc::readdir(dir) };
-        if d.is_null() {
-            if unsafe { *libc::__errno_location() } != 0 {
-                unsafe { libc::closedir(dir) };
-                return Err(BchError::from_raw(-(unsafe { *libc::__errno_location() })));
-            }
-            break;
-        }
+    while let Some(entry) = dir.read() {
+        let entry = entry.map_err(rustix_err)?;
 
-        let d = unsafe { &*d };
-        let name_bytes = unsafe { CStr::from_ptr(d.d_name.as_ptr()) };
+        let name = entry.file_name();
 
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         let ret = unsafe {
-            libc::fstatat(src_fd, name_bytes.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW)
+            libc::fstatat(src_fd.as_raw_fd(), name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW)
         };
         if ret < 0 {
             continue;
         }
 
         dirents.push(DirEntryInfo {
-            _inum: d.d_ino,
-            dtype: d.d_type,
-            name: name_bytes.to_owned(),
+            _inum: entry.ino(),
+            dtype: file_type_to_dtype(entry.file_type()),
+            name: name.to_owned(),
             stat,
         });
     }
+
+    drop(dir);
 
     // Sort by (type, name)
     dirents.sort_by(|a, b| {
@@ -963,8 +975,10 @@ fn copy_dir(
 
     delete_non_matching_dirents(fs, s, dir_inum, dst, &dirents)?;
 
+    let oflags = rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOATIME;
+
     for d in &dirents {
-        unsafe { libc::fchdir(src_fd) };
+        unsafe { libc::fchdir(src_fd.as_raw_fd()) };
 
         let name_str = d.name.to_str().unwrap_or("?");
         if name_str == "." || name_str == ".." || name_str == "lost+found" {
@@ -1018,32 +1032,22 @@ fn copy_dir(
 
         match mode_to_type(d.stat.st_mode) {
             DT_DIR => {
-                let fd = unsafe {
-                    libc::openat(src_fd, d.name.as_ptr(), libc::O_RDONLY | libc::O_NOATIME)
-                };
-                if fd < 0 {
-                    return Err(BchError::from_raw(-(unsafe { *libc::__errno_location() })));
-                }
-                let ret = copy_dir(fs, s, &mut inode, fd, &child_path);
-                // fd is consumed by fdopendir in recursive call
-                ret?;
+                let fd = rustix::fs::openat(&src_fd, &d.name, oflags, rustix::fs::Mode::empty())
+                    .map_err(rustix_err)?;
+                copy_dir(fs, s, &mut inode, fd, &child_path)?;
             }
             DT_REG => {
                 inode.bi_size = d.stat.st_size as u64;
 
-                let fd = unsafe {
-                    libc::openat(src_fd, d.name.as_ptr(), libc::O_RDONLY | libc::O_NOATIME)
-                };
-                if fd < 0 {
-                    return Err(BchError::from_raw(-(unsafe { *libc::__errno_location() })));
-                }
+                let fd = rustix::fs::openat(&src_fd, &d.name, oflags, rustix::fs::Mode::empty())
+                    .map_err(rustix_err)?;
 
                 if s.migrate_type == MigrateType::Migrate {
-                    link_file_data(fs, s, &mut inode, fd, &child_path, d.stat.st_size as u64)?;
+                    link_file_data(fs, s, &mut inode, fd.as_raw_fd(), &child_path, d.stat.st_size as u64)?;
                 } else {
-                    copy_sync_file_data(fs, s, dst_child_inum, &mut inode, fd, d.stat.st_size as u64)?;
+                    copy_sync_file_data(fs, s, dst_child_inum, &mut inode, fd.as_raw_fd(), d.stat.st_size as u64)?;
                 }
-                unsafe { libc::close(fd) };
+                // fd dropped here — close is automatic
             }
             DT_LNK => {
                 inode.bi_size = d.stat.st_size as u64;
@@ -1058,7 +1062,6 @@ fn copy_dir(
         update_inode(fs, &inode)?;
     }
 
-    unsafe { libc::closedir(dir) };
     Ok(())
 }
 
@@ -1113,7 +1116,7 @@ pub fn copy_fs(
         unsafe { libc::syncfs(src_fd) };
     }
 
-    let mut root_inode: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+    let mut root_inode: c::bch_inode_unpacked = Default::default();
     ret_to_result(unsafe {
         c::bch2_inode_find_by_inum(
             fs.raw,
@@ -1123,7 +1126,7 @@ pub fn copy_fs(
     })?;
 
     if unsafe { libc::fchdir(src_fd) } < 0 {
-        return Err(BchError::from_raw(-(unsafe { *libc::__errno_location() })));
+        return Err(last_err());
     }
 
     copy_times(fs, &mut root_inode, &stat);
@@ -1131,7 +1134,7 @@ pub fn copy_fs(
     let dot = CString::new(".").unwrap();
     copy_xattrs(fs, &mut root_inode, &dot)?;
 
-    let dup_fd = unsafe { libc::dup(src_fd) };
+    let dup_fd = unsafe { OwnedFd::from_raw_fd(libc::dup(src_fd)) };
     copy_dir(fs, s, &mut root_inode, dup_fd, src_path)?;
 
     if s.migrate_type == MigrateType::Migrate {

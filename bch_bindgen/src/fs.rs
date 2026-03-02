@@ -315,6 +315,11 @@ impl Fs {
         &mut (*self.raw).disk_sb
     }
 
+    /// Filesystem block size in bytes.
+    pub fn block_bytes(&self) -> u64 {
+        unsafe { c::rust_block_bytes(self.raw) as u64 }
+    }
+
     /// Set the filesystem log level.
     pub fn set_loglevel(&self, level: u32) {
         unsafe { (*self.raw).loglevel = level; }
