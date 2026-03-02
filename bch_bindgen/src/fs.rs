@@ -218,14 +218,18 @@ impl Fs {
         ret_to_result(unsafe { c::bch2_write_super(self.raw) })
     }
 
-    /// Start building a write operation.
-    pub fn write(&self) -> WriteOp<'_> {
-        WriteOp::new(self)
+    pub fn write(&self, inum: u64, offset: u64, subvol: u32, replicas: u32) -> WriteOp<'_> {
+        WriteOp::new(self, inum, offset, subvol, replicas)
     }
 
-    /// Start building a read operation.
-    pub fn read(&self) -> ReadOp<'_> {
-        ReadOp::new(self)
+    pub fn read<'a>(
+        &'a self,
+        inum: c::subvol_inum,
+        offset: u64,
+        inode: &c::bch_inode_unpacked,
+        buf: &'a mut [u8],
+    ) -> ReadOp {
+        ReadOp::new(self, inum, offset, inode, buf)
     }
 
     /// Check if a device index exists and has a device pointer.

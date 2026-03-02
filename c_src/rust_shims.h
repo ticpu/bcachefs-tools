@@ -103,13 +103,8 @@ struct bch_dev *rust_dev_tryget_noerror(struct bch_fs *c, unsigned dev);
 void rust_dev_put(struct bch_dev *ca);
 
 /*
- * Data IO shims — wraps bio/closure/write_op/read_bio setup.
- *
- * These bridge the gap between Rust async IO and the kernel's closure-based
- * completion model. Data must be block-aligned and <= 1MB.
- *
- * rust_write_data: bch2_write_op_init + closure_call(bch2_write)
- * rust_read_data:  bch2_read + closure_sync
+ * Data IO shims — wraps static inlines not available through bindgen.
+ * Data must be block-aligned and <= 1MB.
  */
 #define RUST_IO_MAX	(1 << 20)
 
@@ -119,10 +114,18 @@ int rust_write_data(struct bch_fs *c,
 		    __u32 subvol, __u32 replicas,
 		    __s64 *sectors_delta);
 
-int rust_read_data(struct bch_fs *c,
-		   __u64 inum, __u32 subvol,
-		   __u64 offset,
-		   void *buf, size_t len);
+/*
+ * Submit a read without waiting — Rust handles completion via endio.
+ * Caller must heap-allocate rbio and bvecs (they must outlive the IO).
+ */
+void rust_read_submit(struct bch_fs *c,
+		      struct bch_read_bio *rbio,
+		      struct bio_vec *bvecs, unsigned nr_bvecs,
+		      void *buf, size_t len,
+		      __u64 offset,
+		      struct bch_inode_opts opts,
+		      subvol_inum inum,
+		      bio_end_io_t endio);
 
 /*
  * Extent construction for migrate — wraps bkey_extent_init,

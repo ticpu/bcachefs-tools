@@ -262,57 +262,23 @@ int rust_write_data(struct bch_fs *c,
 	return op.error;
 }
 
-static void rust_read_endio(struct bio *bio)
+void rust_read_submit(struct bch_fs *c,
+		     struct bch_read_bio *rbio,
+		     struct bio_vec *bvecs, unsigned nr_bvecs,
+		     void *buf, size_t len,
+		     u64 offset,
+		     struct bch_inode_opts opts,
+		     subvol_inum inum,
+		     bio_end_io_t endio)
 {
-	closure_put(bio->bi_private);
+	bio_init(&rbio->bio, NULL, bvecs, nr_bvecs, 0);
+	rbio->bio.bi_opf		= REQ_OP_READ|REQ_SYNC;
+	rbio->bio.bi_iter.bi_sector	= offset >> 9;
+	bch2_bio_map(&rbio->bio, buf, len);
+
+	bch2_read(c, rbio_init(&rbio->bio, c, opts, endio), inum);
 }
 
-int rust_read_data(struct bch_fs *c,
-		   u64 inum, u32 subvol,
-		   u64 offset,
-		   void *buf, size_t len)
-{
-	BUG_ON(offset	& (block_bytes(c) - 1));
-	BUG_ON(len	& (block_bytes(c) - 1));
-	BUG_ON(len > RUST_IO_MAX);
-
-	struct closure cl;
-	closure_init_stack(&cl);
-
-	struct bch_read_bio rbio;
-	struct bio_vec bv[RUST_IO_MAX / PAGE_SIZE];
-
-	bio_init(&rbio.bio, NULL, bv, ARRAY_SIZE(bv), 0);
-	rbio.bio.bi_opf		= REQ_OP_READ|REQ_SYNC;
-	rbio.bio.bi_iter.bi_sector	= offset >> 9;
-	rbio.bio.bi_private		= &cl;
-	bch2_bio_map(&rbio.bio, buf, len);
-
-	struct bch_inode_unpacked inode;
-	subvol_inum si = { .subvol = subvol, .inum = inum };
-	int ret = bch2_inode_find_by_inum(c, si, &inode);
-	if (ret) {
-		fprintf(stderr, "rust_read_data: inode lookup failed inum=%llu subvol=%u: %s\n",
-			(unsigned long long)inum, subvol, bch2_err_str(ret));
-		return ret;
-	}
-
-	struct bch_inode_opts opts;
-	bch2_inode_opts_get_inode(c, &inode, &opts);
-
-	closure_get(&cl);
-	bch2_read(c, rbio_init(&rbio.bio, c, opts, rust_read_endio), si);
-	closure_sync(&cl);
-
-	if (rbio.ret)
-		fprintf(stderr, "rust_read_data: read failed inum=%llu subvol=%u offset=%llu len=%zu bi_size=%llu: %s\n",
-			(unsigned long long)inum, subvol,
-			(unsigned long long)offset, len,
-			(unsigned long long)inode.bi_size,
-			bch2_err_str(rbio.ret));
-
-	return rbio.ret;
-}
 
 /*
  * Extent construction for migrate — creates bkey extents pointing at

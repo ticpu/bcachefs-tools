@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Async IO operations on a bcachefs filesystem.
+// IO operations on a bcachefs filesystem.
 //
-// WriteOp and ReadOp map the kernel's closure-based IO completion model
-// to Rust's async/Future model:
+// ReadOp is a genuine async Future: the C shim submits the read and
+// returns immediately; the bio endio callback wakes the Rust waker
+// when IO completes (from the libaio completion thread in userspace).
 //
-//   closure_init / write_op_init  →  Future construction (builder pattern)
-//   closure_call(bch2_write)      →  first poll (submit IO)
-//   closure_sync                  →  poll returning Ready
-//
-// Initial implementation: synchronous C shims (complete on first poll).
-// Target: native Rust where closure completion drives the Waker.
+// WriteOp is still synchronous pending the same treatment.
+
+use std::cell::UnsafeCell;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Waker};
 
 use crate::c;
 use crate::errcode::{self, BchError};
@@ -18,6 +20,8 @@ use crate::fs::Fs;
 
 /// Maximum single IO size (must match RUST_IO_MAX in rust_shims.h).
 pub const MAX_IO_SIZE: usize = 1 << 20;
+const PAGE_SIZE: usize = 4096;
+const MAX_BVECS: usize = MAX_IO_SIZE / PAGE_SIZE;
 
 extern "C" {
     fn rust_write_data(
@@ -31,34 +35,26 @@ extern "C" {
         sectors_delta: *mut i64,
     ) -> i32;
 
-    fn rust_read_data(
+    fn rust_read_submit(
         c: *mut c::bch_fs,
-        inum: u64,
-        subvol: u32,
-        offset: u64,
+        rbio: *mut c::bch_read_bio,
+        bvecs: *mut c::bio_vec,
+        nr_bvecs: u32,
         buf: *mut std::ffi::c_void,
         len: usize,
-    ) -> i32;
+        offset: u64,
+        opts: c::bch_inode_opts,
+        inum: c::subvol_inum,
+        endio: c::bio_end_io_t,
+    );
 }
 
 /// Result of a write operation.
 pub struct WriteResult {
-    /// Change in inode sector count (from bch_write_op.i_sectors_delta).
     pub sectors_delta: i64,
 }
 
-/// Builder for a bcachefs write operation.
-///
-/// Maps to the kernel's `bch_write_op` + closure submission.
-///
-/// ```ignore
-/// let result = block_on(
-///     fs.write()
-///         .pos(inum, offset)
-///         .submit(data)
-/// )?;
-/// inode.bi_sectors += result.sectors_delta;
-/// ```
+/// A bcachefs write operation (still synchronous).
 pub struct WriteOp<'a> {
     fs: &'a Fs,
     inum: u64,
@@ -68,34 +64,11 @@ pub struct WriteOp<'a> {
 }
 
 impl<'a> WriteOp<'a> {
-    pub fn new(fs: &'a Fs) -> Self {
-        Self { fs, inum: 0, offset: 0, subvol: 1, replicas: 1 }
-    }
-
-    /// Set the target inode and byte offset.
-    pub fn pos(mut self, inum: u64, byte_offset: u64) -> Self {
-        self.inum = inum;
-        self.offset = byte_offset;
-        self
-    }
-
-    /// Set the subvolume (default: 1).
-    pub fn subvol(mut self, s: u32) -> Self {
-        self.subvol = s;
-        self
-    }
-
-    /// Set the replication factor (default: 1).
-    pub fn replicas(mut self, n: u32) -> Self {
-        self.replicas = n;
-        self
+    pub fn new(fs: &'a Fs, inum: u64, offset: u64, subvol: u32, replicas: u32) -> Self {
+        Self { fs, inum, offset, subvol, replicas }
     }
 
     /// Submit the write. Data must be block-aligned and <= MAX_IO_SIZE.
-    ///
-    /// Currently completes synchronously (C shim). When the closure
-    /// subsystem is ported to Rust, this becomes a genuine async
-    /// operation where IO completion wakes the Future.
     pub async fn submit(self, data: &[u8]) -> Result<WriteResult, BchError> {
         let mut sectors_delta: i64 = 0;
         let ret = unsafe {
@@ -115,81 +88,136 @@ impl<'a> WriteOp<'a> {
     }
 }
 
-/// Builder for a bcachefs read operation.
-///
-/// ```ignore
-/// block_on(
-///     fs.read()
-///         .pos(inum, offset)
-///         .submit(buf)
-/// )?;
-/// ```
-pub struct ReadOp<'a> {
-    fs: &'a Fs,
-    inum: u64,
-    offset: u64,
-    subvol: u32,
+// Heap-allocated state for an in-flight read. The bch_read_bio is at
+// offset 0 so the endio callback can cast bio → bch_read_bio → ReadState.
+#[repr(C)]
+struct ReadState {
+    rbio:       c::bch_read_bio,
+    bvecs:      [c::bio_vec; MAX_BVECS],
+    completed:  AtomicBool,
+    waker:      UnsafeCell<Option<Waker>>,
 }
 
-impl<'a> ReadOp<'a> {
-    pub fn new(fs: &'a Fs) -> Self {
-        Self { fs, inum: 0, offset: 0, subvol: 1 }
-    }
+// Safety: the waker is only written from poll (single-threaded) and
+// read from the endio callback. AtomicBool provides the ordering
+// guarantee: the endio stores completed=true with Release, and poll
+// loads with Acquire, so the waker write is visible before we read
+// completed=true.
+unsafe impl Send for ReadState {}
+unsafe impl Sync for ReadState {}
 
-    /// Set the source inode and byte offset.
-    pub fn pos(mut self, inum: u64, byte_offset: u64) -> Self {
-        self.inum = inum;
-        self.offset = byte_offset;
-        self
-    }
+/// Endio callback — called from the IO completion path (libaio thread).
+/// Gets the bio pointer, walks up to ReadState via container_of, signals
+/// completion and wakes the Rust future.
+unsafe extern "C" fn read_endio(bio: *mut c::bio) {
+    // container_of(bio, bch_read_bio, bio) — bio is the last field
+    let rbio = (bio as *mut u8)
+        .sub(std::mem::offset_of!(c::bch_read_bio, bio))
+        as *mut c::bch_read_bio;
+    // ReadState has rbio at offset 0
+    let state = rbio as *mut ReadState;
 
-    /// Set the subvolume (default: 1).
-    pub fn subvol(mut self, s: u32) -> Self {
-        self.subvol = s;
-        self
+    // Take and wake before setting completed, so the waker is consumed
+    // before any future poll sees completed=true.
+    let waker = (*(*state).waker.get()).take();
+    (*state).completed.store(true, Ordering::Release);
+    if let Some(w) = waker {
+        w.wake();
     }
+}
 
-    /// Submit the read. Buffer must be block-aligned and <= MAX_IO_SIZE.
-    ///
-    /// Currently completes synchronously (C shim). When the closure
-    /// subsystem is ported to Rust, this becomes a genuine async
-    /// operation where IO completion wakes the Future.
-    pub async fn submit(self, buf: &mut [u8]) -> Result<(), BchError> {
-        let ret = unsafe {
-            rust_read_data(
-                self.fs.raw,
-                self.inum,
-                self.subvol,
-                self.offset,
+/// Async read operation on a bcachefs filesystem.
+///
+/// IO is submitted in new(); poll checks for completion.
+pub struct ReadOp {
+    state: Pin<Box<ReadState>>,
+}
+
+impl ReadOp {
+    pub fn new(
+        fs: &Fs,
+        inum: c::subvol_inum,
+        offset: u64,
+        inode: &c::bch_inode_unpacked,
+        buf: &mut [u8],
+    ) -> Self {
+        let mut opts: c::bch_inode_opts = unsafe { std::mem::zeroed() };
+        unsafe {
+            c::bch2_inode_opts_get_inode(
+                fs.raw,
+                inode as *const _ as *mut _,
+                &mut opts,
+            );
+        }
+
+        let state = Box::pin(ReadState {
+            rbio:       unsafe { std::mem::zeroed() },
+            bvecs:      unsafe { std::mem::zeroed() },
+            completed:  AtomicBool::new(false),
+            waker:      UnsafeCell::new(None),
+        });
+
+        unsafe {
+            let state_ptr = &*state as *const ReadState as *mut ReadState;
+            rust_read_submit(
+                fs.raw,
+                &raw mut (*state_ptr).rbio,
+                (*state_ptr).bvecs.as_mut_ptr(),
+                MAX_BVECS as u32,
                 buf.as_mut_ptr() as *mut _,
                 buf.len(),
-            )
-        };
-        errcode::ret_to_result(ret)?;
-        Ok(())
+                offset,
+                opts,
+                inum,
+                Some(read_endio),
+            );
+        }
+
+        Self { state }
     }
 }
 
-/// Simple single-poll executor for futures that complete immediately.
+impl Future for ReadOp {
+    type Output = Result<(), BchError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        if this.state.completed.load(Ordering::Acquire) {
+            let ret = this.state.rbio.ret as i32;
+            Poll::Ready(errcode::ret_to_result(ret).map(|_| ()))
+        } else {
+            unsafe {
+                *this.state.waker.get() = Some(cx.waker().clone());
+            }
+            // Re-check after storing waker to avoid missed wakeup
+            if this.state.completed.load(Ordering::Acquire) {
+                let ret = this.state.rbio.ret as i32;
+                Poll::Ready(errcode::ret_to_result(ret).map(|_| ()))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Simple executor for futures — polls in a loop until Ready.
 ///
-/// Used during the transition from C closure-based IO to native Rust async.
-/// All current IO operations complete on first poll (synchronous C shims),
-/// so this just polls once and returns the result.
-///
-/// When the closure subsystem moves to Rust async, this will be replaced
-/// by a real executor (or callers will be in async contexts already).
-pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+/// Handles both synchronous completion (ready on first poll) and
+/// async completion (endio wakes from another thread).
+pub fn block_on<F: Future>(fut: F) -> F::Output {
     let mut fut = std::pin::pin!(fut);
     let waker = noop_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-    match fut.as_mut().poll(&mut cx) {
-        std::task::Poll::Ready(val) => val,
-        std::task::Poll::Pending =>
-            panic!("block_on: future returned Pending — IO shim should be synchronous"),
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(val) => return val,
+            Poll::Pending => std::thread::yield_now(),
+        }
     }
 }
 
-fn noop_waker() -> std::task::Waker {
+fn noop_waker() -> Waker {
     use std::task::{RawWaker, RawWakerVTable};
 
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
@@ -199,5 +227,5 @@ fn noop_waker() -> std::task::Waker {
         |_| {},
     );
 
-    unsafe { std::task::Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
 }
