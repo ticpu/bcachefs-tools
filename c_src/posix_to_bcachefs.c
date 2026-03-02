@@ -368,7 +368,15 @@ static void link_data(struct bch_fs *c, struct bch_inode_unpacked *dst,
 			die("error reserving space in new filesystem: %s",
 			    bch2_err_str(ret));
 
-		ret = bch2_btree_insert(c, BTREE_ID_extents, &e->k_i, &res, 0, 0);
+		CLASS(btree_trans, trans)(c);
+
+		struct bch_inode_opts opts;
+		ret = commit_do(trans, &res, NULL, 0, ({
+			bch2_bkey_get_io_opts(trans, NULL, bkey_i_to_s_c(&e->k_i), &opts) ?:
+			bch2_bkey_set_needs_reconcile(trans, NULL, &opts, &e->k_i,
+						      SET_NEEDS_RECONCILE_opt_change, 0) ?:
+			bch2_btree_insert(c, BTREE_ID_extents, &e->k_i, &res, 0, 0);
+		}));
 		if (ret)
 			die("btree insert error %s", bch2_err_str(ret));
 
