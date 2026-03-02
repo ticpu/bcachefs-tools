@@ -218,8 +218,8 @@ impl Fs {
         ret_to_result(unsafe { c::bch2_write_super(self.raw) })
     }
 
-    pub fn write(&self, inum: u64, offset: u64, subvol: u32, replicas: u32) -> WriteOp<'_> {
-        WriteOp::new(self, inum, offset, subvol, replicas)
+    pub fn write(&self, inum: u64, offset: u64, subvol: u32, replicas: u32, data: &[u8]) -> WriteOp {
+        WriteOp::new(self, inum, offset, subvol, replicas, data)
     }
 
     pub fn read<'a>(

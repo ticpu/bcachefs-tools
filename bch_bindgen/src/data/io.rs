@@ -24,15 +24,18 @@ const PAGE_SIZE: usize = 4096;
 const MAX_BVECS: usize = MAX_IO_SIZE / PAGE_SIZE;
 
 extern "C" {
-    fn rust_write_data(
+    fn rust_write_submit(
         c: *mut c::bch_fs,
-        inum: u64,
-        offset: u64,
+        op: *mut c::bch_write_op,
+        bvecs: *mut c::bio_vec,
+        nr_bvecs: u32,
         buf: *const std::ffi::c_void,
         len: usize,
+        inum: u64,
+        offset: u64,
         subvol: u32,
         replicas: u32,
-        sectors_delta: *mut i64,
+        end_io: Option<unsafe extern "C" fn(*mut c::bch_write_op)>,
     ) -> i32;
 
     fn rust_read_submit(
@@ -54,37 +57,114 @@ pub struct WriteResult {
     pub sectors_delta: i64,
 }
 
-/// A bcachefs write operation (still synchronous).
-pub struct WriteOp<'a> {
-    fs: &'a Fs,
-    inum: u64,
-    offset: u64,
-    subvol: u32,
-    replicas: u32,
+// Heap-allocated state for an in-flight write.
+// bch_write_op is at offset 0 so end_io can cast directly to WriteState.
+#[repr(C)]
+struct WriteState {
+    op:         c::bch_write_op,
+    bvecs:      [c::bio_vec; MAX_BVECS],
+    completed:  AtomicBool,
+    waker:      UnsafeCell<Option<Waker>>,
 }
 
-impl<'a> WriteOp<'a> {
-    pub fn new(fs: &'a Fs, inum: u64, offset: u64, subvol: u32, replicas: u32) -> Self {
-        Self { fs, inum, offset, subvol, replicas }
-    }
+unsafe impl Send for WriteState {}
+unsafe impl Sync for WriteState {}
 
-    /// Submit the write. Data must be block-aligned and <= MAX_IO_SIZE.
-    pub async fn submit(self, data: &[u8]) -> Result<WriteResult, BchError> {
-        let mut sectors_delta: i64 = 0;
+/// end_io callback for bch_write_op — signals completion and wakes
+/// the Rust future.
+unsafe extern "C" fn write_endio(op: *mut c::bch_write_op) {
+    // WriteState has op at offset 0
+    let state = op as *mut WriteState;
+
+    let waker = (*(*state).waker.get()).take();
+    (*state).completed.store(true, Ordering::Release);
+    if let Some(w) = waker {
+        w.wake();
+    }
+}
+
+/// Async write operation on a bcachefs filesystem.
+///
+/// IO is submitted in new(); poll checks for completion.
+pub struct WriteOp {
+    state: Pin<Box<WriteState>>,
+    /// Set if rust_write_submit returned an error (disk reservation failure).
+    submit_err: Option<i32>,
+}
+
+impl WriteOp {
+    pub fn new(
+        fs: &Fs,
+        inum: u64,
+        offset: u64,
+        subvol: u32,
+        replicas: u32,
+        data: &[u8],
+    ) -> Self {
+        let state = Box::pin(WriteState {
+            op:         unsafe { std::mem::zeroed() },
+            bvecs:      unsafe { std::mem::zeroed() },
+            completed:  AtomicBool::new(false),
+            waker:      UnsafeCell::new(None),
+        });
+
         let ret = unsafe {
-            rust_write_data(
-                self.fs.raw,
-                self.inum,
-                self.offset,
+            let state_ptr = &*state as *const WriteState as *mut WriteState;
+            rust_write_submit(
+                fs.raw,
+                &raw mut (*state_ptr).op,
+                (*state_ptr).bvecs.as_mut_ptr(),
+                MAX_BVECS as u32,
                 data.as_ptr() as *const _,
                 data.len(),
-                self.subvol,
-                self.replicas,
-                &mut sectors_delta,
+                inum,
+                offset,
+                subvol,
+                replicas,
+                Some(write_endio),
             )
         };
-        errcode::ret_to_result(ret)?;
-        Ok(WriteResult { sectors_delta })
+
+        let submit_err = if ret != 0 { Some(ret) } else { None };
+        Self { state, submit_err }
+    }
+}
+
+impl Future for WriteOp {
+    type Output = Result<WriteResult, BchError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        // Submit-time error (e.g. disk reservation failure)
+        if let Some(ret) = this.submit_err {
+            return Poll::Ready(Err(BchError::from_raw(-ret)));
+        }
+
+        if this.state.completed.load(Ordering::Acquire) {
+            let error = this.state.op.error as i32;
+            let sectors_delta = this.state.op.i_sectors_delta;
+            if error != 0 {
+                Poll::Ready(Err(BchError::from_raw(-error)))
+            } else {
+                Poll::Ready(Ok(WriteResult { sectors_delta }))
+            }
+        } else {
+            unsafe {
+                *this.state.waker.get() = Some(cx.waker().clone());
+            }
+            if this.state.completed.load(Ordering::Acquire) {
+                let error = this.state.op.error as i32;
+                let sectors_delta = this.state.op.i_sectors_delta;
+                if error != 0 {
+                    Poll::Ready(Err(BchError::from_raw(-error)))
+                } else {
+                    Poll::Ready(Ok(WriteResult { sectors_delta }))
+                }
+            } else {
+                Poll::Pending
+            }
+        }
     }
 }
 

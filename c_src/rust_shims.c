@@ -223,43 +223,35 @@ void rust_dev_put(struct bch_dev *ca)
  * where closure completion drives the Waker.
  */
 
-int rust_write_data(struct bch_fs *c,
-		    u64 inum, u64 offset,
-		    const void *buf, size_t len,
-		    u32 subvol, u32 replicas,
-		    s64 *sectors_delta)
+int rust_write_submit(struct bch_fs *c,
+		      struct bch_write_op *op,
+		      struct bio_vec *bvecs, unsigned nr_bvecs,
+		      const void *buf, size_t len,
+		      u64 inum, u64 offset,
+		      u32 subvol, u32 replicas,
+		      void (*end_io)(struct bch_write_op *))
 {
-	struct bch_write_op op;
-	struct bio_vec bv[RUST_IO_MAX / PAGE_SIZE];
-
-	BUG_ON(offset	& (block_bytes(c) - 1));
-	BUG_ON(len	& (block_bytes(c) - 1));
-	BUG_ON(len > RUST_IO_MAX);
-
-	bio_init(&op.wbio.bio, NULL, bv, ARRAY_SIZE(bv), 0);
-	bch2_bio_map(&op.wbio.bio, (void *) buf, len);
+	bio_init(&op->wbio.bio, NULL, bvecs, nr_bvecs, 0);
+	bch2_bio_map(&op->wbio.bio, (void *) buf, len);
 
 	struct bch_inode_opts opts;
 	bch2_inode_opts_get(c, &opts, false);
 
-	bch2_write_op_init(&op, c, opts);
-	op.write_point	= writepoint_hashed(0);
-	op.nr_replicas	= replicas;
-	op.subvol	= subvol;
-	op.pos		= SPOS(inum, offset >> 9, U32_MAX);
-	op.flags	|= BCH_WRITE_sync|BCH_WRITE_only_specified_devs;
+	bch2_write_op_init(op, c, opts);
+	op->end_io	= end_io;
+	op->write_point	= writepoint_hashed(0);
+	op->nr_replicas	= replicas;
+	op->subvol	= subvol;
+	op->pos		= SPOS(inum, offset >> 9, U32_MAX);
+	op->flags	|= BCH_WRITE_sync|BCH_WRITE_only_specified_devs;
 
-	int ret = bch2_disk_reservation_get(c, &op.res, len >> 9,
+	int ret = bch2_disk_reservation_get(c, &op->res, len >> 9,
 					    replicas, 0);
-	if (ret) {
-		*sectors_delta = 0;
+	if (ret)
 		return ret;
-	}
 
-	closure_call(&op.cl, bch2_write, NULL, NULL);
-
-	*sectors_delta = op.i_sectors_delta;
-	return op.error;
+	closure_call(&op->cl, bch2_write, NULL, NULL);
+	return 0;
 }
 
 void rust_read_submit(struct bch_fs *c,

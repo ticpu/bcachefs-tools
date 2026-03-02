@@ -108,11 +108,20 @@ void rust_dev_put(struct bch_dev *ca);
  */
 #define RUST_IO_MAX	(1 << 20)
 
-int rust_write_data(struct bch_fs *c,
-		    __u64 inum, __u64 offset,
-		    const void *buf, size_t len,
-		    __u32 subvol, __u32 replicas,
-		    __s64 *sectors_delta);
+/*
+ * Submit a write — Rust handles completion via op->end_io.
+ * Caller must heap-allocate op and bvecs (they must outlive the IO).
+ * Sets BCH_WRITE_sync so completion is inline for now; Rust can drop
+ * the flag later to go fully async.
+ * Returns 0 on successful submit, or -errno from disk reservation.
+ */
+int rust_write_submit(struct bch_fs *c,
+		      struct bch_write_op *op,
+		      struct bio_vec *bvecs, unsigned nr_bvecs,
+		      const void *buf, size_t len,
+		      __u64 inum, __u64 offset,
+		      __u32 subvol, __u32 replicas,
+		      void (*end_io)(struct bch_write_op *));
 
 /*
  * Submit a read without waiting — Rust handles completion via endio.
