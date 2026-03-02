@@ -24,6 +24,8 @@ use bch_bindgen::c;
 use bch_bindgen::fs::Fs;
 use bch_bindgen::opt_set;
 
+use crate::util::AlignedBuf;
+
 /// Guard that calls rcu_unregister_thread on drop (i.e. thread exit).
 struct RcuGuard;
 
@@ -304,26 +306,18 @@ impl Filesystem for BcachefsFs {
         let block_size = unsafe { c::rust_block_bytes(self.c) } as usize;
         let aligned_size = (size + block_size - 1) & !(block_size - 1);
 
-        let layout = std::alloc::Layout::from_size_align(aligned_size, 4096).unwrap();
-        let buf = unsafe { std::alloc::alloc(layout) };
-        if buf.is_null() {
-            reply.error(Errno::from_i32(libc::ENOMEM));
-            return;
-        }
+        let mut buf = AlignedBuf::new(aligned_size);
 
         let ret = unsafe {
-            c::rust_fuse_read_aligned(self.c, inum, aligned_size, 0, buf as *mut _)
+            c::rust_fuse_read_aligned(self.c, inum, aligned_size, 0, buf.as_mut_ptr() as *mut _)
         };
         if ret != 0 {
-            unsafe { std::alloc::dealloc(buf, layout) };
             reply.error(err(ret));
             return;
         }
 
-        let data = unsafe { std::slice::from_raw_parts(buf, size) };
-        let end = data.iter().position(|&b| b == 0).unwrap_or(size);
-        reply.data(&data[..end]);
-        unsafe { std::alloc::dealloc(buf, layout) };
+        let end = buf[..size].iter().position(|&b| b == 0).unwrap_or(size);
+        reply.data(&buf[..end]);
     }
 
     fn mknod(
@@ -543,30 +537,22 @@ impl Filesystem for BcachefsFs {
         let aligned_end = (offset + read_size as u64 + block_size - 1) & !(block_size - 1);
         let aligned_size = (aligned_end - aligned_start) as usize;
 
-        let layout = std::alloc::Layout::from_size_align(aligned_size, 4096).unwrap();
-        let buf = unsafe { std::alloc::alloc(layout) };
-        if buf.is_null() {
-            reply.error(Errno::from_i32(libc::ENOMEM));
-            return;
-        }
+        let mut buf = AlignedBuf::new(aligned_size);
 
         let ret = unsafe {
             c::rust_fuse_read_aligned(
                 self.c, inum,
                 aligned_size, aligned_start as i64,
-                buf as *mut _,
+                buf.as_mut_ptr() as *mut _,
             )
         };
 
         if ret != 0 {
-            unsafe { std::alloc::dealloc(buf, layout) };
             reply.error(err(ret));
             return;
         }
 
-        let data = unsafe { std::slice::from_raw_parts(buf.add(pad_start), read_size) };
-        reply.data(data);
-        unsafe { std::alloc::dealloc(buf, layout) };
+        reply.data(&buf[pad_start..pad_start + read_size]);
     }
 
     fn write(

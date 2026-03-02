@@ -18,6 +18,8 @@ use bch_bindgen::data::io::{block_on, MAX_IO_SIZE};
 use bch_bindgen::errcode::{self, BchError, bch_errcode};
 use bch_bindgen::fs::Fs;
 
+use crate::util::AlignedBuf;
+
 const BCACHEFS_ROOT_INO: u64 = 4096;
 const BCACHEFS_ROOT_SUBVOL: u64 = 1;
 
@@ -35,40 +37,6 @@ const XATTR_INDEX_SECURITY: i32 = 4;
 
 fn mode_to_type(mode: u32) -> u8 {
     ((mode >> 12) & 15) as u8
-}
-
-/// Page-aligned buffer for O_DIRECT IO.
-struct AlignedBuf {
-    ptr: *mut u8,
-    layout: std::alloc::Layout,
-}
-
-impl AlignedBuf {
-    fn new(size: usize) -> Self {
-        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
-        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-        assert!(!ptr.is_null(), "aligned allocation failed");
-        Self { ptr, layout }
-    }
-}
-
-impl std::ops::Deref for AlignedBuf {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.layout.size()) }
-    }
-}
-
-impl std::ops::DerefMut for AlignedBuf {
-    fn deref_mut(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
-    }
-}
-
-impl Drop for AlignedBuf {
-    fn drop(&mut self) {
-        unsafe { std::alloc::dealloc(self.ptr, self.layout) }
-    }
 }
 
 fn ret_to_result(ret: i32) -> Result<(), BchError> {

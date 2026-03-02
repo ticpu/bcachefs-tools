@@ -9,6 +9,43 @@ use bch_bindgen::c;
 use crossterm::{cursor, execute, terminal};
 use rustix::ioctl::{self, Getter, ReadOpcode};
 
+/// Page-aligned buffer for O_DIRECT IO.
+///
+/// Allocates zeroed memory at 4096-byte alignment. Derefs to `[u8]` for
+/// convenient slice access; freed automatically on drop.
+pub struct AlignedBuf {
+    ptr: *mut u8,
+    layout: std::alloc::Layout,
+}
+
+impl AlignedBuf {
+    pub fn new(size: usize) -> Self {
+        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!ptr.is_null(), "aligned allocation failed");
+        Self { ptr, layout }
+    }
+}
+
+impl std::ops::Deref for AlignedBuf {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.layout.size()) }
+    }
+}
+
+impl std::ops::DerefMut for AlignedBuf {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
+    }
+}
+
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        unsafe { std::alloc::dealloc(self.ptr, self.layout) }
+    }
+}
+
 /// Parse a human-readable size string (e.g. "1G", "512M") via bch2_strtoull_h.
 pub fn parse_human_size(s: &str) -> Result<u64> {
     let cstr = CString::new(s)?;
