@@ -25,6 +25,26 @@ impl BchError {
             false
         }
     }
+
+    pub fn matches_errno(&self, class: i32) -> bool {
+        if self.0 != 0 {
+            unsafe { c::__bch2_err_matches(self.0, class) }
+        } else {
+            false
+        }
+    }
+
+    /// Return the standard errno that this error maps to.
+    /// bcachefs error codes (>= 2048) walk the parent chain to their
+    /// root errno; standard errnos pass through unchanged.
+    pub fn errno(&self) -> i32 {
+        if self.0 == 0 {
+            0
+        } else {
+            // __bch2_err_class takes and returns negative error codes
+            -unsafe { c::__bch2_err_class(-self.0) }
+        }
+    }
 }
 
 impl fmt::Display for BchError {
