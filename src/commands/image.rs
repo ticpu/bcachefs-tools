@@ -377,10 +377,9 @@ fn finish_image(fs: &Fs, keep_alloc: bool, verbosity: u32) -> Result<(), anyhow:
     // Truncate image to used size
     let ca = unsafe { &*fs.dev_raw(0) };
     let image_size = nbuckets * bucket_bytes(ca);
-    let fd = unsafe { (*ca.disk_sb.bdev).bd_fd };
-    if unsafe { libc::ftruncate(fd, image_size as i64) } != 0 {
-        bail!("truncate error: {}", std::io::Error::last_os_error());
-    }
+    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw((*ca.disk_sb.bdev).bd_fd) };
+    rustix::fs::ftruncate(fd, image_size)
+        .map_err(|e| anyhow!("truncate error: {}", e))?;
 
     // Lock sb and finalize
     let _lock = fs.sb_lock();

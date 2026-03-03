@@ -7,7 +7,7 @@
 use std::ffi::{CString, c_char, c_ulong};
 use std::fs;
 use std::io;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::io::RawFd;
 
 use anyhow::{anyhow, bail, Result};
@@ -323,19 +323,19 @@ fn migrate_fs(
     }
 
     let fs_path_cstr = CString::new(fs_path)?;
-    let fs_fd = unsafe { libc::open(fs_path_cstr.as_ptr(), libc::O_RDONLY | libc::O_NOATIME) };
-    if fs_fd < 0 {
-        bail!("Error opening {}: {}", fs_path, io::Error::last_os_error());
-    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let fs_file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOATIME)
+        .open(fs_path)
+        .map_err(|e| anyhow!("Error opening {}: {}", fs_path, e))?;
 
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fs_fd, &mut stat) } != 0 {
-        unsafe { libc::close(fs_fd) };
+    if unsafe { libc::fstat(fs_file.as_raw_fd(), &mut stat) } != 0 {
         bail!("fstat: {}", io::Error::last_os_error());
     }
 
     if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
-        unsafe { libc::close(fs_fd) };
         bail!("{} is not a directory", fs_path);
     }
 
@@ -351,7 +351,6 @@ fn migrate_fs(
 
     let ret = unsafe { rust_bdev_open(&mut c_dev, c::BLK_OPEN_READ | c::BLK_OPEN_WRITE) };
     if ret < 0 {
-        unsafe { libc::close(fs_fd) };
         bail!("Error opening device to format {}: {}", dev_path,
               io::Error::from_raw_os_error(-ret));
     }
@@ -411,7 +410,6 @@ fn migrate_fs(
 
     let sb = crate::commands::format_util::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
     if sb.is_null() {
-        unsafe { libc::close(fs_fd) };
         bail!("bch2_format failed");
     }
 
@@ -470,10 +468,10 @@ fn migrate_fs(
         s.extents.push((e.start, e.end));
     }
 
-    let copy_ret = crate::copy_fs::copy_fs(&fs, &mut s, unsafe { std::os::fd::BorrowedFd::borrow_raw(fs_fd) }, &fs_path_cstr);
+    let copy_ret = crate::copy_fs::copy_fs(&fs, &mut s, fs_file.as_fd(), &fs_path_cstr);
 
     let exit_ret = fs.exit();
-    unsafe { libc::close(fs_fd) };
+    drop(fs_file);
 
     copy_ret.map_err(|e| anyhow!("Error copying filesystem: {}", e))?;
     if exit_ret != 0 {
