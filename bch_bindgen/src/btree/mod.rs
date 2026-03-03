@@ -59,7 +59,7 @@ impl<'f> BtreeTrans<'f> {
             (*self.raw).journal_seq = journal_seq;
         }
         let ret = unsafe {
-            c::__bch2_trans_commit(self.raw, std::mem::transmute(flags))
+            c::__bch2_trans_commit(self.raw, std::mem::transmute::<u32, c::bch_trans_commit_flags>(flags))
         };
         crate::errcode::ret_to_result(ret).map(|_| ())
     }

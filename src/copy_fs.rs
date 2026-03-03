@@ -191,7 +191,7 @@ fn unlink_and_rm(
         },
     )?;
 
-    if (child.bi_flags as u32) & (c::bch_inode_flags::BCH_INODE_unlinked as u32) == 0 {
+    if child.bi_flags & (c::bch_inode_flags::BCH_INODE_unlinked as u32) == 0 {
         return Ok(());
     }
 
@@ -221,7 +221,6 @@ fn create_or_update_link(
     dir: &mut c::bch_inode_unpacked,
     name: &CStr,
     inum: c::subvol_inum,
-    _mode: u32,
 ) -> Result<(), BchError> {
     let mut dir_hash: c::bch_hash_info = Default::default();
     ret_to_result(unsafe { c::bch2_hash_info_init(fs.raw, dir, &mut dir_hash) })?;
@@ -976,7 +975,7 @@ fn copy_dir(
             if let Some(&dst_ino) = s.hardlinks.get(&src_ino) {
                 create_or_update_link(
                     fs, dir_inum, dst, &d.name,
-                    subvol_inum(dst_ino), d.stat.st_mode,
+                    subvol_inum(dst_ino),
                 )?;
                 continue;
             }
