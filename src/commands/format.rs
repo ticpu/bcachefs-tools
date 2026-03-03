@@ -17,6 +17,7 @@
 
 use std::ffi::{CStr, CString, c_char};
 use std::io;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -534,12 +535,11 @@ pub fn cmd_format(argv: Vec<String>) -> Result<()> {
             .map_err(|e| anyhow!("error opening {}: {}", cfg.devices[0].path, e))?;
 
         if let Some(ref src) = cfg.source {
-            use std::os::unix::io::AsRawFd;
             let file = std::fs::File::open(src)
                 .map_err(|e| anyhow!("error opening {}: {}", src, e))?;
             let src_c = CString::new(src.as_str())?;
             let mut s = crate::copy_fs::CopyFsState::new_copy();
-            crate::copy_fs::copy_fs(&fs, &mut s, file.as_raw_fd(), &src_c)
+            crate::copy_fs::copy_fs(&fs, &mut s, file.as_fd(), &src_c)
                 .map_err(|e| anyhow!("error copying from {}: {}", src, e))?;
         }
 

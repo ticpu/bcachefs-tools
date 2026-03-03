@@ -555,19 +555,18 @@ fn image_create_inner(
     let mut state = CopyFsState::new_copy();
     state.verbosity = verbosity;
 
-    let src_fd = unsafe { libc::open(src_cstr.as_ptr(), libc::O_RDONLY) };
-    if src_fd < 0 {
-        bail!("error opening {}: {}", src_path, std::io::Error::last_os_error());
-    }
+    let src_file = std::fs::File::open(src_path)
+        .map_err(|e| anyhow!("error opening {}: {}", src_path, e))?;
 
     let result = (|| -> Result<()> {
-        copy_fs(&fs, &mut state, src_fd, &src_cstr)
+        use std::os::fd::AsFd;
+        copy_fs(&fs, &mut state, src_file.as_fd(), &src_cstr)
             .map_err(|e| anyhow!("syncing data: {}", e))?;
         finish_image(&fs, keep_alloc, verbosity)?;
         Ok(())
     })();
 
-    unsafe { libc::close(src_fd) };
+    drop(src_file);
 
     if let Err(e) = result {
         for d in &devs {
@@ -700,19 +699,18 @@ fn image_update_inner(
     let mut state = CopyFsState::new_copy();
     state.verbosity = verbosity;
 
-    let src_fd = unsafe { libc::open(src_cstr.as_ptr(), libc::O_RDONLY) };
-    if src_fd < 0 {
-        bail!("error opening {}: {}", src_path, std::io::Error::last_os_error());
-    }
+    let src_file = std::fs::File::open(src_path)
+        .map_err(|e| anyhow!("error opening {}: {}", src_path, e))?;
 
     let result = (|| -> Result<()> {
-        copy_fs(&fs, &mut state, src_fd, &src_cstr)
+        use std::os::fd::AsFd;
+        copy_fs(&fs, &mut state, src_file.as_fd(), &src_cstr)
             .map_err(|e| anyhow!("syncing data: {}", e))?;
         finish_image(&fs, keep_alloc, verbosity)?;
         Ok(())
     })();
 
-    unsafe { libc::close(src_fd) };
+    drop(src_file);
 
     let exit_ret = fs.exit();
     let _ = std::fs::remove_file(&metadata_path);

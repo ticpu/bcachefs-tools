@@ -470,7 +470,7 @@ fn migrate_fs(
         s.extents.push((e.start, e.end));
     }
 
-    let copy_ret = crate::copy_fs::copy_fs(&fs, &mut s, fs_fd, &fs_path_cstr);
+    let copy_ret = crate::copy_fs::copy_fs(&fs, &mut s, unsafe { std::os::fd::BorrowedFd::borrow_raw(fs_fd) }, &fs_path_cstr);
 
     let exit_ret = fs.exit();
     unsafe { libc::close(fs_fd) };

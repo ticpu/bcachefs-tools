@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use bch_bindgen::btree;
 use bch_bindgen::c;
@@ -442,7 +442,7 @@ fn write_data(
 fn copy_data(
     fs: &Fs,
     dst_inode: &mut c::bch_inode_unpacked,
-    src_fd: i32,
+    src_fd: BorrowedFd,
     start: u64,
     end: u64,
 ) -> Result<(), BchError> {
@@ -454,10 +454,8 @@ fn copy_data(
         let padded = ((len as u64).div_ceil(block_size) * block_size) as usize;
 
         let mut buf = AlignedBuf::new(padded);
-        let nread = unsafe { libc::pread(src_fd, buf.as_mut_ptr() as *mut libc::c_void, len, pos as i64) };
-        if nread < 0 {
-            return Err(last_err());
-        }
+        rustix::io::pread(src_fd, &mut buf[..len], pos)
+            .map_err(rustix_err)?;
 
         write_data(fs, dst_inode, pos, &buf)?;
         pos += len as u64;
@@ -495,14 +493,13 @@ fn copy_link(
     })?;
     dst.bi_sectors = (dst.bi_sectors as i64 + i_sectors_delta) as u64;
 
+    let target = rustix::fs::readlinkat(rustix::fs::CWD, src, Vec::new())
+        .map_err(rustix_err)?;
+    let target_bytes = target.as_bytes();
+    let link_len = target_bytes.len() as u64;
+
     let mut buf = AlignedBuf::new(MAX_IO_SIZE);
-    let ret = unsafe {
-        libc::readlink(src.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char, buf.len())
-    };
-    if ret < 0 {
-        return Err(last_err());
-    }
-    let link_len = ret as u64;
+    buf[..target_bytes.len()].copy_from_slice(target_bytes);
     let padded = (link_len.div_ceil(block_size) * block_size) as usize;
 
     write_data(fs, dst, 0, &buf[..padded])
@@ -512,26 +509,24 @@ fn link_file_data(
     fs: &Fs,
     s: &mut CopyFsState,
     dst: &mut c::bch_inode_unpacked,
-    src_fd: i32,
+    src_fd: BorrowedFd,
     src_path: &CStr,
     src_size: u64,
 ) -> Result<(), BchError> {
     let block_size = fs.block_bytes();
 
     // First pass: check for unknown extents and fsync if found
-    let f = unsafe { std::os::fd::BorrowedFd::borrow_raw(src_fd) };
-    let fm = fiemap::Fiemap::new(&f);
+    let fm = fiemap::Fiemap::new(&src_fd);
     for extent in fm {
         let extent = extent.map_err(|_| BchError::from_raw(-libc::EIO))?;
         if extent.fe_flags.contains(fiemap::FiemapExtentFlags::UNKNOWN) {
-            unsafe { libc::fsync(src_fd) };
+            rustix::fs::fsync(src_fd).map_err(rustix_err)?;
             break;
         }
     }
 
     // Second pass: link or copy extents
-    let f = unsafe { std::os::fd::BorrowedFd::borrow_raw(src_fd) };
-    let fm = fiemap::Fiemap::new(&f);
+    let fm = fiemap::Fiemap::new(&src_fd);
     for extent in fm {
         let extent = extent.map_err(|_| BchError::from_raw(-libc::EIO))?;
 
@@ -633,23 +628,23 @@ fn align_range(r: Range, bs: u64) -> Range {
     }
 }
 
-fn seek_data(fd: i32, i_size: u64, offset: i64) -> Range {
-    let s = unsafe { libc::lseek(fd, offset, libc::SEEK_DATA) };
-    if s < 0 {
-        return Range { start: 0, end: 0 };
-    }
-    let e = unsafe { libc::lseek(fd, s, libc::SEEK_HOLE) };
-    let e = if e < 0 { i_size as i64 } else { e };
-    Range { start: s as u64, end: e as u64 }
+fn seek_data(fd: BorrowedFd, i_size: u64, offset: u64) -> Range {
+    use rustix::fs::{seek, SeekFrom};
+    let s = match seek(fd, SeekFrom::Data(offset as i64)) {
+        Ok(s) => s,
+        Err(_) => return Range { start: 0, end: 0 },
+    };
+    let e = seek(fd, SeekFrom::Hole(s as i64)).unwrap_or(i_size);
+    Range { start: s, end: e }
 }
 
-fn seek_data_aligned(fd: i32, i_size: u64, offset: i64, bs: u64) -> Range {
+fn seek_data_aligned(fd: BorrowedFd, i_size: u64, offset: u64, bs: u64) -> Range {
     let mut r = align_range(seek_data(fd, i_size, offset), bs);
     if r.end == 0 {
         return r;
     }
     loop {
-        let n = align_range(seek_data(fd, i_size, r.end as i64), bs);
+        let n = align_range(seek_data(fd, i_size, r.end), bs);
         if n.end == 0 || r.end < n.start {
             break;
         }
@@ -691,7 +686,7 @@ fn copy_sync_file_range(
     s: &mut CopyFsState,
     dst_inum: c::subvol_inum,
     dst: &mut c::bch_inode_unpacked,
-    src_fd: i32,
+    src_fd: BorrowedFd,
     src_size: u64,
     range: &Range,
 ) -> Result<(), BchError> {
@@ -703,9 +698,8 @@ fn copy_sync_file_range(
 
         let mut src_buf = AlignedBuf::new(b);
         let read_len = std::cmp::min(b, (src_size - start) as usize);
-        unsafe {
-            libc::pread(src_fd, src_buf.as_mut_ptr() as *mut libc::c_void, read_len, start as i64);
-        }
+        rustix::io::pread(src_fd, &mut src_buf[..read_len], start)
+            .map_err(rustix_err)?;
 
         let mut dst_buf = AlignedBuf::new(b);
         block_on(fs.read(dst_inum, start, dst, &mut dst_buf))?;
@@ -731,7 +725,7 @@ fn copy_sync_file_data(
     s: &mut CopyFsState,
     dst_inum: c::subvol_inum,
     dst: &mut c::bch_inode_unpacked,
-    src_fd: i32,
+    src_fd: BorrowedFd,
     src_size: u64,
 ) -> Result<(), BchError> {
     let block_size = fs.block_bytes();
@@ -740,7 +734,7 @@ fn copy_sync_file_data(
     let mut prev = Range { start: 0, end: 0 };
 
     loop {
-        let next = seek_data_aligned(src_fd, src_size, prev.end as i64, block_size);
+        let next = seek_data_aligned(src_fd, src_size, prev.end, block_size);
         if next.end == 0 {
             break;
         }
@@ -1010,9 +1004,9 @@ fn copy_dir(
                     .map_err(rustix_err)?;
 
                 if s.migrate_type == MigrateType::Migrate {
-                    link_file_data(fs, s, &mut inode, fd.as_raw_fd(), &child_path, d.stat.st_size as u64)?;
+                    link_file_data(fs, s, &mut inode, fd.as_fd(), &child_path, d.stat.st_size as u64)?;
                 } else {
-                    copy_sync_file_data(fs, s, dst_child_inum, &mut inode, fd.as_raw_fd(), d.stat.st_size as u64)?;
+                    copy_sync_file_data(fs, s, dst_child_inum, &mut inode, fd.as_fd(), d.stat.st_size as u64)?;
                 }
                 // fd dropped here — close is automatic
             }
@@ -1070,17 +1064,18 @@ fn reserve_old_fs_space(
 pub fn copy_fs(
     fs: &Fs,
     s: &mut CopyFsState,
-    src_fd: i32,
+    src_fd: BorrowedFd,
     src_path: &CStr,
 ) -> Result<(), BchError> {
+    let raw_fd = src_fd.as_raw_fd();
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(src_fd, &mut stat) } < 0 || (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+    if unsafe { libc::fstat(raw_fd, &mut stat) } < 0 || (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
         eprintln!("{} is not a directory", src_path.to_string_lossy());
         return Err(BchError::from_raw(-libc::ENOTDIR));
     }
 
     if s.migrate_type == MigrateType::Migrate {
-        unsafe { libc::syncfs(src_fd) };
+        unsafe { libc::syncfs(raw_fd) };
     }
 
     let mut root_inode: c::bch_inode_unpacked = Default::default();
@@ -1092,7 +1087,7 @@ pub fn copy_fs(
         )
     })?;
 
-    if unsafe { libc::fchdir(src_fd) } < 0 {
+    if unsafe { libc::fchdir(raw_fd) } < 0 {
         return Err(last_err());
     }
 
@@ -1101,7 +1096,7 @@ pub fn copy_fs(
     let dot = CString::new(".").unwrap();
     copy_xattrs(fs, &mut root_inode, &dot)?;
 
-    let dup_fd = unsafe { OwnedFd::from_raw_fd(libc::dup(src_fd)) };
+    let dup_fd = rustix::io::dup(src_fd).map_err(rustix_err)?;
     copy_dir(fs, s, &mut root_inode, dup_fd, src_path)?;
 
     if s.migrate_type == MigrateType::Migrate {
