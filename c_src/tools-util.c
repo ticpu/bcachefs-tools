@@ -1,10 +1,6 @@
-#include <assert.h>
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <linux/fs.h>
-#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +17,6 @@
 #include "util/util.h"
 
 #include "libbcachefs.h"
-#include "linux/sort.h"
 #include "tools-util.h"
 #include "src/rust_to_c.h"
 
@@ -57,50 +52,12 @@ char *mprintf(const char *fmt, ...)
 	return str;
 }
 
-void __xpread(int fd, void *buf, size_t count, off_t offset, const char *file, unsigned line)
-{
-	while (count) {
-		ssize_t r = pread(fd, buf, count, offset);
-
-		if (r < 0)
-			die("read error: %m at %s:%u", file, line);
-		if (!r)
-			die("pread error: unexpected eof at %s:%u", file, line);
-		count	-= r;
-		offset	+= r;
-	}
-}
-
-void xpwrite(int fd, const void *buf, size_t count, off_t offset, const char *msg)
-{
-	ssize_t r = pwrite(fd, buf, count, offset);
-
-	if (r != count)
-		die("error writing %s (ret %zi err %m)", msg, r);
-}
-
-struct stat xfstatat(int dirfd, const char *path, int flags)
-{
-	struct stat stat;
-	if (fstatat(dirfd, path, &stat, flags))
-		die("stat error: %m");
-	return stat;
-}
-
 struct stat xfstat(int fd)
 {
 	struct stat stat;
 	if (fstat(fd, &stat))
 		die("stat error: %m");
 	return stat;
-}
-
-struct stat xstat(const char *path)
-{
-	struct stat statbuf;
-	if (stat(path, &statbuf))
-		die("stat error statting %s: %m", path);
-	return statbuf;
 }
 
 /* File parsing (i.e. sysfs) */
@@ -251,74 +208,6 @@ bool ask_yn(void)
 	ret = strchr(short_yes, buf[0]);
 	free(buf);
 	return ret;
-}
-
-static int range_cmp(const void *_l, const void *_r)
-{
-	const struct range *l = _l, *r = _r;
-
-	if (l->start < r->start)
-		return -1;
-	if (l->start > r->start)
-		return  1;
-	return 0;
-}
-
-static void ranges_sort(ranges *r)
-{
-	sort(r->data, r->nr, sizeof(r->data[0]), range_cmp, NULL);
-}
-
-void ranges_sort_merge(ranges *r)
-{
-	ranges tmp = { 0 };
-
-	ranges_sort(r);
-
-	/* Merge contiguous ranges: */
-	darray_for_each(*r, i) {
-		struct range *t = tmp.nr ? &tmp.data[tmp.nr - 1] : NULL;
-
-		if (t && t->end >= i->start)
-			t->end = max(t->end, i->end);
-		else
-			darray_push(&tmp, *i);
-	}
-
-	darray_exit(r);
-	*r = tmp;
-}
-
-struct fiemap_extent fiemap_iter_next(struct fiemap_iter *iter)
-{
-	struct fiemap_extent e;
-
-	BUG_ON(iter->idx > iter->f->fm_mapped_extents);
-
-	if (iter->idx == iter->f->fm_mapped_extents) {
-		xioctl(iter->fd, FS_IOC_FIEMAP, iter->f);
-
-		if (!iter->f->fm_mapped_extents)
-			return (struct fiemap_extent) { .fe_length = 0 };
-
-		iter->idx = 0;
-	}
-
-	e = iter->f->fm_extents[iter->idx++];
-	BUG_ON(!e.fe_length);
-
-	iter->f->fm_start = e.fe_logical + e.fe_length;
-
-	return e;
-}
-
-char *strcmp_prefix(char *a, const char *a_prefix)
-{
-	while (*a_prefix && *a == *a_prefix) {
-		a++;
-		a_prefix++;
-	}
-	return *a_prefix ? NULL : a;
 }
 
 /* crc32c */
