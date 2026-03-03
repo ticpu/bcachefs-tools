@@ -8,7 +8,6 @@ use std::ffi::{CString, c_char, c_ulong};
 use std::fs;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
-use std::os::unix::io::RawFd;
 
 use anyhow::{anyhow, bail, Result};
 use bch_bindgen::c;
@@ -32,16 +31,15 @@ extern "C" {
 use fiemap::FiemapExtentFlags;
 
 /// Iterate over physical extents of a file via FIEMAP ioctl.
-fn fiemap_iter(fd: RawFd) -> Result<Vec<CRange>> {
+fn fiemap_iter(fd: BorrowedFd<'_>) -> Result<Vec<CRange>> {
     let bad_flags = FiemapExtentFlags::UNKNOWN
         | FiemapExtentFlags::ENCODED
         | FiemapExtentFlags::NOT_ALIGNED
         | FiemapExtentFlags::DATA_INLINE;
 
-    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let mut ranges = Vec::new();
 
-    for extent in fiemap::Fiemap::new(borrowed) {
+    for extent in fiemap::Fiemap::new(fd) {
         let e = extent?;
         if e.fe_flags.intersects(bad_flags) {
             bail!("Unable to continue: metadata file not fully mapped");
@@ -195,47 +193,48 @@ fn reserve_new_fs_space(
     dev: libc::dev_t,
     force: bool,
 ) -> Result<(Vec<CRange>, u64)> {
-    let flags = libc::O_RDWR | libc::O_CREAT | if force { 0 } else { libc::O_EXCL };
-    let file_cstr = CString::new(file_path)?;
-    let fd = unsafe { libc::open(file_cstr.as_ptr(), flags, 0o600 as libc::mode_t) };
-    if fd < 0 {
-        bail!("Error creating {} for bcachefs metadata: {}", file_path, io::Error::last_os_error());
-    }
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-    struct FdGuard(RawFd);
-    impl Drop for FdGuard {
-        fn drop(&mut self) { unsafe { libc::close(self.0); } }
+    let mut open_opts = std::fs::OpenOptions::new();
+    open_opts.read(true).write(true).mode(0o600);
+    if force {
+        open_opts.create(true);
+    } else {
+        open_opts.create_new(true);
     }
-    let _close_guard = FdGuard(fd);
+    let file = open_opts.open(file_path)
+        .map_err(|e| anyhow!("Error creating {} for bcachefs metadata: {}", file_path, e))?;
 
-    let mut statbuf: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut statbuf) } != 0 {
-        bail!("fstat: {}", io::Error::last_os_error());
-    }
-    if statbuf.st_dev != dev {
+    let meta = file.metadata()
+        .map_err(|e| anyhow!("fstat: {}", e))?;
+    if meta.dev() != dev {
         bail!("bcachefs file has incorrect device");
     }
-    let bcachefs_inum = statbuf.st_ino;
+    let bcachefs_inum = meta.ino();
 
     let min_size = dev_size / 10;
     let mut size = dev_size;
 
     loop {
-        if unsafe { libc::fallocate(fd, 0, 0, size as libc::off_t) } == 0 {
-            break;
+        match rustix::fs::fallocate(
+            &file,
+            rustix::fs::FallocateFlags::empty(),
+            0,
+            size,
+        ) {
+            Ok(()) => break,
+            Err(e) => {
+                if e != rustix::io::Errno::NOSPC || size <= min_size {
+                    bail!("Error reserving space ({} bytes) for bcachefs metadata: {}", size, e);
+                }
+                size /= 2;
+                size = size.max(min_size);
+            }
         }
-
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ENOSPC) || size <= min_size {
-            bail!("Error reserving space ({} bytes) for bcachefs metadata: {}", size, err);
-        }
-
-        size /= 2;
-        size = size.max(min_size);
     }
-    unsafe { libc::fsync(fd) };
+    rustix::fs::fsync(&file).map_err(|e| anyhow!("fsync: {}", e))?;
 
-    let extents = fiemap_iter(fd)?;
+    let extents = fiemap_iter(file.as_fd())?;
 
     // Check alignment
     let block_bytes = (block_size as u64) << 9;
@@ -330,17 +329,18 @@ fn migrate_fs(
         .open(fs_path)
         .map_err(|e| anyhow!("Error opening {}: {}", fs_path, e))?;
 
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fs_file.as_raw_fd(), &mut stat) } != 0 {
-        bail!("fstat: {}", io::Error::last_os_error());
-    }
+    use std::os::unix::fs::MetadataExt;
+    let fs_meta = fs_file.metadata()
+        .map_err(|e| anyhow!("fstat: {}", e))?;
 
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+    if !fs_meta.is_dir() {
         bail!("{} is not a directory", fs_path);
     }
 
+    let fs_dev = fs_meta.dev();
+
     // Find the underlying block device
-    let dev_path = dev_t_to_path(stat.st_dev)?;
+    let dev_path = dev_t_to_path(fs_dev)?;
     let dev_path_cstr = CString::new(dev_path.as_str())?;
 
     // Set up dev_opts and open the device
@@ -387,7 +387,7 @@ fn migrate_fs(
         &file_path,
         block_size >> 9,
         dev_size,
-        stat.st_dev,
+        fs_dev,
         force,
     )?;
 
@@ -460,7 +460,7 @@ fn migrate_fs(
     // Copy the filesystem tree
     let mut s = crate::copy_fs::CopyFsState::new_migrate(
         bcachefs_inum,
-        stat.st_dev,
+        fs_dev,
         reserve_start,
     );
     // Pre-populate with metadata reservation ranges
@@ -512,15 +512,17 @@ fn migrate_fs(
 }
 
 fn migrate_superblock(dev_path: &str, sb_offset: u64) -> Result<()> {
-    let dev_cstr = CString::new(dev_path)?;
+    use std::os::unix::fs::OpenOptionsExt;
 
     // Open device and read existing superblock
-    let fd = unsafe { libc::open(dev_cstr.as_ptr(), libc::O_RDWR | libc::O_EXCL) };
-    if fd < 0 {
-        bail!("Error opening {}: {}", dev_path, io::Error::last_os_error());
-    }
+    let dev_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_EXCL)
+        .open(dev_path)
+        .map_err(|e| anyhow!("Error opening {}: {}", dev_path, e))?;
 
-    let sb = super_io::__bch2_super_read(fd, sb_offset);
+    let sb = super_io::__bch2_super_read(dev_file.as_raw_fd(), sb_offset);
     let sb_ref = unsafe { &mut *sb };
 
     // Validate and add default layout (catches errors early)
@@ -530,12 +532,11 @@ fn migrate_superblock(dev_path: &str, sb_offset: u64) -> Result<()> {
     let zeroes_len = ((c::BCH_SB_SECTOR as usize) << 9) + std::mem::size_of::<c::bch_sb>();
     let zeroes = vec![0u8; zeroes_len];
     {
-        let file = super_io::borrowed_file(fd);
         use std::os::unix::fs::FileExt;
-        file.write_all_at(&zeroes, 0)
+        dev_file.write_all_at(&zeroes, 0)
             .map_err(|e| anyhow!("Error zeroing start of disk: {}", e))?;
     }
-    unsafe { libc::close(fd) };
+    drop(dev_file);
     unsafe { libc::free(sb as *mut _) };
 
     // Open the filesystem with nostart + sb offset
