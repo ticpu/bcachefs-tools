@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 use std::ops::ControlFlow;
-use std::os::unix::io::AsRawFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -129,7 +129,7 @@ pub fn cmd_undump(argv: Vec<String>) -> Result<()> {
         let outfile = open_opts.open(&e.output)
             .map_err(|err| anyhow!("{}: {}", e.output, err))?;
 
-        qcow2::qcow2_to_raw(infile.as_raw_fd(), outfile.as_raw_fd())?;
+        qcow2::qcow2_to_raw(infile.as_fd(), outfile.as_fd())?;
     }
 
     Ok(())
@@ -516,8 +516,8 @@ fn write_dev_image(
     let outfile = open_opts.open(path)
         .map_err(|e| anyhow!("{}: {}", path, e))?;
 
-    let infd = unsafe { (*ca.disk_sb.bdev).bd_fd };
-    let mut img = Qcow2Image::new(infd, outfile.as_raw_fd(), block_size)?;
+    let infd = unsafe { BorrowedFd::borrow_raw((*ca.disk_sb.bdev).bd_fd) };
+    let mut img = Qcow2Image::new(infd, outfile.as_fd(), block_size)?;
 
     img.write_ranges(&mut d.sb)?;
 

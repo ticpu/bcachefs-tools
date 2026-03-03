@@ -6,9 +6,10 @@
 //! `bcachefs undump` to convert them back to raw device images.
 
 use std::ops::Range;
-use std::os::unix::io::RawFd;
+use std::os::fd::BorrowedFd;
 
 use anyhow::{anyhow, Result};
+use rustix::io::Errno;
 
 // ---- Ranges helpers ----
 
@@ -47,40 +48,34 @@ pub fn ranges_sort(ranges: &mut Ranges) {
 
 // ---- I/O helpers ----
 
-pub fn pread_exact(fd: RawFd, buf: &mut [u8], mut offset: u64) -> Result<()> {
+pub fn pread_exact(fd: BorrowedFd<'_>, buf: &mut [u8], mut offset: u64) -> Result<()> {
     let mut pos = 0;
     while pos < buf.len() {
-        let r = unsafe {
-            libc::pread(
-                fd,
-                buf[pos..].as_mut_ptr() as *mut _,
-                buf.len() - pos,
-                offset as libc::off_t,
-            )
-        };
-        if r < 0 {
-            return Err(anyhow!("read error: {}", std::io::Error::last_os_error()));
+        match rustix::io::pread(fd, &mut buf[pos..], offset) {
+            Ok(0) => return Err(anyhow!("read error: unexpected EOF")),
+            Ok(n) => {
+                pos += n;
+                offset += n as u64;
+            }
+            Err(Errno::INTR) => continue,
+            Err(e) => return Err(anyhow!("read error: {e}")),
         }
-        if r == 0 {
-            return Err(anyhow!("read error: unexpected EOF"));
-        }
-        pos += r as usize;
-        offset += r as u64;
     }
     Ok(())
 }
 
-fn pwrite_all(fd: RawFd, buf: &[u8], offset: u64) -> Result<()> {
-    let r = unsafe {
-        libc::pwrite(
-            fd,
-            buf.as_ptr() as *const _,
-            buf.len(),
-            offset as libc::off_t,
-        )
-    };
-    if r < 0 || r as usize != buf.len() {
-        return Err(anyhow!("write error: {}", std::io::Error::last_os_error()));
+fn pwrite_all(fd: BorrowedFd<'_>, buf: &[u8], mut offset: u64) -> Result<()> {
+    let mut pos = 0;
+    while pos < buf.len() {
+        match rustix::io::pwrite(fd, &buf[pos..], offset) {
+            Ok(0) => return Err(anyhow!("write error: no progress")),
+            Ok(n) => {
+                pos += n;
+                offset += n as u64;
+            }
+            Err(Errno::INTR) => continue,
+            Err(e) => return Err(anyhow!("write error: {e}")),
+        }
     }
     Ok(())
 }
@@ -91,28 +86,52 @@ const QCOW_MAGIC: u32 = (b'Q' as u32) << 24 | (b'F' as u32) << 16 | (b'I' as u32
 const QCOW_VERSION: u32 = 2;
 const QCOW_OFLAG_COPIED: u64 = 1 << 63;
 
-#[repr(C)]
-struct Qcow2Hdr {
-    magic:                  u32,
-    version:                u32,
-    backing_file_offset:    u64,
-    backing_file_size:      u32,
-    block_bits:             u32,
-    size:                   u64,
-    crypt_method:           u32,
-    l1_size:                u32,
-    l1_table_offset:        u64,
-    refcount_table_offset:  u64,
-    refcount_table_blocks:  u32,
-    nb_snapshots:           u32,
-    snapshots_offset:       u64,
+// Header field offsets and sizes (all big-endian on disk):
+//   magic:                  u32   @ 0
+//   version:                u32   @ 4
+//   backing_file_offset:    u64   @ 8
+//   backing_file_size:      u32   @ 16
+//   block_bits:             u32   @ 20
+//   size:                   u64   @ 24
+//   crypt_method:           u32   @ 32
+//   l1_size:                u32   @ 36
+//   l1_table_offset:        u64   @ 40
+//   refcount_table_offset:  u64   @ 48
+//   refcount_table_blocks:  u32   @ 56
+//   nb_snapshots:           u32   @ 60
+//   snapshots_offset:       u64   @ 64
+const QCOW2_HDR_BYTES: usize = 72;
+
+fn encode_header(buf: &mut [u8], magic: u32, version: u32, block_bits: u32,
+                 size: u64, l1_size: u32, l1_table_offset: u64) {
+    buf[0..4].copy_from_slice(&magic.to_be_bytes());
+    buf[4..8].copy_from_slice(&version.to_be_bytes());
+    buf[8..16].copy_from_slice(&0u64.to_be_bytes());       // backing_file_offset
+    buf[16..20].copy_from_slice(&0u32.to_be_bytes());       // backing_file_size
+    buf[20..24].copy_from_slice(&block_bits.to_be_bytes());
+    buf[24..32].copy_from_slice(&size.to_be_bytes());
+    buf[32..36].copy_from_slice(&0u32.to_be_bytes());       // crypt_method
+    buf[36..40].copy_from_slice(&l1_size.to_be_bytes());
+    buf[40..48].copy_from_slice(&l1_table_offset.to_be_bytes());
+    buf[48..56].copy_from_slice(&0u64.to_be_bytes());       // refcount_table_offset
+    buf[56..60].copy_from_slice(&0u32.to_be_bytes());       // refcount_table_blocks
+    buf[60..64].copy_from_slice(&0u32.to_be_bytes());       // nb_snapshots
+    buf[64..72].copy_from_slice(&0u64.to_be_bytes());       // snapshots_offset
+}
+
+fn read_be_u32(buf: &[u8], off: usize) -> u32 {
+    u32::from_be_bytes(buf[off..off + 4].try_into().unwrap())
+}
+
+fn read_be_u64(buf: &[u8], off: usize) -> u64 {
+    u64::from_be_bytes(buf[off..off + 8].try_into().unwrap())
 }
 
 // ---- Qcow2Image ----
 
-pub struct Qcow2Image {
-    infd:       RawFd,
-    outfd:      RawFd,
+pub struct Qcow2Image<'fd> {
+    infd:       BorrowedFd<'fd>,
+    outfd:      BorrowedFd<'fd>,
     image_size: u64,
     block_size: u32,
     l1_table:   Vec<u64>,
@@ -121,13 +140,13 @@ pub struct Qcow2Image {
     offset:     u64,
 }
 
-impl Qcow2Image {
-    pub fn new(infd: RawFd, outfd: RawFd, block_size: u32) -> Result<Self> {
+impl<'fd> Qcow2Image<'fd> {
+    pub fn new(infd: BorrowedFd<'fd>, outfd: BorrowedFd<'fd>, block_size: u32) -> Result<Self> {
         assert!(block_size.is_power_of_two());
 
         let image_size = file_size_fd(infd)?;
         let l2_size = block_size as u64 / 8;
-        let l1_size = div_round_up(image_size, block_size as u64 * l2_size) as usize;
+        let l1_size = image_size.div_ceil(block_size as u64 * l2_size) as usize;
 
         Ok(Qcow2Image {
             infd,
@@ -137,13 +156,13 @@ impl Qcow2Image {
             l1_table:   vec![0u64; l1_size],
             l1_index:   None,
             l2_table:   vec![0u64; l2_size as usize],
-            offset:     round_up(std::mem::size_of::<Qcow2Hdr>() as u64, block_size as u64),
+            offset:     round_up(QCOW2_HDR_BYTES as u64, block_size as u64),
         })
     }
 
-    /// Raw fd of the input device, for callers that need to read
+    /// Borrowed fd of the input device, for callers that need to read
     /// directly (e.g. sanitize path).
-    pub fn infd(&self) -> RawFd {
+    pub fn infd(&self) -> BorrowedFd<'_> {
         self.infd
     }
 
@@ -232,30 +251,16 @@ impl Qcow2Image {
         pwrite_all(self.outfd, &l1_bytes, l1_offset)?;
 
         // Write header
-        let hdr = Qcow2Hdr {
-            magic:                  QCOW_MAGIC.to_be(),
-            version:                QCOW_VERSION.to_be(),
-            backing_file_offset:    0,
-            backing_file_size:      0,
-            block_bits:             self.block_size.trailing_zeros().to_be(),
-            size:                   self.image_size.to_be(),
-            crypt_method:           0,
-            l1_size:                (self.l1_table.len() as u32).to_be(),
-            l1_table_offset:        l1_offset.to_be(),
-            refcount_table_offset:  0,
-            refcount_table_blocks:  0,
-            nb_snapshots:           0,
-            snapshots_offset:       0,
-        };
-
         let mut header_buf = vec![0u8; self.block_size as usize];
-        let hdr_bytes = unsafe {
-            std::slice::from_raw_parts(
-                &hdr as *const Qcow2Hdr as *const u8,
-                std::mem::size_of::<Qcow2Hdr>(),
-            )
-        };
-        header_buf[..hdr_bytes.len()].copy_from_slice(hdr_bytes);
+        encode_header(
+            &mut header_buf,
+            QCOW_MAGIC,
+            QCOW_VERSION,
+            self.block_size.trailing_zeros(),
+            self.image_size,
+            self.l1_table.len() as u32,
+            l1_offset,
+        );
         pwrite_all(self.outfd, &header_buf, 0)?;
 
         Ok(())
@@ -263,32 +268,28 @@ impl Qcow2Image {
 }
 
 /// Convert a qcow2 image back to a raw device image.
-pub fn qcow2_to_raw(infd: RawFd, outfd: RawFd) -> Result<()> {
-    let hdr_size = std::mem::size_of::<Qcow2Hdr>();
-    let mut hdr_buf = vec![0u8; hdr_size];
+pub fn qcow2_to_raw(infd: BorrowedFd<'_>, outfd: BorrowedFd<'_>) -> Result<()> {
+    let mut hdr_buf = [0u8; QCOW2_HDR_BYTES];
     pread_exact(infd, &mut hdr_buf, 0)?;
 
-    let hdr = unsafe { &*(hdr_buf.as_ptr() as *const Qcow2Hdr) };
-
-    if u32::from_be(hdr.magic) != QCOW_MAGIC {
+    let magic = read_be_u32(&hdr_buf, 0);
+    let version = read_be_u32(&hdr_buf, 4);
+    if magic != QCOW_MAGIC {
         return Err(anyhow!("not a qcow2 image"));
     }
-    if u32::from_be(hdr.version) != QCOW_VERSION {
+    if version != QCOW_VERSION {
         return Err(anyhow!("incorrect qcow2 version"));
     }
 
-    let size = u64::from_be(hdr.size);
-    let ret = unsafe { libc::ftruncate(outfd, size as libc::off_t) };
-    if ret != 0 {
-        return Err(anyhow!("ftruncate: {}", std::io::Error::last_os_error()));
-    }
+    let size = read_be_u64(&hdr_buf, 24);
+    rustix::fs::ftruncate(outfd, size)?;
 
-    let block_size = 1u32 << u32::from_be(hdr.block_bits);
-    let l1_size = u32::from_be(hdr.l1_size) as usize;
+    let block_size = 1u32 << read_be_u32(&hdr_buf, 20);
+    let l1_size = read_be_u32(&hdr_buf, 36) as usize;
     let l2_size = block_size as usize / 8;
 
     // Read L1 table
-    let l1_offset = u64::from_be(hdr.l1_table_offset);
+    let l1_offset = read_be_u64(&hdr_buf, 40);
     let mut l1_buf = vec![0u8; l1_size * 8];
     pread_exact(infd, &mut l1_buf, l1_offset)?;
 
@@ -296,7 +297,7 @@ pub fn qcow2_to_raw(infd: RawFd, outfd: RawFd) -> Result<()> {
     let mut data_buf = vec![0u8; block_size as usize];
 
     for i in 0..l1_size {
-        let l1_entry = u64::from_be_bytes(l1_buf[i * 8..(i + 1) * 8].try_into().unwrap());
+        let l1_entry = read_be_u64(&l1_buf, i * 8);
         if l1_entry == 0 {
             continue;
         }
@@ -304,9 +305,7 @@ pub fn qcow2_to_raw(infd: RawFd, outfd: RawFd) -> Result<()> {
         pread_exact(infd, &mut l2_buf, l1_entry & !QCOW_OFLAG_COPIED)?;
 
         for j in 0..l2_size {
-            let l2_entry = u64::from_be_bytes(
-                l2_buf[j * 8..(j + 1) * 8].try_into().unwrap(),
-            );
+            let l2_entry = read_be_u64(&l2_buf, j * 8);
             let src_offset = l2_entry & !QCOW_OFLAG_COPIED;
             if src_offset == 0 {
                 continue;
@@ -325,24 +324,15 @@ fn round_up(v: u64, align: u64) -> u64 {
     v.div_ceil(align) * align
 }
 
-fn div_round_up(n: u64, d: u64) -> u64 {
-    n.div_ceil(d)
-}
+/// Get the size of a file or block device given a borrowed fd.
+fn file_size_fd(fd: BorrowedFd<'_>) -> Result<u64> {
+    use rustix::fs::{fstat, FileType};
+    use rustix::ioctl::{Getter, ReadOpcode};
 
-// _IOR(0x12, 114, u64) — BLKGETSIZE64 on 64-bit Linux
-const BLKGETSIZE64: libc::c_ulong = 0x80081272;
-
-fn file_size_fd(fd: RawFd) -> Result<u64> {
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return Err(anyhow!("fstat: {}", std::io::Error::last_os_error()));
-    }
-    if (stat.st_mode & libc::S_IFMT) == libc::S_IFBLK {
-        let mut size: u64 = 0;
-        if unsafe { libc::ioctl(fd, BLKGETSIZE64, &mut size) } != 0 {
-            return Err(anyhow!("BLKGETSIZE64: {}", std::io::Error::last_os_error()));
-        }
-        Ok(size)
+    let stat = fstat(fd)?;
+    if FileType::from_raw_mode(stat.st_mode) == FileType::BlockDevice {
+        type BlkGetSize64 = ReadOpcode<0x12, 114, u64>;
+        Ok(unsafe { rustix::ioctl::ioctl(fd, Getter::<BlkGetSize64, u64>::new()) }?)
     } else {
         Ok(stat.st_size as u64)
     }
