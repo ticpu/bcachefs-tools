@@ -607,8 +607,13 @@ fn image_update_inner(
     // Grow existing image to make room
     let dst_meta = std::fs::metadata(dst_image)?;
     let new_size = dst_meta.size() + input_bytes * 2;
-    if unsafe { libc::truncate(CString::new(dst_image)?.as_ptr(), new_size as i64) } != 0 {
-        bail!("truncate error: {}", std::io::Error::last_os_error());
+    {
+        let dst_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dst_image)
+            .map_err(|e| anyhow!("truncate error opening {}: {}", dst_image, e))?;
+        dst_file.set_len(new_size)
+            .map_err(|e| anyhow!("truncate error: {}", e))?;
     }
 
     // Open filesystem

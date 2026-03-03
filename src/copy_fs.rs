@@ -1075,7 +1075,7 @@ pub fn copy_fs(
     }
 
     if s.migrate_type == MigrateType::Migrate {
-        unsafe { libc::syncfs(raw_fd) };
+        rustix::fs::syncfs(src_fd).map_err(rustix_err)?;
     }
 
     let mut root_inode: c::bch_inode_unpacked = Default::default();
