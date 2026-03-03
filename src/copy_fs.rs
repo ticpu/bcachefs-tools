@@ -434,7 +434,7 @@ fn write_data(
     data: &[u8],
 ) -> Result<(), BchError> {
     let result = block_on(
-        fs.write(dst_inode.bi_inum, offset, 1, 1, data)
+        fs.write(dst_inode.bi_inum, offset, 1, 1, data, 0)
     )?;
     dst_inode.bi_sectors = (dst_inode.bi_sectors as i64 + result.sectors_delta) as u64;
     Ok(())

@@ -101,6 +101,7 @@ int rust_write_submit(struct bch_fs *c,
 		      const void *buf, size_t len,
 		      __u64 inum, __u64 offset,
 		      __u32 subvol, __u32 replicas,
+		      __u64 new_i_size,
 		      void (*end_io)(struct bch_write_op *));
 
 /*

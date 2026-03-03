@@ -72,6 +72,17 @@ pub struct Fs {
 }
 
 impl Fs {
+    /// Create a non-owning `Fs` view from a raw pointer.
+    ///
+    /// Returns `ManuallyDrop<Fs>` to prevent `Fs::drop` from calling
+    /// `bch2_fs_exit`. Deref gives `&Fs` for all methods.
+    ///
+    /// # Safety
+    /// `raw` must point to a valid, live `bch_fs`.
+    pub unsafe fn borrow_raw(raw: *mut c::bch_fs) -> std::mem::ManuallyDrop<Fs> {
+        std::mem::ManuallyDrop::new(Fs { raw })
+    }
+
     /// Access the superblock handle.
     pub fn sb_handle(&self) -> &bcachefs::bch_sb_handle {
         unsafe { &(*self.raw).disk_sb }
@@ -218,8 +229,8 @@ impl Fs {
         ret_to_result(unsafe { c::bch2_write_super(self.raw) })
     }
 
-    pub fn write(&self, inum: u64, offset: u64, subvol: u32, replicas: u32, data: &[u8]) -> WriteOp {
-        WriteOp::new(self, inum, offset, subvol, replicas, data)
+    pub fn write(&self, inum: u64, offset: u64, subvol: u32, replicas: u32, data: &[u8], new_i_size: u64) -> WriteOp {
+        WriteOp::new(self, inum, offset, subvol, replicas, data, new_i_size)
     }
 
     pub fn read<'a>(
@@ -318,6 +329,28 @@ impl Fs {
     /// Filesystem block size in bytes.
     pub fn block_bytes(&self) -> u64 {
         unsafe { c::rust_block_bytes(self.raw) as u64 }
+    }
+
+    /// Look up an inode by (subvol, inum).
+    pub fn inode_find_by_inum(&self, inum: c::subvol_inum) -> Result<c::bch_inode_unpacked, BchError> {
+        let mut bi: c::bch_inode_unpacked = Default::default();
+        ret_to_result(unsafe { c::bch2_inode_find_by_inum(self.raw, inum, &mut bi) })?;
+        Ok(bi)
+    }
+
+    /// Convert a bcachefs internal time to a timespec.
+    pub fn time_to_timespec(&self, time: i64) -> c::timespec {
+        unsafe { c::rust_bch2_time_to_timespec(self.raw, time) }
+    }
+
+    /// Convert a timespec to a bcachefs internal time.
+    pub fn timespec_to_time(&self, ts: c::timespec) -> i64 {
+        unsafe { c::rust_timespec_to_bch2_time(self.raw, ts) }
+    }
+
+    /// Get the link count for an inode.
+    pub fn inode_nlink_get(bi: &c::bch_inode_unpacked) -> u32 {
+        unsafe { c::rust_inode_nlink_get(bi as *const _ as *mut _) }
     }
 
     /// Set the filesystem log level.

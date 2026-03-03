@@ -52,11 +52,6 @@ int rust_fuse_link(struct bch_fs *c, subvol_inum inum,
 		   unsigned name_len,
 		   struct bch_inode_unpacked *inode_out);
 
-int rust_fuse_symlink(struct bch_fs *c, subvol_inum dir,
-		      const unsigned char *name, unsigned name_len,
-		      const unsigned char *link, unsigned link_len,
-		      struct bch_inode_unpacked *new_inode);
-
 int rust_fuse_setattr(struct bch_fs *c, subvol_inum inum,
 		      struct bch_inode_unpacked *inode_out,
 		      int set_mode, u16 mode,
@@ -66,14 +61,8 @@ int rust_fuse_setattr(struct bch_fs *c, subvol_inum inum,
 		      int atime_flag, s64 atime,
 		      int mtime_flag, s64 mtime);
 
-/* I/O operations */
-int rust_fuse_read_aligned(struct bch_fs *c, subvol_inum inum,
-			   size_t aligned_size, loff_t aligned_offset,
-			   void *buf);
-
-int rust_fuse_write(struct bch_fs *c, subvol_inum inum,
-		    const void *buf, size_t size, loff_t offset,
-		    size_t *written_out);
+/* Post-write inode time update */
+int rust_fuse_update_inode_after_write(struct bch_fs *c, subvol_inum inum);
 
 /* Directory reading */
 typedef int (*rust_fuse_filldir_fn)(void *ctx,

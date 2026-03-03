@@ -189,6 +189,7 @@ int rust_write_submit(struct bch_fs *c,
 		      const void *buf, size_t len,
 		      u64 inum, u64 offset,
 		      u32 subvol, u32 replicas,
+		      u64 new_i_size,
 		      void (*end_io)(struct bch_write_op *))
 {
 	bio_init(&op->wbio.bio, NULL, bvecs, nr_bvecs, 0);
@@ -203,6 +204,7 @@ int rust_write_submit(struct bch_fs *c,
 	op->nr_replicas	= replicas;
 	op->subvol	= subvol;
 	op->pos		= SPOS(inum, offset >> 9, U32_MAX);
+	op->new_i_size	= new_i_size;
 	op->flags	|= BCH_WRITE_sync|BCH_WRITE_only_specified_devs;
 
 	int ret = bch2_disk_reservation_get(c, &op->res, len >> 9,
@@ -226,7 +228,7 @@ void rust_read_submit(struct bch_fs *c,
 	bio_init(&rbio->bio, NULL, bvecs, nr_bvecs, 0);
 	rbio->bio.bi_opf		= REQ_OP_READ|REQ_SYNC;
 	rbio->bio.bi_iter.bi_sector	= offset >> 9;
-	bch2_bio_map(&rbio->bio, buf, len);
+	bio_add_virt_nofail(&rbio->bio, buf, len);
 
 	bch2_read(c, rbio_init(&rbio->bio, c, opts, endio), inum);
 }

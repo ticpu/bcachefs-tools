@@ -12,7 +12,7 @@
 // - Daemonization: Must fork() before spawning threads (Linux constraint).
 //   bcachefs's shrinker threads and fs_start happen after fork.
 // - I/O alignment: All reads and writes must be block-aligned. Unaligned
-//   requests get read-modify-write treatment in the C shim layer.
+//   requests get read-modify-write treatment in the write handler.
 
 use std::cell::Cell;
 use std::ffi::OsStr;
@@ -21,6 +21,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bch_bindgen::c;
+use bch_bindgen::data::io::block_on;
 use bch_bindgen::fs::Fs;
 use bch_bindgen::opt_set;
 
@@ -113,12 +114,17 @@ unsafe impl Send for BcachefsFs {}
 unsafe impl Sync for BcachefsFs {}
 
 impl BcachefsFs {
+    fn fs(&self) -> std::mem::ManuallyDrop<Fs> {
+        unsafe { Fs::borrow_raw(self.c) }
+    }
+
     fn inode_to_attr(&self, bi: &c::bch_inode_unpacked) -> FileAttr {
-        let ts_a = unsafe { c::rust_bch2_time_to_timespec(self.c, bi.bi_atime as i64) };
-        let ts_m = unsafe { c::rust_bch2_time_to_timespec(self.c, bi.bi_mtime as i64) };
-        let ts_c = unsafe { c::rust_bch2_time_to_timespec(self.c, bi.bi_ctime as i64) };
-        let blksize = unsafe { c::rust_block_bytes(self.c) };
-        let nlink = unsafe { c::rust_inode_nlink_get(bi as *const _ as *mut _) };
+        let fs = self.fs();
+        let ts_a = fs.time_to_timespec(bi.bi_atime as i64);
+        let ts_m = fs.time_to_timespec(bi.bi_mtime as i64);
+        let ts_c = fs.time_to_timespec(bi.bi_ctime as i64);
+        let blksize = fs.block_bytes() as u32;
+        let nlink = Fs::inode_nlink_get(bi);
 
         FileAttr {
             ino: INodeNo(unmap_root_ino(bi.bi_inum)),
@@ -173,8 +179,8 @@ impl Filesystem for BcachefsFs {
         let name_bytes = name.as_bytes();
         eprintln!("fuse_lookup(dir={}, name={:?})", dir.inum, name);
 
-        let mut inum: c::subvol_inum = unsafe { std::mem::zeroed() };
-        let mut bi: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+        let mut inum: c::subvol_inum = Default::default();
+        let mut bi: c::bch_inode_unpacked = Default::default();
 
         let ret = unsafe {
             c::rust_fuse_lookup(
@@ -215,13 +221,14 @@ impl Filesystem for BcachefsFs {
         let inum = map_root_ino(ino);
         eprintln!("fuse_getattr(inum={})", inum.inum);
 
-        let mut bi: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
-        let ret = unsafe { c::bch2_inode_find_by_inum(self.c, inum, &mut bi) };
-        if ret != 0 {
-            eprintln!("  getattr -> err {}", ret);
-            reply.error(err(ret));
-            return;
-        }
+        let bi = match self.fs().inode_find_by_inum(inum) {
+            Ok(bi) => bi,
+            Err(e) => {
+                eprintln!("  getattr -> err {}", e.raw());
+                reply.error(err(e.raw()));
+                return;
+            }
+        };
 
         eprintln!("  getattr -> ok");
         reply.attr(&TTL, &self.inode_to_attr(&bi));
@@ -249,7 +256,8 @@ impl Filesystem for BcachefsFs {
         let inum = map_root_ino(ino);
         eprintln!("fuse_setattr(inum={})", inum.inum);
 
-        let mut bi: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+        let mut bi: c::bch_inode_unpacked = Default::default();
+        let fs = self.fs();
 
         let (atime_flag, atime_val) = match &atime {
             None => (0, 0),
@@ -257,7 +265,7 @@ impl Filesystem for BcachefsFs {
             Some(TimeOrNow::SpecificTime(t)) => {
                 let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
                 let ts = c::timespec { tv_sec: d.as_secs() as i64, tv_nsec: d.subsec_nanos() as i64 };
-                (1, unsafe { c::rust_timespec_to_bch2_time(self.c, ts) })
+                (1, fs.timespec_to_time(ts))
             }
         };
         let (mtime_flag, mtime_val) = match &mtime {
@@ -266,7 +274,7 @@ impl Filesystem for BcachefsFs {
             Some(TimeOrNow::SpecificTime(t)) => {
                 let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
                 let ts = c::timespec { tv_sec: d.as_secs() as i64, tv_nsec: d.subsec_nanos() as i64 };
-                (1, unsafe { c::rust_timespec_to_bch2_time(self.c, ts) })
+                (1, fs.timespec_to_time(ts))
             }
         };
 
@@ -295,24 +303,20 @@ impl Filesystem for BcachefsFs {
         let inum = map_root_ino(ino);
         eprintln!("fuse_readlink(inum={})", inum.inum);
 
-        let mut bi: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
-        let ret = unsafe { c::bch2_inode_find_by_inum(self.c, inum, &mut bi) };
-        if ret != 0 {
-            reply.error(err(ret));
-            return;
-        }
+        let fs = self.fs();
+        let bi = match fs.inode_find_by_inum(inum) {
+            Ok(bi) => bi,
+            Err(e) => { reply.error(err(e.raw())); return; }
+        };
 
         let size = bi.bi_size as usize;
-        let block_size = unsafe { c::rust_block_bytes(self.c) } as usize;
+        let block_size = fs.block_bytes() as usize;
         let aligned_size = (size + block_size - 1) & !(block_size - 1);
 
         let mut buf = AlignedBuf::new(aligned_size);
 
-        let ret = unsafe {
-            c::rust_fuse_read_aligned(self.c, inum, aligned_size, 0, buf.as_mut_ptr() as *mut _)
-        };
-        if ret != 0 {
-            reply.error(err(ret));
+        if let Err(e) = block_on(fs.read(inum, 0, &bi, &mut buf)) {
+            reply.error(err(e.raw()));
             return;
         }
 
@@ -335,7 +339,7 @@ impl Filesystem for BcachefsFs {
         let name_bytes = name.as_bytes();
         eprintln!("fuse_mknod(dir={}, name={:?}, mode={:#o})", dir.inum, name, mode);
 
-        let mut new_inode: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+        let mut new_inode: c::bch_inode_unpacked = Default::default();
         let ret = unsafe {
             c::rust_fuse_create(
                 self.c, dir,
@@ -408,14 +412,14 @@ impl Filesystem for BcachefsFs {
         let link_bytes = link.as_os_str().as_bytes();
         eprintln!("fuse_symlink(dir={}, name={:?}, link={:?})", dir.inum, name, link);
 
-        let mut new_inode: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+        // Create the symlink inode
+        let mut new_inode: c::bch_inode_unpacked = Default::default();
         let ret = unsafe {
-            c::rust_fuse_symlink(
+            c::rust_fuse_create(
                 self.c, dir,
                 name_bytes.as_ptr() as *const _,
                 name_bytes.len() as u32,
-                link_bytes.as_ptr() as *const _,
-                link_bytes.len() as u32,
+                (libc::S_IFLNK | 0o777) as u16, 0,
                 &mut new_inode,
             )
         };
@@ -424,6 +428,29 @@ impl Filesystem for BcachefsFs {
             reply.error(err(ret));
             return;
         }
+
+        // Write link target (include NUL terminator, like the C code did)
+        let fs = self.fs();
+        let block_size = fs.block_bytes();
+        let link_with_nul_len = link_bytes.len() + 1;
+        let padded = (link_with_nul_len as u64).div_ceil(block_size) * block_size;
+
+        let mut buf = AlignedBuf::new(padded as usize);
+        buf[..link_bytes.len()].copy_from_slice(link_bytes);
+        // buf is zero-initialized, so NUL terminator and padding are already 0
+
+        let sym_inum = c::subvol_inum { subvol: dir.subvol, inum: new_inode.bi_inum };
+        if let Err(e) = block_on(fs.write(new_inode.bi_inum, 0, dir.subvol as u32,
+                                          1, &buf, link_with_nul_len as u64)) {
+            reply.error(err(e.raw()));
+            return;
+        }
+
+        // Re-read inode to get updated state
+        let new_inode = match self.fs().inode_find_by_inum(sym_inum) {
+            Ok(bi) => bi,
+            Err(e) => { reply.error(err(e.raw())); return; }
+        };
 
         let attr = self.inode_to_attr(&new_inode);
         reply.entry(&TTL, &attr, Generation(new_inode.bi_generation as u64));
@@ -477,7 +504,7 @@ impl Filesystem for BcachefsFs {
         eprintln!("fuse_link(ino={}, newparent={}, name={:?})",
                src_inum.inum, parent.inum, newname);
 
-        let mut inode_u: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+        let mut inode_u: c::bch_inode_unpacked = Default::default();
         let ret = unsafe {
             c::rust_fuse_link(
                 self.c, src_inum, parent,
@@ -517,12 +544,11 @@ impl Filesystem for BcachefsFs {
         let size = size as usize;
         eprintln!("fuse_read(ino={}, offset={}, size={})", inum.inum, offset, size);
 
-        let mut bi: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
-        let ret = unsafe { c::bch2_inode_find_by_inum(self.c, inum, &mut bi) };
-        if ret != 0 {
-            reply.error(err(ret));
-            return;
-        }
+        let fs = self.fs();
+        let bi = match fs.inode_find_by_inum(inum) {
+            Ok(bi) => bi,
+            Err(e) => { reply.error(err(e.raw())); return; }
+        };
 
         let end = std::cmp::min(bi.bi_size, offset + size as u64);
         if end <= offset {
@@ -531,24 +557,16 @@ impl Filesystem for BcachefsFs {
         }
         let read_size = (end - offset) as usize;
 
-        let block_size = unsafe { c::rust_block_bytes(self.c) } as u64;
+        let block_size = fs.block_bytes();
         let aligned_start = offset & !(block_size - 1);
         let pad_start = (offset - aligned_start) as usize;
-        let aligned_end = (offset + read_size as u64 + block_size - 1) & !(block_size - 1);
+        let aligned_end = (offset + read_size as u64).div_ceil(block_size) * block_size;
         let aligned_size = (aligned_end - aligned_start) as usize;
 
         let mut buf = AlignedBuf::new(aligned_size);
 
-        let ret = unsafe {
-            c::rust_fuse_read_aligned(
-                self.c, inum,
-                aligned_size, aligned_start as i64,
-                buf.as_mut_ptr() as *mut _,
-            )
-        };
-
-        if ret != 0 {
-            reply.error(err(ret));
+        if let Err(e) = block_on(fs.read(inum, aligned_start, &bi, &mut buf)) {
+            reply.error(err(e.raw()));
             return;
         }
 
@@ -572,22 +590,69 @@ impl Filesystem for BcachefsFs {
         let size = data.len();
         eprintln!("fuse_write(ino={}, offset={}, size={})", inum.inum, offset, size);
 
-        let mut written: usize = 0;
-        let ret = unsafe {
-            c::rust_fuse_write(
-                self.c, inum,
-                data.as_ptr() as *const _,
-                size, offset as i64,
-                &mut written,
-            )
+        let fs = self.fs();
+        let bi = match fs.inode_find_by_inum(inum) {
+            Ok(bi) => bi,
+            Err(e) => { reply.error(err(e.raw())); return; }
         };
 
-        if ret != 0 && written == 0 {
+        let block_size = fs.block_bytes();
+
+        // Compute alignment
+        let aligned_start = offset & !(block_size - 1);
+        let pad_start = (offset - aligned_start) as usize;
+        let aligned_end = (offset + size as u64).div_ceil(block_size) * block_size;
+        let aligned_size = (aligned_end - aligned_start) as usize;
+
+        let mut buf = AlignedBuf::new(aligned_size);
+
+        // RMW: read partial start block
+        if pad_start > 0 {
+            let mut start_block = AlignedBuf::new(block_size as usize);
+            if let Err(e) = block_on(fs.read(inum, aligned_start, &bi, &mut start_block)) {
+                reply.error(err(e.raw()));
+                return;
+            }
+            buf[..block_size as usize].copy_from_slice(&start_block);
+        }
+
+        // RMW: read partial end block (if different from start)
+        let pad_end = (aligned_end - offset - size as u64) as usize;
+        if pad_end > 0 && !(pad_start > 0 && aligned_size == block_size as usize) {
+            let end_block_offset = aligned_end - block_size;
+            let buf_offset = aligned_size - block_size as usize;
+            let mut end_block = AlignedBuf::new(block_size as usize);
+            if let Err(e) = block_on(fs.read(inum, end_block_offset, &bi, &mut end_block)) {
+                reply.error(err(e.raw()));
+                return;
+            }
+            buf[buf_offset..].copy_from_slice(&end_block);
+        }
+
+        // Overlay user data
+        buf[pad_start..pad_start + size].copy_from_slice(data);
+
+        // Get inode opts for replicas
+        let mut opts: c::bch_inode_opts = Default::default();
+        unsafe { c::bch2_inode_opts_get_inode(self.c, &bi as *const _ as *mut _, &mut opts) };
+        let replicas = std::cmp::max(opts.data_replicas as u32, 1);
+
+        // Write aligned buffer
+        let new_i_size = offset + size as u64;
+        if let Err(e) = block_on(fs.write(bi.bi_inum, aligned_start, inum.subvol as u32,
+                                          replicas, &buf, new_i_size)) {
+            reply.error(err(e.raw()));
+            return;
+        }
+
+        // Update inode times
+        let ret = unsafe { c::rust_fuse_update_inode_after_write(self.c, inum) };
+        if ret != 0 {
             reply.error(err(ret));
             return;
         }
 
-        reply.written(written as u32);
+        reply.written(size as u32);
     }
 
     fn readdir(
@@ -668,7 +733,7 @@ impl Filesystem for BcachefsFs {
         eprintln!("fuse_statfs");
 
         let usage = unsafe { c::rust_bch2_fs_usage_read_short(self.c) };
-        let block_size = unsafe { c::rust_block_bytes(self.c) } as u64;
+        let block_size = self.fs().block_bytes();
         let shift = unsafe { (*self.c).block_bits } as u64;
 
         let mut nr_inodes: u64 = 0;
@@ -701,7 +766,7 @@ impl Filesystem for BcachefsFs {
         let name_bytes = name.as_bytes();
         eprintln!("fuse_create(dir={}, name={:?}, mode={:#o})", dir.inum, name, mode);
 
-        let mut new_inode: c::bch_inode_unpacked = unsafe { std::mem::zeroed() };
+        let mut new_inode: c::bch_inode_unpacked = Default::default();
         let ret = unsafe {
             c::rust_fuse_create(
                 self.c, dir,

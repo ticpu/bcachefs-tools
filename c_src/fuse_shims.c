@@ -217,194 +217,24 @@ setattr_err:
 	}));
 }
 
-/* ---- read/write I/O ---- */
+/* ---- post-write inode time update ---- */
 
-static void fuse_read_endio(struct bio *bio)
+int rust_fuse_update_inode_after_write(struct bch_fs *c, subvol_inum inum)
 {
-	closure_put(bio->bi_private);
-}
-
-int rust_fuse_read_aligned(struct bch_fs *c, subvol_inum inum,
-			   size_t aligned_size, loff_t aligned_offset,
-			   void *buf)
-{
-	struct bch_inode_unpacked inode;
-	if (bch2_inode_find_by_inum(c, inum, &inode))
-		return -ENOENT;
-
-	struct bch_inode_opts io_opts;
-	bch2_inode_opts_get_inode(c, &inode, &io_opts);
-
-	struct bch_read_bio rbio;
-	struct bio_vec bv;
-	bio_init(&rbio.bio, NULL, &bv, 1, 0);
-	bio_add_virt_nofail(&rbio.bio, buf, aligned_size);
-	bio_set_op_attrs(&rbio.bio, REQ_OP_READ, REQ_SYNC);
-	rbio.bio.bi_iter.bi_sector = aligned_offset >> 9;
-
-	struct closure cl;
-	closure_init_stack(&cl);
-
-	closure_get(&cl);
-	rbio.bio.bi_private = &cl;
-
-	bch2_read(c, rbio_init(&rbio.bio, c, io_opts, fuse_read_endio), inum);
-
-	closure_sync(&cl);
-
-	return -blk_status_to_errno(rbio.bio.bi_status);
-}
-
-struct fuse_write_op {
-	struct closure		cl;
-	/* must be last: */
-	struct bch_write_op	op;
-};
-
-static void fuse_write_endio(struct bch_write_op *op)
-{
-	struct fuse_write_op *w = container_of(op, struct fuse_write_op, op);
-	closure_put(&w->cl);
-}
-
-int rust_fuse_write(struct bch_fs *c, subvol_inum inum,
-		    const void *data, size_t size, loff_t offset,
-		    size_t *written_out)
-{
-	*written_out = 0;
-
-	struct bch_inode_unpacked inode;
-	if (bch2_inode_find_by_inum(c, inum, &inode))
-		return -ENOENT;
-
-	struct bch_inode_opts io_opts;
-	bch2_inode_opts_get_inode(c, &inode, &io_opts);
-
-	u32 bs = block_bytes(c);
-	loff_t aligned_start = round_down(offset, bs);
-	size_t pad_start = offset - aligned_start;
-	loff_t end = offset + size;
-	loff_t aligned_end = round_up(end, bs);
-	size_t pad_end = aligned_end - end;
-	size_t aligned_size = aligned_end - aligned_start;
-
-	void *aligned_buf = aligned_alloc(PAGE_SIZE, aligned_size);
-	if (!aligned_buf)
-		return -ENOMEM;
-
-	int ret = 0;
-
-	/* Read partial start block */
-	if (pad_start) {
-		memset(aligned_buf, 0, bs);
-		ret = rust_fuse_read_aligned(c, inum, bs, aligned_start, aligned_buf);
-		if (ret)
-			goto out;
-	}
-
-	/* Read partial end block (if different from start) */
-	if (pad_end && !(pad_start && aligned_size == (size_t)bs)) {
-		loff_t partial_end_start = aligned_end - bs;
-		size_t buf_offset = aligned_size - bs;
-		memset(aligned_buf + buf_offset, 0, bs);
-		ret = rust_fuse_read_aligned(c, inum, bs, partial_end_start,
-					     aligned_buf + buf_offset);
-		if (ret)
-			goto out;
-	}
-
-	/* Overlay write data */
-	memcpy(aligned_buf + pad_start, data, size);
-
-	/* Do the write */
-	struct fuse_write_op w = {};
-	struct bch_write_op *op = &w.op;
-	struct bio_vec bv;
-
-	closure_init_stack(&w.cl);
-
-	bch2_write_op_init(op, c, io_opts);
-	op->write_point	= writepoint_hashed(0);
-	op->nr_replicas	= io_opts.data_replicas;
-	op->target	= io_opts.foreground_target;
-	op->subvol	= inum.subvol;
-	op->pos		= POS(inum.inum, aligned_start >> 9);
-	op->new_i_size	= offset + size;
-	op->end_io	= fuse_write_endio;
-
-	bio_init(&op->wbio.bio, NULL, &bv, 1, 0);
-	bio_add_virt_nofail(&op->wbio.bio, aligned_buf, aligned_size);
-	bio_set_op_attrs(&op->wbio.bio, REQ_OP_WRITE, REQ_SYNC);
-
-	if (bch2_disk_reservation_get(c, &op->res, aligned_size >> 9,
-				      op->nr_replicas, 0)) {
-		ret = -ENOSPC;
-		goto out;
-	}
-
-	closure_get(&w.cl);
-	closure_call(&op->cl, bch2_write, NULL, NULL);
-	closure_sync(&w.cl);
-
-	if (!op->error) {
-		size_t aligned_written = op->written << 9;
-		/* Convert aligned bytes written back to unaligned */
-		size_t bytes = 0;
-		if (aligned_written > pad_start) {
-			bytes = aligned_written - pad_start;
-			if (bytes > pad_end)
-				bytes -= pad_end;
-			else
-				bytes = 0;
-		}
-		*written_out = bytes;
-	}
-	ret = op->error;
-
-	/* Update inode times */
-	if (!ret) {
-		CLASS(btree_trans, trans)(c);
-		ret = commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
-			u64 now = bch2_current_time(c);
-			CLASS(btree_iter_uninit, iter)(trans);
-			struct bch_inode_unpacked inode_u;
-			int ret2 = bch2_inode_peek(trans, &iter, &inode_u, inum,
-						    BTREE_ITER_intent);
-			if (ret2)
-				goto time_err;
+	CLASS(btree_trans, trans)(c);
+	return commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+		u64 now = bch2_current_time(c);
+		CLASS(btree_iter_uninit, iter)(trans);
+		struct bch_inode_unpacked inode_u;
+		int ret2 = bch2_inode_peek(trans, &iter, &inode_u, inum,
+					    BTREE_ITER_intent);
+		if (!ret2) {
 			inode_u.bi_mtime = now;
 			inode_u.bi_ctime = now;
-time_err:
-			ret2 ?:
-			bch2_inode_write(trans, &iter, &inode_u);
-		}));
-	}
-
-out:
-	free(aligned_buf);
-	return ret;
-}
-
-int rust_fuse_symlink(struct bch_fs *c, subvol_inum dir,
-		      const unsigned char *name, unsigned name_len,
-		      const unsigned char *link, unsigned link_len,
-		      struct bch_inode_unpacked *new_inode)
-{
-	int ret;
-
-	ret = rust_fuse_create(c, dir, name, name_len,
-			       S_IFLNK|S_IRWXUGO, 0, new_inode);
-	if (ret)
-		return ret;
-
-	subvol_inum inum = { dir.subvol, new_inode->bi_inum };
-	size_t written = 0;
-	ret = rust_fuse_write(c, inum, link, link_len + 1, 0, &written);
-	if (ret)
-		return ret;
-
-	new_inode->bi_size = written;
-	return 0;
+			ret2 = bch2_inode_write(trans, &iter, &inode_u);
+		}
+		ret2;
+	}));
 }
 
 /* ---- readdir ---- */

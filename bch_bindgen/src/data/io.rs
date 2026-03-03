@@ -35,6 +35,7 @@ extern "C" {
         offset: u64,
         subvol: u32,
         replicas: u32,
+        new_i_size: u64,
         end_io: Option<unsafe extern "C" fn(*mut c::bch_write_op)>,
     ) -> i32;
 
@@ -100,6 +101,7 @@ impl WriteOp {
         subvol: u32,
         replicas: u32,
         data: &[u8],
+        new_i_size: u64,
     ) -> Self {
         let state = Box::pin(WriteState {
             op:         unsafe { std::mem::zeroed() },
@@ -121,6 +123,7 @@ impl WriteOp {
                 offset,
                 subvol,
                 replicas,
+                new_i_size,
                 Some(write_endio),
             )
         };
