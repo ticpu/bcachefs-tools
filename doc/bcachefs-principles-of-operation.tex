@@ -1,7 +1,8 @@
 \documentclass{article}
 
 \usepackage{imakeidx}
-\usepackage[pdfborder={0 0 0}]{hyperref}
+\usepackage[pdfborder={0 0 0},bookmarks=true,bookmarksnumbered=true]{hyperref}
+\usepackage{bookmark}
 \usepackage{longtable}
 \usepackage{upquote}
 
@@ -1197,29 +1198,15 @@ inconsistencies. Valid error actions are:
 
 \subsection{Checksum types}
 Valid checksum types are:
-\begin{description}
-	\item[{\tt none}]
-	\item[{\tt crc32c}] (default)
-	\item[{\tt crc64}]
-	\item[{\tt xxhash}]
-\end{description}
+\bchdoc{csum-opts}
 
 \subsection{Compression types}
 Valid compression types are:
-\begin{description}
-	\item[{\tt none}] (default)
-	\item[{\tt lz4}]
-	\item[{\tt gzip}]
-	\item[{\tt zstd}]
-\end{description}
+\bchdoc{compression-opts}
 
 \subsection{String hash types}
 Valid hash types for string hash tables are:
-\begin{description}
-	\item[{\tt crc32c}]
-	\item[{\tt crc64}]
-	\item[{\tt siphash}] (default)
-\end{description}
+\bchdoc{str-hash-opts}
 
 \section{Debugging tools}
 

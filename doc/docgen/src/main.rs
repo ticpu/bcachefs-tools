@@ -512,13 +512,8 @@ fn generate_opts_table(opts: &[OptEntry]) -> String {
     out.push_str("% Auto-generated from BCH_OPTS() in libbcachefs/opts.h — do not edit\n");
     out.push_str("% Regenerate with: cargo run -p bch-docgen\n\n");
 
-    out.push_str("\\begin{longtable}{l l l l p{2.6in}}\n");
-    out.push_str(
-        "\\textbf{Option} & \\textbf{Type} & \\textbf{Scope} \
-         & \\textbf{Default} & \\textbf{Description} \\\\\n",
-    );
-    out.push_str("\\hline\n");
-    out.push_str("\\endhead\n");
+    out.push_str("\\small\n");
+    out.push_str("\\begin{description}\n");
 
     for opt in opts {
         if opt.hidden || opt.nodoc || opt.internal {
@@ -528,7 +523,6 @@ fn generate_opts_table(opts: &[OptEntry]) -> String {
         let name = escape_latex(&opt.name);
         let scope = opt.scope.join(", ");
         let default = escape_latex(&opt.default_display);
-        // Flatten multi-line help into a single paragraph for the table cell
         let desc = opt
             .help
             .as_ref()
@@ -536,12 +530,77 @@ fn generate_opts_table(opts: &[OptEntry]) -> String {
             .unwrap_or_default();
 
         out.push_str(&format!(
-            "\\texttt{{{name}}} & {typ} & {scope} & {default} & {desc} \\\\\n",
-            typ = opt.opt_type,
+            "\\item[\\texttt{{{name}}}] \\hfill \\\\\n"
         ));
+
+        // Metadata line: scope, type, default
+        let mut meta = format!("\\textit{{{scope}}}");
+        if opt.opt_type != "bool" {
+            meta.push_str(&format!(" \\quad {}", opt.opt_type));
+        }
+        if !opt.default_display.is_empty() && opt.default_display != "0" {
+            meta.push_str(&format!(" \\quad default: {default}"));
+        }
+        out.push_str(&format!("\t{meta} \\\\\n"));
+
+        if !desc.is_empty() {
+            out.push_str(&format!("\t{desc}\n"));
+        }
+        out.push('\n');
     }
 
-    out.push_str("\\end{longtable}\n");
+    out.push_str("\\end{description}\n");
+    out.push_str("\\normalsize\n");
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Simple enum lists from x-macros: x(name, value) → \item[{\tt name}]
+// ---------------------------------------------------------------------------
+
+struct EnumList {
+    key: &'static str,
+    header: &'static str,
+    macro_name: &'static str,
+    default: Option<&'static str>,
+}
+
+const ENUM_LISTS: &[EnumList] = &[
+    EnumList {
+        key: "csum-opts",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_CSUM_OPTS",
+        default: Some("crc32c"),
+    },
+    EnumList {
+        key: "compression-opts",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_COMPRESSION_OPTS",
+        default: Some("none"),
+    },
+    EnumList {
+        key: "str-hash-opts",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_STR_HASH_OPTS",
+        default: Some("siphash"),
+    },
+];
+
+fn generate_enum_list(entries: &[Vec<String>], default: Option<&str>) -> String {
+    let mut out = String::new();
+    out.push_str("\\begin{description}\n");
+    for entry in entries {
+        let name = &entry[0];
+        let escaped = escape_latex(name);
+        if default == Some(name.as_str()) {
+            out.push_str(&format!(
+                "\\item[{{\\tt {escaped}}}] (default)\n"
+            ));
+        } else {
+            out.push_str(&format!("\\item[{{\\tt {escaped}}}]\n"));
+        }
+    }
+    out.push_str("\\end{description}\n");
     out
 }
 
@@ -617,6 +676,19 @@ fn main() {
     let table = generate_opts_table(&opts);
     fs::write(generated_dir.join("opts-table.tex"), &table).unwrap();
     available_keys.insert("opts-table".into());
+
+    // --- Simple enum lists ---
+    for el in ENUM_LISTS {
+        let source = fs::read_to_string(root.join(el.header)).unwrap();
+        let entries = parse_xmacro(&source, el.macro_name);
+        if entries.is_empty() {
+            eprintln!("warning: {} in {} produced no entries", el.macro_name, el.header);
+            continue;
+        }
+        let latex = generate_enum_list(&entries, el.default);
+        fs::write(generated_dir.join(format!("{}.tex", el.key)), &latex).unwrap();
+        available_keys.insert(el.key.into());
+    }
 
     // --- Validate references ---
     let tex_path = root.join("doc/bcachefs-principles-of-operation.tex");
