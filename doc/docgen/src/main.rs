@@ -308,12 +308,14 @@ struct OptEntry {
     default_display: String,
     help: Option<String>,
     hidden: bool,
+    nodoc: bool,
     internal: bool,
 }
 
-fn parse_opt_flags(flags_str: &str) -> (Vec<&'static str>, bool) {
+fn parse_opt_flags(flags_str: &str) -> (Vec<&'static str>, bool, bool) {
     let mut scope = Vec::new();
     let mut hidden = false;
+    let mut nodoc = false;
     for flag in flags_str.split('|') {
         match flag.trim() {
             "OPT_FS" => scope.push("fs"),
@@ -323,10 +325,11 @@ fn parse_opt_flags(flags_str: &str) -> (Vec<&'static str>, bool) {
             "OPT_DEVICE" => scope.push("device"),
             "OPT_INODE" => scope.push("inode"),
             "OPT_HIDDEN" => hidden = true,
+            "OPT_NODOC" => nodoc = true,
             _ => {}
         }
     }
-    (scope, hidden)
+    (scope, hidden, nodoc)
 }
 
 fn parse_opt_type_str(s: &str) -> String {
@@ -483,7 +486,7 @@ fn parse_opts(entries: &[Vec<String>]) -> Vec<OptEntry> {
                 return None;
             }
             let name = e[0].clone();
-            let (scope, hidden) = parse_opt_flags(&e[2]);
+            let (scope, hidden, nodoc) = parse_opt_flags(&e[2]);
             let opt_type = parse_opt_type_str(&e[3]);
             let default_display = humanize_default(&e[5]);
             let help = parse_help(&e[7]);
@@ -497,6 +500,7 @@ fn parse_opts(entries: &[Vec<String>]) -> Vec<OptEntry> {
                 default_display,
                 help,
                 hidden,
+                nodoc,
                 internal,
             })
         })
@@ -517,7 +521,7 @@ fn generate_opts_table(opts: &[OptEntry]) -> String {
     out.push_str("\\endhead\n");
 
     for opt in opts {
-        if opt.hidden || opt.internal {
+        if opt.hidden || opt.nodoc || opt.internal {
             continue;
         }
 
