@@ -49,7 +49,7 @@ esac
 CROSS_BUILD_DEP_ARCH=""
 CROSS_DPKG_ARCH=""
 if [ "$ARCH" = "ppc64el" ]; then
-    CROSS_BUILD_DEP_ARCH="--host-arch ppc64el"
+    CROSS_BUILD_DEP_ARCH="--host-architecture ppc64el"
     CROSS_DPKG_ARCH="-a ppc64el"
 fi
 
