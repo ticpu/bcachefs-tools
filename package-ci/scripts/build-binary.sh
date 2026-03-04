@@ -24,8 +24,8 @@ CACHE_DIR="${CACHE_DIR:-/home/aptbcachefsorg/package-ci/cache}"
 CONTAINER="ci-binary-${DISTRO}-${ARCH}-$$"
 IMAGE="debian:trixie-slim"
 
-# Per-distro apt cache to avoid lock contention when multiple distros build concurrently
-APT_CACHE_DIR="$CACHE_DIR/apt-$DISTRO"
+# Per-distro-arch apt cache to avoid lock contention when multiple builds run concurrently
+APT_CACHE_DIR="$CACHE_DIR/apt-$DISTRO-$ARCH"
 mkdir -p "$RESULT_DIR" "$APT_CACHE_DIR"
 
 cleanup() {
