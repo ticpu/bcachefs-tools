@@ -111,7 +111,22 @@ fn group_usage(group: &str) {
 
 fn escape_latex(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        // --- is an em-dash in prose: leave intact
+        if b.get(i) == Some(&b'-') && b.get(i+1) == Some(&b'-') && b.get(i+2) == Some(&b'-') {
+            out.push_str("---");
+            i += 3;
+            continue;
+        }
+        // -- in text mode becomes an en-dash; break ligature with empty group
+        if b.get(i) == Some(&b'-') && b.get(i+1) == Some(&b'-') {
+            out.push_str("-{}-");
+            i += 2;
+            continue;
+        }
+        let ch = s[i..].chars().next().unwrap();
         match ch {
             '_' => out.push_str("\\_"),
             '#' => out.push_str("\\#"),
@@ -124,6 +139,7 @@ fn escape_latex(s: &str) -> String {
             '^' => out.push_str("\\textasciicircum{}"),
             _ => out.push(ch),
         }
+        i += ch.len_utf8();
     }
     out
 }
