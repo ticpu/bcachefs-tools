@@ -387,7 +387,7 @@ impl Orchestrator {
 
         // Phase 2: binary builds
         let matrix = build_matrix();
-        let mut all_done = true;
+        let mut still_running = false;
         let mut any_failed = false;
 
         for job in &matrix {
@@ -396,14 +396,14 @@ impl Orchestrator {
             match status {
                 JobStatus::Done => {}
                 JobStatus::Building => {
-                    all_done = false;
+                    still_running = true;
                 }
                 JobStatus::Failed => {
-                    all_done = false;
                     any_failed = true;
+                    warn!("[{}] build failed: {}", &commit[..12], name);
                 }
                 JobStatus::Pending => {
-                    all_done = false;
+                    still_running = true;
                     if self.have_build_slot(job) {
                         info!("[{}] starting binary build: {}", &commit[..12], name);
                         self.spawn_binary_build(&commit, job)?;
@@ -412,20 +412,17 @@ impl Orchestrator {
             }
         }
 
-        // Phase 3: publish when all done
-        if all_done {
+        // Phase 3: publish when nothing is still building/pending
+        // Publish even if some builds failed — partial results are better than nothing
+        if !still_running {
             let pub_status = self.effective_status(&commit, "publish");
             if pub_status == JobStatus::Pending {
-                info!("[{}] all builds complete, publishing", &commit[..12]);
-                self.spawn_publish(&commit)?;
-            }
-        } else if any_failed {
-            // Log which jobs failed so the logfile is useful
-            for job in &matrix {
-                let name = job.name();
-                if self.effective_status(&commit, &name) == JobStatus::Failed {
-                    warn!("[{}] build failed: {}", &commit[..12], name);
+                if any_failed {
+                    info!("[{}] some builds failed, publishing successful ones", &commit[..12]);
+                } else {
+                    info!("[{}] all builds complete, publishing", &commit[..12]);
                 }
+                self.spawn_publish(&commit)?;
             }
         }
 
@@ -576,8 +573,7 @@ impl Orchestrator {
 
         let child = Command::new(&self.config.scripts_dir.join("publish.sh"))
             .arg(commit)
-            .arg(self.state.commit_dir(commit))
-            .arg(&self.config.aptly_root)
+            .env("STATE_DIR", &self.config.state_dir)
             .stdout(Stdio::from(log_file.try_clone()?))
             .stderr(Stdio::from(log_file))
             .spawn()

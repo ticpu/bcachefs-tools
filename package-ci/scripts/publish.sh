@@ -1,26 +1,41 @@
 #!/bin/bash
-# Publish built .deb packages to the apt.bcachefs.org repository
+# Publish built .deb packages to apt.bcachefs.org
 #
-# Uses aptly to manage the Debian repository locally (no sshfs).
+# Signs .debs with debsigs, then includes them in aptly repos and publishes.
+# Called by the orchestrator after all builds for a commit succeed.
 #
-# Usage: publish.sh COMMIT BUILD_DIR APTLY_ROOT
+# Usage: publish.sh COMMIT [snapshot|release]
+#   SUITE defaults to "snapshot" (use "release" for tagged releases)
+#
+# Config read from $STATE_DIR/config:
+#   GPG_SIGNING_SUBKEY_FINGERPRINT
+#   APTLY_ROOT
 
 set -euo pipefail
 
 COMMIT="$1"
-BUILD_DIR="$2"
-APTLY_ROOT="$3"
+SUITE="${2:-snapshot}"
 
-SNAPSHOT_DATE=$(date -u +%Y%m%d%H%M%S)
+STATE_DIR="${STATE_DIR:-/home/aptbcachefsorg/package-ci}"
+BUILD_DIR="$STATE_DIR/builds/$COMMIT"
+SHORT="${COMMIT:0:12}"
 
-echo "=== Publishing packages for ${COMMIT:0:12} ==="
+# Load config
+# shellcheck source=/dev/null
+source "$STATE_DIR/config"
+: "${GPG_SIGNING_SUBKEY_FINGERPRINT:?not set in config}"
+: "${APTLY_ROOT:?not set in config}"
 
-# Write aptly config (idempotent)
-APTLY_CONF="$APTLY_ROOT/aptly.conf"
+SNAPSHOT_DATE="$(date -u +%Y%m%d%H%M%S)"
+
+# Minimal aptly config — points at the existing db/pool/public
+APTLY_CONF="$(mktemp)"
+trap "rm -f '$APTLY_CONF'" EXIT
 cat > "$APTLY_CONF" << EOF
 {
     "rootDir": "$APTLY_ROOT",
     "gpgDisableVerify": true,
+    "skipContentsPublishing": true,
     "FileSystemPublishEndpoints": {
         "public": {
             "rootDir": "$APTLY_ROOT/public",
@@ -30,98 +45,80 @@ cat > "$APTLY_CONF" << EOF
 }
 EOF
 
-aptly="aptly -config=$APTLY_CONF"
+aptly() { command aptly -config="$APTLY_CONF" "$@"; }
 
-# Collect all .deb and .dsc files from build results
-INCOMING=$(mktemp -d)
-trap 'rm -rf "$INCOMING"' EXIT
+echo "=== Publishing $SHORT (suite=$SUITE) ==="
 
-# Copy source files
-if [ -d "$BUILD_DIR/source/result" ]; then
-    cp "$BUILD_DIR/source/result"/*.dsc "$INCOMING/" 2>/dev/null || true
-    cp "$BUILD_DIR/source/result"/*.tar.* "$INCOMING/" 2>/dev/null || true
-    cp "$BUILD_DIR/source/result"/*.changes "$INCOMING/" 2>/dev/null || true
+SRC_DIR="$BUILD_DIR/source/result"
+if [ ! -d "$SRC_DIR" ]; then
+    echo "ERROR: no source result dir at $SRC_DIR"
+    exit 1
 fi
 
-# Determine which distros have successful builds
-DISTROS=()
-for dir in "$BUILD_DIR"/*/; do
-    dirname=$(basename "$dir")
-    # Skip source and publish dirs
-    case "$dirname" in
-        source|publish) continue ;;
-    esac
-    # Check if the job succeeded
-    if [ -f "$dir/status" ] && [ "$(cat "$dir/status")" = "done" ]; then
-        # Extract distro name from job name (e.g., "trixie-amd64" -> "trixie")
-        distro="${dirname%-*}"
-        if [[ ! " ${DISTROS[*]:-} " =~ " $distro " ]]; then
-            DISTROS+=("$distro")
-        fi
-    fi
+sign_debs() {
+    local dir="$1"
+    find "$dir" -maxdepth 1 \( -name "*.deb" -o -name "*.ddeb" \) | while read -r deb; do
+        echo "  signing $(basename "$deb")"
+        debsigs --verbose --default-key="$GPG_SIGNING_SUBKEY_FINGERPRINT" --sign=origin "$deb"
+    done
+}
+
+echo "--- Signing source artifacts ---"
+sign_debs "$SRC_DIR"
+
+# Collect which distros have at least one successful arch build
+declare -A DISTRO_DONE
+for job_dir in "$BUILD_DIR"/*/; do
+    job="$(basename "$job_dir")"
+    [ "$job" = "source" ] && continue
+    status="$(cat "$job_dir/status" 2>/dev/null || echo pending)"
+    [ "$status" != "done" ] && continue
+    distro="${job%-*}"
+    DISTRO_DONE["$distro"]=1
+    echo "--- Signing $job ---"
+    sign_debs "$job_dir/result"
 done
 
-echo "Publishing for distros: ${DISTROS[*]}"
+# Include, snapshot, publish per distro
+for distro in "${!DISTRO_DONE[@]}"; do
+    REPO_NAME="$distro-$SUITE"
+    REPO_SUITE="bcachefs-tools-$SUITE"
+    SNAPSHOT_NAME="$REPO_NAME-$SNAPSHOT_DATE"
+    PUBLISH_PREFIX="filesystem:public:$distro"
 
-for distro in "${DISTROS[@]}"; do
-    SUITE="bcachefs-tools-${distro}"
-    REPO_NAME="${distro}"
+    echo "--- $distro: including into $REPO_NAME ---"
 
-    # Create repo if it doesn't exist
-    if ! $aptly repo show "$REPO_NAME" &>/dev/null; then
-        echo "Creating repo: $REPO_NAME"
-        $aptly repo create \
-            -distribution="$SUITE" \
+    aptly repo show "$REPO_NAME" &>/dev/null || \
+        aptly repo create \
+            -distribution="$REPO_SUITE" \
             -component=main \
             "$REPO_NAME"
-    fi
 
-    # Collect .deb files for this distro (all arches)
-    DISTRO_INCOMING=$(mktemp -d)
-    for dir in "$BUILD_DIR"/${distro}-*/; do
-        if [ -d "$dir/result" ]; then
-            cp "$dir/result"/*.deb "$DISTRO_INCOMING/" 2>/dev/null || true
-            cp "$dir/result"/*.ddeb "$DISTRO_INCOMING/" 2>/dev/null || true
-        fi
+    # Build list of dirs to include: source + all arches for this distro
+    INCLUDE_DIRS=("$SRC_DIR")
+    for job_dir in "$BUILD_DIR/${distro}"-*/; do
+        [ -d "$job_dir/result" ] && \
+            [ "$(cat "$job_dir/status" 2>/dev/null)" = "done" ] && \
+            INCLUDE_DIRS+=("$job_dir/result")
     done
-    # Also add source
-    cp "$INCOMING"/*.dsc "$DISTRO_INCOMING/" 2>/dev/null || true
-    cp "$INCOMING"/*.tar.* "$DISTRO_INCOMING/" 2>/dev/null || true
 
-    if [ -z "$(ls -A "$DISTRO_INCOMING" 2>/dev/null)" ]; then
-        echo "No packages found for $distro, skipping"
-        rm -rf "$DISTRO_INCOMING"
-        continue
-    fi
+    # repo add takes .deb/.dsc files directly (avoids needing signed .changes)
+    aptly repo add -force-replace "$REPO_NAME" "${INCLUDE_DIRS[@]}"
 
-    echo "Adding packages to repo: $REPO_NAME"
-    $aptly repo add -force-replace "$REPO_NAME" "$DISTRO_INCOMING/"
+    echo "--- $distro: snapshot $SNAPSHOT_NAME ---"
+    aptly snapshot create "$SNAPSHOT_NAME" from repo "$REPO_NAME"
 
-    # Create snapshot
-    SNAPSHOT="${REPO_NAME}-${SNAPSHOT_DATE}"
-    echo "Creating snapshot: $SNAPSHOT"
-    $aptly snapshot create "$SNAPSHOT" from repo "$REPO_NAME"
-
-    # Publish or switch
-    if $aptly publish show "$SUITE" filesystem:public: &>/dev/null; then
-        echo "Switching publish: $SUITE"
-        $aptly publish switch \
-            -acquire-by-hash \
-            "$SUITE" \
-            "filesystem:public:" \
-            "$SNAPSHOT"
+    echo "--- $distro: publish ---"
+    if aptly publish show "$REPO_SUITE" "$PUBLISH_PREFIX" &>/dev/null; then
+        aptly publish switch "$REPO_SUITE" "$PUBLISH_PREFIX" "$SNAPSHOT_NAME"
     else
-        echo "Initial publish: $SUITE"
-        $aptly publish snapshot \
+        aptly publish snapshot \
             -acquire-by-hash \
             -origin="apt.bcachefs.org" \
             -label="apt.bcachefs.org Packages" \
-            "$SNAPSHOT" \
-            "filesystem:public:"
+            "$SNAPSHOT_NAME" \
+            "$PUBLISH_PREFIX"
     fi
-
-    rm -rf "$DISTRO_INCOMING"
 done
 
-echo "=== Publish complete ==="
-echo "Published distros: ${DISTROS[*]}"
+echo "=== Publish complete: $SHORT ==="
