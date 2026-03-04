@@ -78,6 +78,9 @@ run '
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         debian-keyring devscripts mmdebstrap sbuild sudo tar uidmap xz-utils
+    # sbuild unshare mode needs subuid/subgid mappings for root inside the container
+    echo "root:100000:65536" >> /etc/subuid
+    echo "root:100000:65536" >> /etc/subgid
 '
 
 # Set up sbuild configuration
