@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+members = [".", "bch_bindgen", "doc/docgen"]
 default-members = [".", "bch_bindgen"]
 
 [package]

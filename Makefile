@@ -251,9 +251,13 @@ deb: all
 rpm: clean
 	rpmbuild --build-in-place -bb --define "_version $(subst -,_,$(VERSION))" bcachefs-tools.spec
 
-bcachefs-principles-of-operation.pdf: doc/bcachefs-principles-of-operation.tex
+bcachefs-principles-of-operation.pdf: doc/bcachefs-principles-of-operation.tex docgen
 	pdflatex doc/bcachefs-principles-of-operation.tex
 	pdflatex doc/bcachefs-principles-of-operation.tex
+
+.PHONY: docgen
+docgen:
+	cargo run -p bch-docgen --release
 
 doc: bcachefs-principles-of-operation.pdf
 

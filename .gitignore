@@ -21,6 +21,7 @@ initramfs/hook
 !.editorconfig
 
 bcachefs-principles-of-operation.*
+doc/generated/
 
 bch_bindgen/Cargo.lock
 

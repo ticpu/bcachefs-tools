@@ -5,6 +5,10 @@
 \usepackage{longtable}
 \usepackage{upquote}
 
+% Include auto-generated fragments from bch-docgen.
+% Run: cargo run -p bch-docgen
+\newcommand{\bchdoc}[1]{\input{doc/generated/#1}}
+
 \title{bcachefs: Principles of Operation}
 \author{Kent Overstreet}
 
@@ -1127,6 +1131,10 @@ via \texttt{/sys/fs/bcachefs/<uuid>/options/}. When set at runtime via sysfs,
 the persistent options in the superblock are updated as well; when options are
 passed as mount parameters the persistent options are unmodified. Additionally
 some of the filesystem wide options can be set via \texttt{bcachefs set-fs-option}
+
+\subsection{Options reference}
+
+\bchdoc{opts-table}
 
 \subsection{File and directory options}
 

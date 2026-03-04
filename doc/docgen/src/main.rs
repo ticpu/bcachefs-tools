@@ -1,0 +1,649 @@
+//! bch-docgen: extract documentation from bcachefs source code.
+//!
+//! Two extraction mechanisms:
+//!
+//!   1. X-macro tables — structured data (e.g. BCH_OPTS()) becomes LaTeX tables
+//!   2. DOC(key) comment blocks — prose in source becomes LaTeX fragments
+//!
+//! Generated fragments live in doc/generated/ and are pulled into the
+//! Principles of Operation via \bchdoc{key}.  The tool validates that every
+//! \bchdoc reference has a corresponding source and every DOC() block is
+//! referenced, failing the build on mismatches.
+
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// X-macro parsing (adapted from bch_bindgen/build.rs)
+// ---------------------------------------------------------------------------
+
+fn parse_xmacro(source: &str, macro_name: &str) -> Vec<Vec<String>> {
+    let define_prefix = format!("#define {}", macro_name);
+    let mut in_macro = false;
+    let mut macro_text = String::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if !in_macro {
+            if trimmed.starts_with(&define_prefix) {
+                in_macro = true;
+                if let Some(pos) = trimmed.find(&define_prefix) {
+                    let after = &trimmed[pos + define_prefix.len()..];
+                    let after = if let Some(i) = after.find(')') {
+                        &after[i + 1..]
+                    } else {
+                        after
+                    };
+                    macro_text.push_str(after.trim_end_matches('\\').trim());
+                    macro_text.push(' ');
+                }
+                if !trimmed.ends_with('\\') {
+                    break;
+                }
+            }
+        } else {
+            macro_text.push_str(trimmed.trim_end_matches('\\').trim());
+            macro_text.push(' ');
+            if !trimmed.ends_with('\\') {
+                break;
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    let bytes = macro_text.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let Some(start) = macro_text[pos..].find("x(") else {
+            break;
+        };
+        let open = pos + start + 2;
+        let mut depth = 1usize;
+        let mut i = open;
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                i += 1;
+            }
+        }
+        if depth == 0 {
+            entries.push(split_xmacro_args(&macro_text[open..i]));
+            pos = i + 1;
+        } else {
+            break;
+        }
+    }
+    entries
+}
+
+/// Split comma-separated arguments, respecting nested parens and C strings.
+fn split_xmacro_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut current = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                in_string = !in_string;
+                current.push(ch);
+            }
+            '\\' if in_string => {
+                current.push(ch);
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            '(' if !in_string => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_string => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 && !in_string => {
+                args.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let tail = current.trim().to_string();
+    if !tail.is_empty() {
+        args.push(tail);
+    }
+    args
+}
+
+// ---------------------------------------------------------------------------
+// DOC() block extraction
+// ---------------------------------------------------------------------------
+
+struct DocBlock {
+    key: String,
+    content: String,
+    file: PathBuf,
+    line: usize,
+}
+
+fn extract_doc_blocks(dir: &Path) -> Vec<DocBlock> {
+    let mut blocks = Vec::new();
+    walk_c_files(dir, &mut |path| {
+        let Ok(content) = fs::read_to_string(path) else {
+            return;
+        };
+        extract_doc_blocks_from(path, &content, &mut blocks);
+    });
+    blocks
+}
+
+fn walk_c_files(dir: &Path, f: &mut dyn FnMut(&Path)) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_c_files(&path, f);
+        } else if matches!(path.extension().and_then(|e| e.to_str()), Some("h" | "c")) {
+            f(&path);
+        }
+    }
+}
+
+fn extract_doc_blocks_from(path: &Path, source: &str, blocks: &mut Vec<DocBlock>) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if let Some(rest) = trimmed.strip_prefix("/* DOC(") {
+            if let Some(key) = rest.strip_suffix(')') {
+                let key = key.trim().to_string();
+                let start_line = i + 1;
+                let mut content = String::new();
+                i += 1;
+                while i < lines.len() {
+                    let line = lines[i].trim();
+                    if line == "*/" || line.ends_with("*/") {
+                        break;
+                    }
+                    let stripped = if let Some(rest) = line.strip_prefix("* ") {
+                        rest
+                    } else if line == "*" {
+                        ""
+                    } else {
+                        line
+                    };
+                    content.push_str(stripped);
+                    content.push('\n');
+                    i += 1;
+                }
+                blocks.push(DocBlock {
+                    key,
+                    content: content.trim().to_string(),
+                    file: path.to_path_buf(),
+                    line: start_line,
+                });
+            }
+        }
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LaTeX helpers
+// ---------------------------------------------------------------------------
+
+fn escape_latex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '_' => out.push_str("\\_"),
+            '#' => out.push_str("\\#"),
+            '%' => out.push_str("\\%"),
+            '&' => out.push_str("\\&"),
+            '$' => out.push_str("\\$"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '~' => out.push_str("\\textasciitilde{}"),
+            '^' => out.push_str("\\textasciicircum{}"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Convert inline `code` spans to \texttt{}, escaping everything else.
+fn convert_inline(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '`' {
+            let mut code = String::new();
+            for c in chars.by_ref() {
+                if c == '`' {
+                    break;
+                }
+                code.push(c);
+            }
+            out.push_str("\\texttt{");
+            out.push_str(&escape_latex(&code));
+            out.push('}');
+        } else {
+            match ch {
+                '_' => out.push_str("\\_"),
+                '#' => out.push_str("\\#"),
+                '%' => out.push_str("\\%"),
+                '&' => out.push_str("\\&"),
+                '$' => out.push_str("\\$"),
+                '{' => out.push_str("\\{"),
+                '}' => out.push_str("\\}"),
+                '~' => out.push_str("\\textasciitilde{}"),
+                '^' => out.push_str("\\textasciicircum{}"),
+                _ => out.push(ch),
+            }
+        }
+    }
+    out
+}
+
+/// Convert DOC() block markup to LaTeX.
+///
+/// Supported:
+///   - paragraphs (blank lines)
+///   - `code` → \texttt{code}
+///   - lines starting with "- " → \begin{itemize} lists
+fn markup_to_latex(content: &str) -> String {
+    let mut out = String::new();
+    let mut in_list = false;
+
+    for line in content.lines() {
+        if line.is_empty() {
+            if in_list {
+                out.push_str("\\end{itemize}\n");
+                in_list = false;
+            }
+            out.push('\n');
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ") {
+            if !in_list {
+                out.push_str("\\begin{itemize}\n");
+                in_list = true;
+            }
+            out.push_str("\\item ");
+            out.push_str(&convert_inline(item));
+            out.push('\n');
+        } else {
+            if in_list {
+                out.push_str("\\end{itemize}\n");
+                in_list = false;
+            }
+            out.push_str(&convert_inline(line));
+            out.push('\n');
+        }
+    }
+    if in_list {
+        out.push_str("\\end{itemize}\n");
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// BCH_OPTS() → LaTeX table
+// ---------------------------------------------------------------------------
+
+struct OptEntry {
+    name: String,
+    opt_type: String,
+    scope: Vec<&'static str>,
+    default_display: String,
+    help: Option<String>,
+    hidden: bool,
+    internal: bool,
+}
+
+fn parse_opt_flags(flags_str: &str) -> (Vec<&'static str>, bool) {
+    let mut scope = Vec::new();
+    let mut hidden = false;
+    for flag in flags_str.split('|') {
+        match flag.trim() {
+            "OPT_FS" => scope.push("fs"),
+            "OPT_FORMAT" => scope.push("format"),
+            "OPT_MOUNT" => scope.push("mount"),
+            "OPT_RUNTIME" => scope.push("runtime"),
+            "OPT_DEVICE" => scope.push("device"),
+            "OPT_INODE" => scope.push("inode"),
+            "OPT_HIDDEN" => hidden = true,
+            _ => {}
+        }
+    }
+    (scope, hidden)
+}
+
+fn parse_opt_type_str(s: &str) -> String {
+    let s = s.trim();
+    if s.starts_with("OPT_BOOL") {
+        "bool".into()
+    } else if s.starts_with("OPT_UINT") {
+        "uint".into()
+    } else if s.starts_with("OPT_STR") {
+        "str".into()
+    } else if s.starts_with("OPT_BITFIELD") {
+        "bitfield".into()
+    } else if s.starts_with("OPT_FN") {
+        "fn".into()
+    } else {
+        s.into()
+    }
+}
+
+/// Extract the content of adjacent C string literals and unescape.
+fn join_c_strings(s: &str) -> String {
+    let mut result = String::new();
+    let mut in_string = false;
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            in_string = !in_string;
+        } else if in_string {
+            if ch == '\\' {
+                match chars.peek() {
+                    Some('n') => {
+                        result.push('\n');
+                        chars.next();
+                    }
+                    Some('t') => {
+                        result.push('\t');
+                        chars.next();
+                    }
+                    Some('\\') => {
+                        result.push('\\');
+                        chars.next();
+                    }
+                    Some('\'') => {
+                        result.push('\'');
+                        chars.next();
+                    }
+                    Some('"') => {
+                        result.push('"');
+                        chars.next();
+                    }
+                    _ => result.push(ch),
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+    }
+    result
+}
+
+fn humanize_default(s: &str) -> String {
+    let s = s.trim();
+    if s == "true" || s == "false" {
+        return s.into();
+    }
+
+    // Known enum prefixes → strip to get human-readable value
+    let prefixes = [
+        "BCH_ON_ERROR_",
+        "BCH_CSUM_OPT_",
+        "BCH_COMPRESSION_OPT_",
+        "BCH_STR_HASH_OPT_",
+        "BCH_DEGRADED_",
+        "BCH_VERSION_UPGRADE_",
+        "BCH_MEMBER_STATE_",
+        "FSCK_FIX_",
+    ];
+    for prefix in &prefixes {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return rest.into();
+        }
+    }
+
+    // Compile-time dependent
+    if s.contains("DEFAULT") {
+        return "(varies)".into();
+    }
+    if s == "BCH_SB_SECTOR" {
+        return "8".into();
+    }
+
+    // Shift expressions: "4 << 10" → human-readable size
+    if s.contains("<<") && !s.contains('|') {
+        if let Some(val) = eval_shift(s) {
+            return format_size(val);
+        }
+    }
+
+    // Bitfield defaults (BIT(...)|BIT(...)) — just use the help text
+    if s.contains("BIT(") {
+        return "(see description)".into();
+    }
+
+    s.into()
+}
+
+fn eval_shift(s: &str) -> Option<u64> {
+    let s = s.replace(['U', 'u', 'L', 'l'], "");
+    let parts: Vec<&str> = s.split("<<").collect();
+    if parts.len() == 2 {
+        let base: u64 = parts[0].trim().parse().ok()?;
+        let shift: u32 = parts[1].trim().parse().ok()?;
+        Some(base << shift)
+    } else {
+        None
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= (1 << 20) && bytes % (1 << 20) == 0 {
+        format!("{}M", bytes >> 20)
+    } else if bytes >= (1 << 10) && bytes % (1 << 10) == 0 {
+        format!("{}k", bytes >> 10)
+    } else {
+        format!("{bytes}")
+    }
+}
+
+fn parse_help(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s == "NULL" {
+        return None;
+    }
+    // Normalize whitespace per-line, preserving intentional newlines (from \n)
+    let text = join_c_strings(s)
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn parse_opts(entries: &[Vec<String>]) -> Vec<OptEntry> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            if e.len() < 8 {
+                return None;
+            }
+            let name = e[0].clone();
+            let (scope, hidden) = parse_opt_flags(&e[2]);
+            let opt_type = parse_opt_type_str(&e[3]);
+            let default_display = humanize_default(&e[5]);
+            let help = parse_help(&e[7]);
+            // Options with no scope flags are internal plumbing (set programmatically)
+            let internal = scope.is_empty();
+
+            Some(OptEntry {
+                name,
+                opt_type,
+                scope,
+                default_display,
+                help,
+                hidden,
+                internal,
+            })
+        })
+        .collect()
+}
+
+fn generate_opts_table(opts: &[OptEntry]) -> String {
+    let mut out = String::new();
+    out.push_str("% Auto-generated from BCH_OPTS() in libbcachefs/opts.h — do not edit\n");
+    out.push_str("% Regenerate with: cargo run -p bch-docgen\n\n");
+
+    out.push_str("\\begin{longtable}{l l l l p{2.6in}}\n");
+    out.push_str(
+        "\\textbf{Option} & \\textbf{Type} & \\textbf{Scope} \
+         & \\textbf{Default} & \\textbf{Description} \\\\\n",
+    );
+    out.push_str("\\hline\n");
+    out.push_str("\\endhead\n");
+
+    for opt in opts {
+        if opt.hidden || opt.internal {
+            continue;
+        }
+
+        let name = escape_latex(&opt.name);
+        let scope = opt.scope.join(", ");
+        let default = escape_latex(&opt.default_display);
+        // Flatten multi-line help into a single paragraph for the table cell
+        let desc = opt
+            .help
+            .as_ref()
+            .map(|h| escape_latex(&h.replace('\n', " ")))
+            .unwrap_or_default();
+
+        out.push_str(&format!(
+            "\\texttt{{{name}}} & {typ} & {scope} & {default} & {desc} \\\\\n",
+            typ = opt.opt_type,
+        ));
+    }
+
+    out.push_str("\\end{longtable}\n");
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Reference validation
+// ---------------------------------------------------------------------------
+
+fn extract_bchdoc_refs(tex: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut pos = 0;
+    while let Some(start) = tex[pos..].find("\\bchdoc{") {
+        let key_start = pos + start + 8;
+        if let Some(end) = tex[key_start..].find('}') {
+            refs.push(tex[key_start..key_start + end].to_string());
+            pos = key_start + end + 1;
+        } else {
+            break;
+        }
+    }
+    refs
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn find_root() -> PathBuf {
+    if let Some(path) = std::env::args().nth(1) {
+        return PathBuf::from(path);
+    }
+    let mut dir = std::env::current_dir().unwrap();
+    loop {
+        if dir.join("libbcachefs").is_dir() {
+            return dir;
+        }
+        if !dir.pop() {
+            eprintln!("error: cannot find bcachefs-tools root (no libbcachefs/ found)");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn main() {
+    let root = find_root();
+    let generated_dir = root.join("doc/generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+
+    let mut available_keys = HashSet::new();
+    let mut errors = 0;
+
+    // --- DOC() blocks from C sources ---
+    let mut doc_blocks = extract_doc_blocks(&root.join("libbcachefs"));
+    doc_blocks.append(&mut extract_doc_blocks(&root.join("c_src")));
+
+    for block in &doc_blocks {
+        let latex = markup_to_latex(&block.content);
+        fs::write(generated_dir.join(format!("{}.tex", block.key)), &latex).unwrap();
+        if !available_keys.insert(block.key.clone()) {
+            eprintln!(
+                "error: duplicate DOC({}) in {}:{}",
+                block.key,
+                block.file.display(),
+                block.line
+            );
+            errors += 1;
+        }
+    }
+
+    // --- BCH_OPTS() table ---
+    let opts_source = fs::read_to_string(root.join("libbcachefs/opts.h")).unwrap();
+    let opts_entries = parse_xmacro(&opts_source, "BCH_OPTS");
+    let opts = parse_opts(&opts_entries);
+    let table = generate_opts_table(&opts);
+    fs::write(generated_dir.join("opts-table.tex"), &table).unwrap();
+    available_keys.insert("opts-table".into());
+
+    // --- Validate references ---
+    let tex_path = root.join("doc/bcachefs-principles-of-operation.tex");
+    let tex = fs::read_to_string(&tex_path).unwrap();
+    let refs = extract_bchdoc_refs(&tex);
+    let ref_set: HashSet<_> = refs.iter().cloned().collect();
+
+    for r in &refs {
+        if !available_keys.contains(r) {
+            eprintln!(
+                "error: \\bchdoc{{{r}}} in PoO has no matching DOC({r}) in source"
+            );
+            errors += 1;
+        }
+    }
+
+    for key in &available_keys {
+        if !ref_set.contains(key) {
+            eprintln!("error: DOC({key}) in source is not referenced by PoO");
+            errors += 1;
+        }
+    }
+
+    if errors > 0 {
+        eprintln!("\n{errors} error(s)");
+        std::process::exit(1);
+    }
+
+    eprintln!(
+        "bch-docgen: {} fragment(s) in {}",
+        available_keys.len(),
+        generated_dir.display()
+    );
+}
