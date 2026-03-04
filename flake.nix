@@ -157,7 +157,7 @@
                 }
               );
 
-            nixos-test = pkgs.nixosTest (import ./nixos-test.nix self');
+            nixos-test = pkgs.testers.nixosTest (import ./nixos-test.nix self');
           };
 
           devShells.default = pkgs.mkShell {
