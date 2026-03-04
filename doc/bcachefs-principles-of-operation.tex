@@ -1184,17 +1184,7 @@ non-sequential inode numbers.
 \subsection{Error actions}
 The \texttt{errors} option controls how the filesystem responds to metadata
 inconsistencies. Valid error actions are:
-\begin{description}
-	\item[{\tt fix\_safe}] (default) Automatically repair errors that are
-		safe to fix without user confirmation. Unsafe errors cause
-		emergency read-only with a message to run fsck and report to devs.
-	\item[{\tt continue}] Log the error but continue normal operation
-		without attempting repair
-	\item[{\tt ro}] Emergency read only, immediately halting any changes
-		to the filesystem on disk
-	\item[{\tt panic}] Immediately halt the entire machine, printing a
-		backtrace on the system console
-\end{description}
+\bchdoc{error-actions}
 
 \subsection{Checksum types}
 Valid checksum types are:
@@ -1770,38 +1760,7 @@ Every journal write (\texttt{struct jset}) contains a list of entries:
 bcachefs uses 28 separate btrees for different data types, each identified by a
 numeric ID. Below is the complete list:
 
-\begin{longtable}{r l p{3.2in}}
-\textbf{ID} & \textbf{Name} & \textbf{Description} \\
-\hline
-0  & extents            & File data extent mapping (snapshot-aware) \\
-1  & inodes             & Inode metadata (snapshot-aware) \\
-2  & dirents            & Directory entries, hash-indexed (snapshot-aware) \\
-3  & xattrs             & Extended attributes, hash-indexed (snapshot-aware) \\
-4  & alloc              & Bucket allocation metadata \\
-5  & quotas             & User/group/project quota counters \\
-6  & stripes            & Stripe metadata for erasure-coded data \\
-7  & reflink            & Indirect (shared) extents for reflinks \\
-8  & subvolumes         & Subvolume metadata \\
-9  & snapshots          & Snapshot metadata \\
-10 & lru                & LRU eviction tracking (write-buffered) \\
-11 & freespace          & Free space tracking \\
-12 & need\_discard       & Discard/TRIM queue \\
-13 & backpointers       & Reverse extent/metadata pointers (write-buffered) \\
-14 & bucket\_gens        & Bucket generation number tracking \\
-15 & snapshot\_trees     & Snapshot tree roots \\
-16 & deleted\_inodes     & Inodes pending deletion \\
-17 & logged\_ops         & Multi-transaction operations (sagas) for crash recovery \\
-18 & reconcile\_work     & Reconcile work queue \\
-19 & subvolume\_children & Subvolume parent-child relationships \\
-20 & accounting         & Disk accounting counters (write-buffered) \\
-21 & reconcile\_hipri    & High priority reconcile work \\
-22 & reconcile\_pending  & Reconcile work pending target availability \\
-23 & reconcile\_scan     & Reconcile option propagation scan cookies \\
-24 & reconcile\_work\_phys & Physical reconcile work queue \\
-25 & reconcile\_hipri\_phys & Physical high priority reconcile work \\
-26 & bucket\_to\_stripe   & Bucket to stripe multi-mapping \\
-27 & stripe\_backpointers & Backpointers keyed by stripe index and block number, for repair on invalid devices (write-buffered) \\
-\end{longtable}
+\bchdoc{btree-ids}
 
 Btrees marked as ``snapshot-aware'' include a snapshot ID in every key position,
 allowing different snapshot versions to coexist within the same btree. Some

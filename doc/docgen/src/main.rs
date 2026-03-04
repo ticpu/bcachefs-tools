@@ -563,42 +563,101 @@ struct EnumList {
     header: &'static str,
     macro_name: &'static str,
     default: Option<&'static str>,
+    /// Which x-macro argument index contains the doc string (None = no descriptions)
+    doc_field: Option<usize>,
+    /// Which x-macro argument index contains btree-style flags (appends annotations)
+    flags_field: Option<usize>,
 }
 
 const ENUM_LISTS: &[EnumList] = &[
+    EnumList {
+        key: "error-actions",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_ERROR_ACTIONS",
+        default: Some("fix_safe"),
+        doc_field: Some(2),
+        flags_field: None,
+    },
     EnumList {
         key: "csum-opts",
         header: "libbcachefs/bcachefs_format.h",
         macro_name: "BCH_CSUM_OPTS",
         default: Some("crc32c"),
+        doc_field: None,
+        flags_field: None,
     },
     EnumList {
         key: "compression-opts",
         header: "libbcachefs/bcachefs_format.h",
         macro_name: "BCH_COMPRESSION_OPTS",
         default: Some("none"),
+        doc_field: None,
+        flags_field: None,
     },
     EnumList {
         key: "str-hash-opts",
         header: "libbcachefs/bcachefs_format.h",
         macro_name: "BCH_STR_HASH_OPTS",
         default: Some("siphash"),
+        doc_field: None,
+        flags_field: None,
+    },
+    EnumList {
+        key: "btree-ids",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_BTREE_IDS",
+        default: None,
+        doc_field: Some(4),
+        flags_field: Some(2),
     },
 ];
 
-fn generate_enum_list(entries: &[Vec<String>], default: Option<&str>) -> String {
+/// Parse btree-style flags field and return human-readable annotations.
+fn btree_flags_annotations(flags: &str) -> Vec<&'static str> {
+    let mut annotations = Vec::new();
+    if flags.contains("BTREE_IS_snapshots") {
+        annotations.push("snapshot-aware");
+    } else if flags.contains("BTREE_IS_snapshot_field") {
+        annotations.push("snapshot-field");
+    }
+    if flags.contains("BTREE_IS_extents") {
+        annotations.push("extent-based");
+    }
+    if flags.contains("BTREE_IS_write_buffer") {
+        annotations.push("write-buffered");
+    }
+    annotations
+}
+
+fn generate_enum_list(el: &EnumList, entries: &[Vec<String>]) -> String {
     let mut out = String::new();
     out.push_str("\\begin{description}\n");
     for entry in entries {
         let name = &entry[0];
         let escaped = escape_latex(name);
-        if default == Some(name.as_str()) {
-            out.push_str(&format!(
-                "\\item[{{\\tt {escaped}}}] (default)\n"
-            ));
+        let doc = el
+            .doc_field
+            .and_then(|i| entry.get(i))
+            .map(|s| join_c_strings(s))
+            .filter(|s| !s.is_empty());
+        let annotations = el
+            .flags_field
+            .and_then(|i| entry.get(i))
+            .map(|s| btree_flags_annotations(s))
+            .unwrap_or_default();
+
+        if el.default == Some(name.as_str()) {
+            out.push_str(&format!("\\item[{{\\tt {escaped}}}] (default)"));
         } else {
-            out.push_str(&format!("\\item[{{\\tt {escaped}}}]\n"));
+            out.push_str(&format!("\\item[{{\\tt {escaped}}}]"));
         }
+        if let Some(desc) = doc {
+            out.push_str(&format!(" {}", escape_latex(&desc)));
+        }
+        if !annotations.is_empty() {
+            out.push_str(&format!(" \\textit{{({})}}", annotations.join(", ")));
+        }
+        out.push('\n');
     }
     out.push_str("\\end{description}\n");
     out
@@ -685,7 +744,7 @@ fn main() {
             eprintln!("warning: {} in {} produced no entries", el.macro_name, el.header);
             continue;
         }
-        let latex = generate_enum_list(&entries, el.default);
+        let latex = generate_enum_list(el, &entries);
         fs::write(generated_dir.join(format!("{}.tex", el.key)), &latex).unwrap();
         available_keys.insert(el.key.into());
     }
