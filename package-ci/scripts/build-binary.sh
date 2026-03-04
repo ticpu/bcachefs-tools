@@ -86,13 +86,10 @@ run '
     rm -f /var/lib/dpkg/lock-frontend
 '
 
-# Cross-compilation setup (ppc64el on amd64)
+# Cross-compilation setup (ppc64el on amd64): add foreign arch before first apt-get update
 if [ "$ARCH" = "ppc64el" ]; then
     run '
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            qemu-user-static binfmt-support
         dpkg --add-architecture ppc64el
-        apt-get update
     '
 fi
 
@@ -102,6 +99,14 @@ run '
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential ca-certificates curl devscripts dpkg-dev
 '
+
+# Install cross-compilation tools after apt-get update
+if [ "$ARCH" = "ppc64el" ]; then
+    run '
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            qemu-user-static binfmt-support
+    '
+fi
 
 # Extract source package and install build-deps (this installs distro Rust)
 run "
