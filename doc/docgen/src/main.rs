@@ -642,6 +642,14 @@ const ENUM_LISTS: &[EnumList] = &[
         doc_field: Some(3),
         flags_field: None,
     },
+    EnumList {
+        key: "bkey-types",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_BKEY_TYPES",
+        default: None,
+        doc_field: Some(3),
+        flags_field: None,
+    },
 ];
 
 /// Parse btree-style flags field and return human-readable annotations.
