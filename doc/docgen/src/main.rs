@@ -610,6 +610,38 @@ const ENUM_LISTS: &[EnumList] = &[
         doc_field: Some(4),
         flags_field: Some(2),
     },
+    EnumList {
+        key: "time-stats",
+        header: "libbcachefs/bcachefs.h",
+        macro_name: "BCH_TIME_STATS",
+        default: None,
+        doc_field: Some(1),
+        flags_field: None,
+    },
+    EnumList {
+        key: "sb-fields",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_SB_FIELDS",
+        default: None,
+        doc_field: Some(2),
+        flags_field: None,
+    },
+    EnumList {
+        key: "jset-entry-types",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_JSET_ENTRY_TYPES",
+        default: None,
+        doc_field: Some(2),
+        flags_field: None,
+    },
+    EnumList {
+        key: "counters",
+        header: "libbcachefs/sb/counters_format.h",
+        macro_name: "BCH_PERSISTENT_COUNTERS",
+        default: None,
+        doc_field: Some(3),
+        flags_field: None,
+    },
 ];
 
 /// Parse btree-style flags field and return human-readable annotations.
