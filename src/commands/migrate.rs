@@ -17,7 +17,7 @@ use bch_bindgen::opt_set;
 use clap::Parser;
 
 use crate::commands::format::take_opt_value;
-use crate::commands::opts::{bch_opt_lookup, parse_opt_val};
+use crate::commands::opts::{bch_opt_lookup_negated, parse_opt_val};
 use crate::key::Passphrase;
 use crate::wrappers::format::format_opts_default;
 use crate::wrappers::super_io;
@@ -602,10 +602,11 @@ pub fn cmd_migrate(argv: Vec<String>) -> Result<()> {
             };
             let name = raw_name.replace('-', "_");
 
-            // Try bcachefs option table (OPT_FORMAT options)
-            if let Some((opt_id, opt)) = bch_opt_lookup(&name) {
+            if let Some((opt_id, opt, negated)) = bch_opt_lookup_negated(&name) {
                 if opt.flags as u32 & opt_flags != 0 {
-                    let val_str = if let Some(v) = inline_val {
+                    let val_str = if negated {
+                        "0".to_string()
+                    } else if let Some(v) = inline_val {
                         v.to_string()
                     } else if opt.type_ != c::opt_type::BCH_OPT_BOOL {
                         take_opt_value(None, &argv, &mut i, raw_name)?

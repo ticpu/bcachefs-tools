@@ -26,7 +26,7 @@ use clap::Parser;
 use crate::commands::format::{
     take_opt_value, take_short_value, metadata_version_current, version_parse,
 };
-use crate::commands::opts::{bch_opt_lookup, opts_usage_str, parse_opt_val};
+use crate::commands::opts::{bch_opt_lookup_negated, opts_usage_str, parse_opt_val};
 use crate::key::Passphrase;
 use crate::util::parse_human_size;
 use crate::wrappers::super_io::SUPERBLOCK_SIZE_DEFAULT;
@@ -817,9 +817,11 @@ pub fn cmd_image_create(argv: Vec<String>) -> Result<()> {
             };
             let name = raw_name.replace('-', "_");
 
-            if let Some((opt_id, opt)) = bch_opt_lookup(&name) {
+            if let Some((opt_id, opt, negated)) = bch_opt_lookup_negated(&name) {
                 if opt.flags as u32 & opt_flags != 0 {
-                    let val_str = if let Some(v) = inline_val {
+                    let val_str = if negated {
+                        "0".to_string()
+                    } else if let Some(v) = inline_val {
                         v.to_string()
                     } else if opt.type_ != c::opt_type::BCH_OPT_BOOL {
                         take_opt_value(None, &argv, &mut i, raw_name)?

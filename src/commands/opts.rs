@@ -136,6 +136,22 @@ pub fn bch_option_args(flag_filter: u32) -> Vec<Arg> {
                          .default_missing_value("1")
                          .require_equals(true)
                          .action(ArgAction::Set);
+
+                let no_name = leak(format!("no{name}"));
+                let mut no_arg = Arg::new(no_name)
+                    .long(no_name)
+                    .num_args(0)
+                    .action(ArgAction::SetTrue)
+                    .hide(true);
+
+                if name.contains('_') {
+                    no_arg = no_arg.alias(leak(format!("no{}", name.replace('_', "-"))))
+                                   .alias(leak(format!("no-{}", name.replace('_', "-"))));
+                } else {
+                    no_arg = no_arg.alias(leak(format!("no-{name}")));
+                }
+
+                args.push(no_arg);
             }
             c::opt_type::BCH_OPT_STR => {
                 let choices = unsafe { collect_choices(opt.choices) };
@@ -156,6 +172,17 @@ pub fn bch_option_args(flag_filter: u32) -> Vec<Arg> {
     });
 
     args
+}
+
+/// Look up a bcachefs option by name, handling --nooption negation for booleans.
+/// Returns (opt_id, opt_ref, negated).
+pub fn bch_opt_lookup_negated(name: &str) -> Option<(c::bch_opt_id, &'static c::bch_option, bool)> {
+    if let Some(r) = bch_opt_lookup(name) {
+        return Some((r.0, r.1, false));
+    }
+    let rest = name.strip_prefix("no_").or_else(|| name.strip_prefix("no"))?;
+    let (id, opt) = bch_opt_lookup(rest)?;
+    (opt.type_ == c::opt_type::BCH_OPT_BOOL).then_some((id, opt, true))
 }
 
 /// Look up a bcachefs option by name. Returns the typed option id and reference.
@@ -181,11 +208,16 @@ pub fn bch_option_names(flag_filter: u32) -> Vec<&'static str> {
 /// Extract bcachefs option (name, value) pairs from ArgMatches.
 pub fn bch_options_from_matches(matches: &ArgMatches, flag_filter: u32) -> Vec<(String, String)> {
     let mut opts = Vec::new();
-    for name in bch_option_names(flag_filter) {
+    for_each_opt(flag_filter, |name, opt| {
         if let Some(val) = matches.get_one::<String>(name) {
             opts.push((name.to_string(), val.clone()));
+        } else if opt.type_ == c::opt_type::BCH_OPT_BOOL {
+            let no_name = format!("no{name}");
+            if matches.get_flag(&no_name) {
+                opts.push((name.to_string(), "0".to_string()));
+            }
         }
-    }
+    });
     opts
 }
 
