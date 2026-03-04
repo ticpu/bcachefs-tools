@@ -600,17 +600,17 @@ static noinline long bchfs_fcollapse_finsert(struct bch_inode_info *inode,
 	struct address_space *mapping = inode->v.i_mapping;
 
 	if ((offset | len) & (block_bytes(c) - 1))
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_fcollapse_finsert_unaligned);
 
 	if (insert) {
 		if (MAX_LFS_FILESIZE - inode->v.i_size < len)
 			return -EFBIG;
 
 		if (offset >= inode->v.i_size)
-			return -EINVAL;
+			return bch_err_throw(c, EINVAL_finsert_past_eof);
 	} else {
 		if (offset + len >= inode->v.i_size)
-			return -EINVAL;
+			return bch_err_throw(c, EINVAL_fcollapse_past_eof);
 	}
 
 	try(bch2_write_invalidate_inode_pages_range(mapping, offset, LLONG_MAX));
@@ -887,15 +887,15 @@ loff_t bch2_remap_file_range(struct file *file_src, loff_t pos_src,
 	loff_t ret = 0;
 
 	if (remap_flags & ~(REMAP_FILE_DEDUP|REMAP_FILE_ADVISORY))
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_remap_bad_flags);
 
 	if ((pos_src & (block_bytes(c) - 1)) ||
 	    (pos_dst & (block_bytes(c) - 1)))
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_remap_unaligned);
 
 	if (src == dst &&
 	    abs(pos_src - pos_dst) < len)
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_remap_overlapping);
 
 	lock_two_nondirectories(&src->v, &dst->v);
 	bch2_lock_inodes(INODE_PAGECACHE_BLOCK, src, dst);
