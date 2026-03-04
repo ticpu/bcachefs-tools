@@ -103,12 +103,19 @@ run '
         build-essential ca-certificates curl devscripts dpkg-dev
 '
 
-# Install Rust via rustup if distro ships an old version
-# (Plucky ships Rust 1.84 which cannot build edition2024)
+# Install Rust via rustup if distro ships an old version.
+# Plucky ships Rust 1.84 which cannot build edition2024 (needs 1.85+).
+# debian/rules hardcodes CARGO=/usr/share/cargo/bin/cargo so we also
+# replace that Python wrapper with a shell shim pointing to rustup cargo.
 run "
     if ! rustc --version 2>/dev/null | grep -qE '1\\.(8[5-9]|9[0-9])'; then
         curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal -y
+        # Replace the system cargo wrapper so debian/rules picks up rustup cargo
+        printf '#!/bin/sh\nexec /root/.cargo/bin/cargo \"\$@\"\n' \
+            > /usr/share/cargo/bin/cargo
+        chmod +x /usr/share/cargo/bin/cargo
+        ln -sf /root/.cargo/bin/rustc /usr/bin/rustc
     fi
 "
 
