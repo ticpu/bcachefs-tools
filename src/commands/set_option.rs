@@ -17,6 +17,11 @@ fn opt_flags() -> u32 {
 pub fn set_option_cmd() -> Command {
     Command::new("set-fs-option")
         .about("Set a filesystem option")
+        .long_about("\
+Set a filesystem or device option on a running filesystem. Changes \
+are persisted to the superblock. Use -d to target a specific device \
+for device-scoped options. See <<sec:options>> for the full list of \
+available options.")
         .args(bch_option_args(opt_flags()))
         .arg(Arg::new("dev-idx")
             .short('d')

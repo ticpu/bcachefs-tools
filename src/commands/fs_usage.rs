@@ -23,7 +23,13 @@ enum Field {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "usage", about = "Display detailed filesystem usage", disable_help_flag = true)]
+#[command(name = "usage", about = "Display detailed filesystem usage",
+    long_about = "Displays filesystem space usage broken down by category. \
+Output modes: replicas (data/metadata replication), btree (per-btree \
+space), compression (ratios and savings), rebalance_work (pending \
+reconcile work), devices (per-device breakdown). Use -f to select \
+specific fields, -a for all, -h for human-readable sizes.",
+    disable_help_flag = true)]
 pub struct Cli {
     /// Print help
     #[arg(long = "help", action = clap::ArgAction::Help)]

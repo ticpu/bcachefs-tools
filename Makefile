@@ -256,8 +256,9 @@ bcachefs-principles-of-operation.pdf: doc/bcachefs-principles-of-operation.tex d
 	pdflatex doc/bcachefs-principles-of-operation.tex
 
 .PHONY: docgen
-docgen:
+docgen: bcachefs
 	cargo run -p bch-docgen --release
+	./target/release/bcachefs _doc_gen
 
 doc: bcachefs-principles-of-operation.pdf
 

@@ -68,30 +68,11 @@ fn check_kernel_warnings() {
 fn bcachefs_usage() {
     let cmd = commands::build_cli();
 
-    let groups: &[(&str, &[&str])] = &[
-        ("Superblock commands:", &[
-            "format", "show-super", "recover-super",
-            "set-fs-option", "reset-counters", "strip-alloc",
-        ]),
-        ("Images:", &["image"]),
-        ("Mount:", &["mount"]),
-        ("Repair:", &["fsck", "recovery-pass"]),
-        ("Running filesystem:", &["fs"]),
-        ("Devices:", &["device"]),
-        ("Subvolumes and snapshots:", &["subvolume"]),
-        ("Filesystem data:", &["reconcile", "scrub"]),
-        ("Encryption:", &["unlock", "set-passphrase", "remove-passphrase"]),
-        ("Migrate:", &["migrate", "migrate-superblock"]),
-        ("File options:", &["set-file-option", "reflink-option-propagate"]),
-        ("Debug:", &["dump", "undump", "list", "list_journal", "kill_btree_node"]),
-        ("Miscellaneous:", &["completions", "version"]),
-    ];
-
     println!("bcachefs - tool for managing bcachefs filesystems");
     println!("usage: bcachefs <command> [<args>]\n");
 
-    for (heading, names) in groups {
-        println!("{heading}");
+    for (heading, names) in commands::COMMAND_GROUPS {
+        println!("{heading}:");
         for name in *names {
             let Some(sub) = cmd.find_subcommand(name) else { continue };
             let children: Vec<_> = sub.get_subcommands()
@@ -126,6 +107,163 @@ fn group_usage(group: &str) {
         let child_about = child.get_about().map(|s| s.to_string()).unwrap_or_default();
         println!("  {:<26}{child_about}", child.get_name());
     }
+}
+
+fn escape_latex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '_' => out.push_str("\\_"),
+            '#' => out.push_str("\\#"),
+            '%' => out.push_str("\\%"),
+            '&' => out.push_str("\\&"),
+            '$' => out.push_str("\\$"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '~' => out.push_str("\\textasciitilde{}"),
+            '^' => out.push_str("\\textasciicircum{}"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Convert long_about text to LaTeX: escape special chars, convert
+/// `<<sec:LABEL>>` to `Section~\ref{sec:LABEL}`, and preserve paragraph breaks.
+fn about_to_latex(text: &str) -> String {
+    use std::fmt::Write;
+
+    let mut result = String::new();
+    for para in text.split("\n\n") {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        let escaped = escape_latex(para.trim());
+        // Convert <<sec:label>> cross-references
+        let mut s = escaped.as_str();
+        while let Some(start) = s.find("<<") {
+            result.push_str(&s[..start]);
+            let rest = &s[start + 2..];
+            if let Some(end) = rest.find(">>") {
+                let label = &rest[..end];
+                write!(result, "Section~\\ref{{{label}}}").unwrap();
+                s = &rest[end + 2..];
+            } else {
+                result.push_str("<<");
+                s = rest;
+            }
+        }
+        result.push_str(s);
+        result.push('\n');
+    }
+    result
+}
+
+/// Generate doc/generated/cli-reference.tex from the clap command tree.
+fn generate_cli_doc() -> ExitCode {
+    use std::fmt::Write;
+    use std::path::Path;
+
+    let cmd = commands::build_cli();
+    let mut out = String::new();
+
+    for (heading, names) in commands::COMMAND_GROUPS {
+        writeln!(out, "\\subsection{{{heading}}}").unwrap();
+
+        // Emit group-level long_about as intro text before the command list
+        for name in *names {
+            let Some(sub) = cmd.find_subcommand(name) else { continue };
+            if sub.get_subcommands().count() > 0 {
+                if let Some(long_about) = sub.get_long_about() {
+                    writeln!(out).unwrap();
+                    write!(out, "{}", about_to_latex(&long_about.to_string())).unwrap();
+                }
+            }
+        }
+
+        writeln!(out, "\\begin{{description}}").unwrap();
+
+        for name in *names {
+            let Some(sub) = cmd.find_subcommand(name) else { continue };
+            let children: Vec<_> = sub.get_subcommands()
+                .filter(|c| c.get_name() != "help")
+                .collect();
+
+            if !children.is_empty() {
+                // Group command (device, fs, image, etc.) — list children
+                for child in children {
+                    let full = format!("bcachefs {name} {}", child.get_name());
+                    write!(out, "\\item[{{\\tt {}}}]", escape_latex(&full)).unwrap();
+
+                    let aliases: Vec<_> = child.get_visible_aliases().collect();
+                    if !aliases.is_empty() {
+                        let alias_str = aliases.into_iter()
+                            .map(|a| format!("{{\\tt {}}}", escape_latex(a)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        write!(out, " (alias: {alias_str})").unwrap();
+                    }
+
+                    let about = child.get_about().map(|s| s.to_string());
+                    let long_about = child.get_long_about().map(|s| s.to_string());
+
+                    if let Some(ref text) = about {
+                        writeln!(out, " {}", escape_latex(text)).unwrap();
+                    } else {
+                        writeln!(out).unwrap();
+                    }
+                    if let Some(ref text) = long_about {
+                        writeln!(out).unwrap();
+                        write!(out, "{}", about_to_latex(text)).unwrap();
+                    }
+                }
+            } else {
+                // Leaf command
+                let full = format!("bcachefs {name}");
+                write!(out, "\\item[{{\\tt {}}}]", escape_latex(&full)).unwrap();
+
+                let aliases: Vec<_> = sub.get_visible_aliases().collect();
+                if !aliases.is_empty() {
+                    let alias_str = aliases.into_iter()
+                        .map(|a| format!("{{\\tt {}}}", escape_latex(a)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(out, " (alias: {alias_str})").unwrap();
+                }
+
+                let about = sub.get_about().map(|s| s.to_string());
+                let long_about = sub.get_long_about().map(|s| s.to_string());
+
+                if let Some(ref text) = about {
+                    writeln!(out, " {}", escape_latex(text)).unwrap();
+                } else {
+                    writeln!(out).unwrap();
+                }
+                if let Some(ref text) = long_about {
+                    writeln!(out).unwrap();
+                    write!(out, "{}", about_to_latex(text)).unwrap();
+                }
+            }
+        }
+
+        writeln!(out, "\\end{{description}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    let dir = Path::new("doc/generated");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("error creating {}: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
+
+    let path = dir.join("cli-reference.tex");
+    if let Err(e) = std::fs::write(&path, &out) {
+        eprintln!("error writing {}: {e}", path.display());
+        return ExitCode::FAILURE;
+    }
+
+    eprintln!("wrote {}", path.display());
+    ExitCode::SUCCESS
 }
 
 fn main() -> ExitCode {
@@ -181,6 +319,7 @@ fn main() -> ExitCode {
             println!("kernel: {rust_status}");
             ExitCode::SUCCESS
         }
+        "_doc_gen" => generate_cli_doc(),
         "completions" => {
             commands::completions(args[1..].to_vec());
             ExitCode::SUCCESS

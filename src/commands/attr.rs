@@ -87,6 +87,16 @@ fn do_setattr(path: &Path, opts: &[(String, String)], remove_all: bool) -> Resul
 pub(super) fn setattr_cmd() -> Command {
     Command::new("set-file-option")
         .about("Set attributes on files in a bcachefs filesystem")
+        .long_about("\
+Sets per-file or per-directory IO path options, overriding the \
+filesystem-wide defaults. See <<sec:io-path-options>> for the list \
+of available IO path options. When set on a directory, options are \
+propagated recursively to existing children and inherited by new files.\n\n\
+Changed options take effect immediately for new writes. For existing \
+data, reconcile applies the new options in the background---for example, \
+setting a new compression algorithm will cause existing data to be \
+rewritten with the new algorithm. Use --option=- to remove a specific \
+option, or --remove-all to clear all per-file options.")
         .after_help("To remove a specific option, use: --option=-")
         .args(opts::bch_option_args(c::opt_flags::OPT_INODE as u32))
         .arg(Arg::new("remove-all")
@@ -114,8 +124,18 @@ pub fn cmd_setattr(argv: Vec<String>) -> Result<()> {
 pub(super) fn reflink_option_propagate_cmd() -> Command {
     Command::new("reflink-option-propagate")
         .about("Propagate IO options to reflinked extents")
-        .long_about("Propagates each file's current IO options to its extents, including \
-                      indirect (reflinked) extents.")
+        .long_about("\
+Propagates each file's current IO options (compression, checksum, \
+replicas, targets) to its extents, including indirect (reflinked) \
+extents. Reflinked data is shared between files, so propagation is \
+gated by the REFLINK_P_MAY_UPDATE_OPTIONS permission flag on each \
+reflink pointer. When a reflink copy is created, the destination's \
+pointer gets this flag only if the copying user owns the source \
+file---this prevents unprivileged users from altering IO path \
+settings on shared data they do not own.\n\n\
+Old reflink pointers created before the flag was introduced lack it \
+entirely. Use --set-may-update (requires CAP_SYS_ADMIN) to enable \
+the flag on such pointers before propagating.")
         .arg(Arg::new("set-may-update")
             .long("set-may-update")
             .action(ArgAction::SetTrue)

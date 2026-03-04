@@ -11,7 +11,7 @@
 \newcommand{\bchdoc}[1]{\input{doc/generated/#1}}
 
 \title{bcachefs: Principles of Operation}
-\author{Kent Overstreet}
+\author{Kent Overstreet (and others)}
 
 \date{}
 
@@ -293,6 +293,7 @@ and \texttt{check\_btree\_backpointers}.
 \section{Feature overview}
 
 \subsection{IO path options}
+\label{sec:io-path-options}
 
 Most options that control the IO path can be set at either the filesystem level
 or on individual inodes (files and directories). When set on a directory via the
@@ -1127,7 +1128,16 @@ The \texttt{bcachefs data scrub} command validates all data with checksums,
 fixing bitrot when a valid copy can be found. Affected file paths are currently
 logged to the kernel log only.
 
+\section{Command reference}
+
+The \texttt{bcachefs} tool provides filesystem management through grouped
+subcommands. Run \texttt{bcachefs} with no arguments for a command summary,
+or \texttt{bcachefs <command> --help} for detailed usage.
+
+\bchdoc{cli-reference}
+
 \section{Options}
+\label{sec:options}
 
 Most bcachefs options can be set filesystem wide, and a significant subset can
 also be set on inodes (files and directories), overriding the global defaults.
@@ -1216,6 +1226,7 @@ Filesystem options may be viewed and changed via \\
 be persistently changed in the superblock as well.
 
 \subsubsection{Time stats}
+\label{sec:timestats}
 
 bcachefs tracks the latency and frequency of various operations and events, with
 quantiles for latency/duration in the
@@ -1224,6 +1235,7 @@ quantiles for latency/duration in the
 \bchdoc{time-stats}
 
 \subsubsection{Persistent counters}
+\label{sec:counters}
 
 bcachefs tracks persistent counters in the superblock that survive across mounts.
 These are available in \texttt{/sys/fs/bcachefs/<uuid>/counters/} and count

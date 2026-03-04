@@ -917,7 +917,9 @@ fn main() {
     let ref_set: HashSet<_> = refs.iter().cloned().collect();
 
     for r in &refs {
-        if !available_keys.contains(r) {
+        if !available_keys.contains(r)
+            && !generated_dir.join(format!("{r}.tex")).exists()
+        {
             eprintln!(
                 "error: \\bchdoc{{{r}}} in PoO has no matching DOC({r}) in source"
             );

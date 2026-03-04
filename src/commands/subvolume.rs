@@ -31,7 +31,10 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 enum Subcommands {
     /// Create a new subvolume
-    #[command(visible_aliases = ["new"])]
+    #[command(visible_aliases = ["new"],
+        long_about = "Creates a new subvolume at the given path. Subvolumes are \
+independently mountable filesystem trees, each with their own inode \
+number space.")]
     Create {
         /// Paths
         #[arg(required = true)]
@@ -47,7 +50,11 @@ enum Subcommands {
     },
 
     /// Create a snapshot of a subvolume
-    #[command(allow_missing_positional = true, visible_aliases = ["snap"])]
+    #[command(allow_missing_positional = true, visible_aliases = ["snap"],
+        long_about = "Creates an instant, COW snapshot of a subvolume. Snapshots \
+initially share all data with the source and only consume additional \
+space as either diverges. Use --read-only for a frozen point-in-time \
+copy.")]
     Snapshot {
         /// Make snapshot read only
         #[arg(long, short)]
@@ -57,7 +64,15 @@ enum Subcommands {
     },
 
     /// List subvolumes
-    #[command(visible_aliases = ["ls"])]
+    #[command(visible_aliases = ["ls"],
+        long_about = "Lists subvolumes in a bcachefs filesystem. Output \
+includes path, subvolume ID, creation time, flags (ro, unlinked), and \
+cumulative disk usage. Cumulative size is the total space that would be \
+freed if the subvolume and all its snapshots were deleted.\n\n\
+Use --tree for a hierarchical view, --recursive (-R) to include nested \
+subvolumes, --snapshots to include snapshot subvolumes, or --json for \
+machine-readable output. Sort by name, size, or creation time with \
+--sort.")]
     List {
         /// Output as JSON
         #[arg(long)]
@@ -88,7 +103,16 @@ enum Subcommands {
     },
 
     /// List snapshots and their disk usage
-    #[command(visible_aliases = ["ls-snap", "list-snap"])]
+    #[command(visible_aliases = ["ls-snap", "list-snap"],
+        long_about = "Lists snapshots with disk usage attribution. The \
+default tree view shows the snapshot hierarchy with each node's own \
+disk usage---space consumed exclusively by that snapshot, not shared \
+with ancestors. Use --flat for a tabular view showing both own and \
+cumulative (total) usage per snapshot. Cumulative usage is the sum of \
+a snapshot's own usage plus all ancestors back to the root, \
+representing the total space that would be freed if deleted.\n\n\
+Use --json for machine-readable output including snapshot IDs, parent \
+relationships, and sector counts.")]
     ListSnapshots {
         /// Show flat list instead of tree
         #[arg(long, short)]

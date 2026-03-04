@@ -179,7 +179,14 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
 
 /// Mount a bcachefs filesystem by its UUID.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about,
+    long_about = "Mounts a bcachefs filesystem. Devices are discovered automatically \
+by scanning for the filesystem UUID---unlike btrfs, this is handled \
+entirely in userspace.\n\n\
+If the filesystem is encrypted, the passphrase will be looked up in \
+the kernel keyring first; if not found, the user is prompted \
+interactively (or reads from stdin if not a terminal). Use -k or -f \
+to specify alternative unlock methods.")]
 pub struct Cli {
     /// Path to passphrase file
     ///

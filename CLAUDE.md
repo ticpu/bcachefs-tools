@@ -148,8 +148,7 @@ clean and make it easy to compare old vs new or revert.
   and iteration patterns that can't be expressed through bindgen
   (LE64_BITMASK setters, `for_each_member_device`, btree node walking,
   crypto operations)
-- **C commands**: Only `cmd_fusemount.c` remains as a pure C command.
-  `cmd_migrate.c` has Rust arg parsing but a C core.
+- **Commands**: All subcommands are now implemented in Rust.
 - `bch_bindgen` generates Rust bindings via bindgen, plus hand-written
   safe wrappers for btree iteration, journal parsing, extent iteration,
   printbuf, and superblock access

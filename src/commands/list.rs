@@ -129,6 +129,15 @@ enum Mode {
 
 /// List filesystem metadata in textual form
 #[derive(Parser, Debug)]
+#[command(long_about = "\
+Lists btree contents in human-readable text. Operates on unmounted \
+devices in read-only mode. Modes: keys (default) prints key/value pairs, \
+formats shows btree node packing format, nodes shows btree node keys, \
+nodes-ondisk shows the raw on-disk representation.\n\n\
+Use -b to select a btree (default: extents), -s/-e for start/end \
+position, -l for btree depth, -k to filter by key type. With -c, \
+runs fsck before listing. Output is used for debugging filesystem \
+state, verifying btree contents, and inspecting on-disk layout.")]
 pub struct Cli {
     #[arg(short, long, default_value = "keys")]
     mode: Mode,
