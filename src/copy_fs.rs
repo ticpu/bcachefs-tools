@@ -368,7 +368,7 @@ fn copy_xattrs(
 ) -> Result<(), BchError> {
     let mut attrs_buf = vec![0u8; 65536]; // XATTR_LIST_MAX
     let attrs_size = unsafe {
-        libc::llistxattr(src.as_ptr(), attrs_buf.as_mut_ptr() as *mut i8, attrs_buf.len())
+        libc::llistxattr(src.as_ptr(), attrs_buf.as_mut_ptr() as *mut libc::c_char, attrs_buf.len())
     };
     if attrs_size < 0 {
         return Ok(()); // silently skip if xattrs not supported
@@ -780,7 +780,7 @@ struct ReadDirCtx {
 
 unsafe extern "C" fn readdir_actor(
     ctx: *mut c::dir_context,
-    name: *const i8,
+    name: *const libc::c_char,
     name_len: i32,
     _pos: i64,
     inum: u64,
