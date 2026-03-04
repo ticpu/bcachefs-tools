@@ -194,6 +194,10 @@ by deletion alone and recovering those snapshots is feasible.
 and backpointers btrees. These passes are not part of normal recovery and may
 take considerable time on large filesystems.
 
+The complete list of recovery passes, in execution order:
+
+\bchdoc{recovery-passes}
+
 \subsection{Bucket based allocation}
 
 As mentioned bcachefs is descended from bcache, where the ability to efficiently
@@ -1547,5 +1551,15 @@ making its efficiency critical for multithreaded workloads.
 \subsection{Btree keys}
 
 \bchdoc{bkey-types}
+
+\subsection{Metadata versions}
+
+Each on-disk format change is identified by a version number using
+\texttt{BCH\_VERSION(major, minor)}. The version history records what changed
+and when, serving as a changelog for the on-disk format. The filesystem's
+superblock records both the current version and the minimum version of any data
+still on disk, allowing compatibility code to be safely dropped.
+
+\bchdoc{metadata-versions}
 
 \end{document}

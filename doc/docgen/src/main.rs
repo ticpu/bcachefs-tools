@@ -650,6 +650,22 @@ const ENUM_LISTS: &[EnumList] = &[
         doc_field: Some(3),
         flags_field: None,
     },
+    EnumList {
+        key: "metadata-versions",
+        header: "libbcachefs/bcachefs_format.h",
+        macro_name: "BCH_METADATA_VERSIONS",
+        default: None,
+        doc_field: Some(2),
+        flags_field: None,
+    },
+    EnumList {
+        key: "recovery-passes",
+        header: "libbcachefs/init/passes_format.h",
+        macro_name: "BCH_RECOVERY_PASSES",
+        default: None,
+        doc_field: Some(4),
+        flags_field: None,
+    },
 ];
 
 /// Parse btree-style flags field and return human-readable annotations.
