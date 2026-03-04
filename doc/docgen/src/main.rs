@@ -567,6 +567,10 @@ struct EnumList {
     doc_field: Option<usize>,
     /// Which x-macro argument index contains btree-style flags (appends annotations)
     flags_field: Option<usize>,
+    /// Which x-macro argument index contains a date string (e.g. "2023-07")
+    date_field: Option<usize>,
+    /// Which x-macro argument index contains BCH_VERSION(major, minor)
+    version_field: Option<usize>,
 }
 
 const ENUM_LISTS: &[EnumList] = &[
@@ -577,6 +581,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: Some("fix_safe"),
         doc_field: Some(2),
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "csum-opts",
@@ -585,6 +591,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: Some("crc32c"),
         doc_field: None,
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "compression-opts",
@@ -593,6 +601,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: Some("none"),
         doc_field: None,
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "str-hash-opts",
@@ -601,6 +611,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: Some("siphash"),
         doc_field: None,
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "btree-ids",
@@ -609,6 +621,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: None,
         doc_field: Some(4),
         flags_field: Some(2),
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "time-stats",
@@ -617,6 +631,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: None,
         doc_field: Some(1),
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "sb-fields",
@@ -625,6 +641,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: None,
         doc_field: Some(2),
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "jset-entry-types",
@@ -633,6 +651,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: None,
         doc_field: Some(2),
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "counters",
@@ -641,6 +661,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: None,
         doc_field: Some(3),
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "bkey-types",
@@ -649,6 +671,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: None,
         doc_field: Some(3),
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
     EnumList {
         key: "metadata-versions",
@@ -657,6 +681,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: None,
         doc_field: Some(2),
         flags_field: None,
+        date_field: Some(3),
+        version_field: Some(1),
     },
     EnumList {
         key: "recovery-passes",
@@ -665,6 +691,8 @@ const ENUM_LISTS: &[EnumList] = &[
         default: None,
         doc_field: Some(4),
         flags_field: None,
+        date_field: None,
+        version_field: None,
     },
 ];
 
@@ -683,6 +711,17 @@ fn btree_flags_annotations(flags: &str) -> Vec<&'static str> {
         annotations.push("write-buffered");
     }
     annotations
+}
+
+/// Extract "major.minor" from "BCH_VERSION(major, minor)".
+fn parse_bch_version(s: &str) -> Option<String> {
+    let s = s.trim();
+    let inner = s.strip_prefix("BCH_VERSION(")?;
+    let inner = inner.strip_suffix(')')?;
+    let mut parts = inner.split(',');
+    let major = parts.next()?.trim();
+    let minor = parts.next()?.trim();
+    Some(format!("{major}.{minor}"))
 }
 
 fn generate_enum_list(el: &EnumList, entries: &[Vec<String>]) -> String {
@@ -706,6 +745,21 @@ fn generate_enum_list(el: &EnumList, entries: &[Vec<String>]) -> String {
             out.push_str(&format!("\\item[{{\\tt {escaped}}}] (default)"));
         } else {
             out.push_str(&format!("\\item[{{\\tt {escaped}}}]"));
+        }
+        let version = el
+            .version_field
+            .and_then(|i| entry.get(i))
+            .and_then(|s| parse_bch_version(s));
+        let date = el
+            .date_field
+            .and_then(|i| entry.get(i))
+            .map(|s| join_c_strings(s))
+            .filter(|s| !s.is_empty());
+        match (&version, &date) {
+            (Some(v), Some(d)) => out.push_str(&format!(" \\textit{{({v}, {d})}}")),
+            (Some(v), None) => out.push_str(&format!(" \\textit{{({v})}}")),
+            (None, Some(d)) => out.push_str(&format!(" \\textit{{({d})}}")),
+            (None, None) => {}
         }
         if let Some(desc) = doc {
             out.push_str(&format!(" {}", escape_latex(&desc)));
