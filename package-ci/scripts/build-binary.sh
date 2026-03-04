@@ -1,8 +1,9 @@
 #!/bin/bash
 # Build binary .deb packages for a specific distro×arch
 #
-# Runs sbuild inside a podman container (debian:trixie-slim).
-# sbuild creates an mmdebstrap chroot for the target distro.
+# Runs dpkg-buildpackage inside a podman container targeting the given distro.
+# The container provides isolation; sbuild is not used (it requires nested user
+# namespaces which don't work in rootless podman).
 #
 # Usage: build-binary.sh DISTRO ARCH COMMIT SOURCE_DIR RESULT_DIR RUST_VERSION
 #
@@ -22,7 +23,6 @@ RUST_VERSION="$6"
 
 CACHE_DIR="${CACHE_DIR:-/home/aptbcachefsorg/package-ci/cache}"
 CONTAINER="ci-binary-${DISTRO}-${ARCH}-$$"
-IMAGE="debian:trixie-slim"
 
 # Per-distro-arch apt cache to avoid lock contention when multiple builds run concurrently
 APT_CACHE_DIR="$CACHE_DIR/apt-$DISTRO-$ARCH"
@@ -35,20 +35,23 @@ trap cleanup EXIT
 
 echo "=== Building binary: $DISTRO $ARCH (commit ${COMMIT:0:12}) ==="
 
-# Determine if this is a cross-build
-BUILD_ARCH="$ARCH"
-HOST_ARCH="$ARCH"
-if [ "$ARCH" = "ppc64el" ]; then
-    BUILD_ARCH="amd64"
-fi
+# Select container image per distro
+case "$DISTRO" in
+    unstable) IMAGE="debian:unstable-slim" ;;
+    forky)    IMAGE="debian:forky-slim" ;;
+    trixie)   IMAGE="debian:trixie-slim" ;;
+    plucky)   IMAGE="ubuntu:plucky" ;;
+    questing) IMAGE="ubuntu:questing" ;;
+    *) echo "ERROR: unknown distro $DISTRO"; exit 1 ;;
+esac
 
-# Determine if Ubuntu
-is_ubuntu() {
-    case "$1" in
-        plucky|questing) return 0 ;;
-        *) return 1 ;;
-    esac
-}
+# Cross-compilation: ppc64el builds run on amd64 host
+CROSS_BUILD_DEP_ARCH=""
+CROSS_DPKG_ARCH=""
+if [ "$ARCH" = "ppc64el" ]; then
+    CROSS_BUILD_DEP_ARCH="--host-arch ppc64el"
+    CROSS_DPKG_ARCH="-a ppc64el"
+fi
 
 # Find the .dsc file in the source directory
 DSC_FILE=$(find "$SOURCE_DIR" -name "*.dsc" | head -1)
@@ -56,6 +59,7 @@ if [ -z "$DSC_FILE" ]; then
     echo "ERROR: no .dsc file found in $SOURCE_DIR"
     exit 1
 fi
+DSC_BASENAME=$(basename "$DSC_FILE")
 
 podman run --name "$CONTAINER" \
     --detach --init \
@@ -73,87 +77,54 @@ run() {
     podman exec "$CONTAINER" bash -euxc "$*"
 }
 
-# Install build tools
-run '
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        debian-keyring devscripts mmdebstrap sbuild sudo tar uidmap xz-utils
-    # sbuild unshare mode needs subuid/subgid mappings for root inside the container
-    echo "root:100000:65536" >> /etc/subuid
-    echo "root:100000:65536" >> /etc/subgid
-'
-
-# Set up sbuild configuration
-DSC_BASENAME=$(basename "$DSC_FILE")
-
-# Build the sbuildrc
-SBUILDRC="
-\$verbose = 1;
-\$build_dir = '/build';
-\$distribution = '${DISTRO}';
-\$build_arch = '${BUILD_ARCH}';
-\$host_arch = '${HOST_ARCH}';
-\$chroot_mode = 'unshare';
-\$run_lintian = 0;
-\$autopkgtest_root_args = '';
-\$external_commands = {};
-"
-
-# Add mirror configuration based on distro
-if is_ubuntu "$DISTRO"; then
-    SBUILDRC+="
-my \$debootstrap_mirror = 'http://archive.ubuntu.com/ubuntu';
-my \$mmdebstrap_extra_args = [
-    '--components=main,universe',
-    '--variant=buildd',
-];
-"
-else
-    SBUILDRC+="
-my \$debootstrap_mirror = 'http://deb.debian.org/debian';
-my \$mmdebstrap_extra_args = [
-    '--components=main',
-    '--variant=buildd',
-];
-"
-fi
-
-# Add rustup chroot-setup-command for distros with old Rust
-# Plucky ships Rust 1.84 which can't build edition2024
-SBUILDRC+="
-my \$chroot_setup_commands = [
-    'apt-get update',
-    'DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl',
-    'if ! rustc --version 2>/dev/null | grep -qE \"1\\.(8[5-9]|9[0-9])\"; then curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal -y; fi',
-];
-"
-
-podman exec "$CONTAINER" bash -c "cat > /root/.sbuildrc << 'SBUILDRC_EOF'
-${SBUILDRC}
-SBUILDRC_EOF"
-
-# Cross-compilation setup
+# Cross-compilation setup (ppc64el on amd64)
 if [ "$ARCH" = "ppc64el" ]; then
     run '
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             qemu-user-static binfmt-support
+        dpkg --add-architecture ppc64el
+        apt-get update
     '
 fi
 
-# Run sbuild
+# Install essential build tools
+run '
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl devscripts dpkg-dev
+'
+
+# Install Rust via rustup if distro ships an old version
+# (Plucky ships Rust 1.84 which cannot build edition2024)
+run "
+    if ! rustc --version 2>/dev/null | grep -qE '1\\.(8[5-9]|9[0-9])'; then
+        curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal -y
+    fi
+"
+
+# Extract source package and install build-deps
 run "
     mkdir -p /build
-    cp /source/* /build/ 2>/dev/null || true
+    cp /source/* /build/
     cd /build
-    sbuild --verbose --arch-any --arch-all /build/${DSC_BASENAME}
+    dpkg-source -x ${DSC_BASENAME} src
+    DEBIAN_FRONTEND=noninteractive apt-get build-dep -y ${CROSS_BUILD_DEP_ARCH} ./src
+"
+
+# Build
+run "
+    export PATH=\"\${HOME}/.cargo/bin:\${PATH}\"
+    cd /build/src
+    dpkg-buildpackage -us -uc -b ${CROSS_DPKG_ARCH}
 "
 
 # Copy results
 run '
-    find /build -name "*.deb" -exec cp {} /result/ \;
-    find /build -name "*.ddeb" -exec cp {} /result/ \;
-    find /build -name "*.changes" -exec cp {} /result/ \;
-    find /build -name "*.buildinfo" -exec cp {} /result/ \;
+    find /build -maxdepth 1 -name "*.deb" -exec cp {} /result/ \;
+    find /build -maxdepth 1 -name "*.ddeb" -exec cp {} /result/ \;
+    find /build -maxdepth 1 -name "*.changes" -exec cp {} /result/ \;
+    find /build -maxdepth 1 -name "*.buildinfo" -exec cp {} /result/ \;
 '
 
 echo "=== Binary build complete: $DISTRO $ARCH ==="
