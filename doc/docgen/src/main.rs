@@ -571,6 +571,8 @@ struct EnumList {
     date_field: Option<usize>,
     /// Which x-macro argument index contains BCH_VERSION(major, minor)
     version_field: Option<usize>,
+    /// Which x-macro argument index contains PASS_* flags (annotates + hides SILENT)
+    pass_flags_field: Option<usize>,
 }
 
 const ENUM_LISTS: &[EnumList] = &[
@@ -583,6 +585,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "csum-opts",
@@ -593,6 +596,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "compression-opts",
@@ -603,6 +607,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "str-hash-opts",
@@ -613,6 +618,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "btree-ids",
@@ -623,6 +629,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: Some(2),
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "time-stats",
@@ -633,6 +640,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "sb-fields",
@@ -643,6 +651,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "jset-entry-types",
@@ -653,6 +662,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "counters",
@@ -663,6 +673,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "bkey-types",
@@ -673,6 +684,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: None,
     },
     EnumList {
         key: "metadata-versions",
@@ -683,6 +695,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: Some(3),
         version_field: Some(1),
+        pass_flags_field: None,
     },
     EnumList {
         key: "recovery-passes",
@@ -693,6 +706,7 @@ const ENUM_LISTS: &[EnumList] = &[
         flags_field: None,
         date_field: None,
         version_field: None,
+        pass_flags_field: Some(2),
     },
 ];
 
@@ -713,6 +727,29 @@ fn btree_flags_annotations(flags: &str) -> Vec<&'static str> {
     annotations
 }
 
+/// Parse PASS_* flags and return (annotations, is_silent).
+/// Handles compound macros like PASS_FSCK_ALLOC = PASS_FSCK|PASS_ALLOC.
+fn pass_flags_annotations(flags: &str) -> (Vec<&'static str>, bool) {
+    let mut annotations = Vec::new();
+    let is_silent = flags.contains("PASS_SILENT");
+    if flags.contains("PASS_ALWAYS") {
+        annotations.push("always");
+    }
+    if flags.contains("PASS_FSCK_ALLOC") || flags.contains("PASS_FSCK") {
+        annotations.push("fsck");
+    }
+    if flags.contains("PASS_ONLINE") {
+        annotations.push("online");
+    }
+    if flags.contains("PASS_FSCK_ALLOC") || flags.contains("PASS_ALLOC") {
+        annotations.push("alloc");
+    }
+    if flags.contains("PASS_NODEFER") {
+        annotations.push("nodefer");
+    }
+    (annotations, is_silent)
+}
+
 /// Extract "major.minor" from "BCH_VERSION(major, minor)".
 fn parse_bch_version(s: &str) -> Option<String> {
     let s = s.trim();
@@ -730,12 +767,23 @@ fn generate_enum_list(el: &EnumList, entries: &[Vec<String>]) -> String {
     for entry in entries {
         let name = &entry[0];
         let escaped = escape_latex(name);
+
+        // Parse pass flags: skip PASS_SILENT entries, collect annotations
+        let (pass_annotations, is_silent) = el
+            .pass_flags_field
+            .and_then(|i| entry.get(i))
+            .map(|s| pass_flags_annotations(s))
+            .unwrap_or_default();
+        if is_silent {
+            continue;
+        }
+
         let doc = el
             .doc_field
             .and_then(|i| entry.get(i))
             .map(|s| join_c_strings(s))
             .filter(|s| !s.is_empty());
-        let annotations = el
+        let btree_annotations = el
             .flags_field
             .and_then(|i| entry.get(i))
             .map(|s| btree_flags_annotations(s))
@@ -764,8 +812,11 @@ fn generate_enum_list(el: &EnumList, entries: &[Vec<String>]) -> String {
         if let Some(desc) = doc {
             out.push_str(&format!(" {}", escape_latex(&desc)));
         }
-        if !annotations.is_empty() {
-            out.push_str(&format!(" \\textit{{({})}}", annotations.join(", ")));
+        // Combine all annotations (btree flags + pass flags)
+        let mut all_annotations = btree_annotations;
+        all_annotations.extend(pass_annotations);
+        if !all_annotations.is_empty() {
+            out.push_str(&format!(" \\textit{{({})}}", all_annotations.join(", ")));
         }
         out.push('\n');
     }
