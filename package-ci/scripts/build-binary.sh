@@ -104,7 +104,7 @@ run '
 if [ "$ARCH" = "ppc64el" ]; then
     run '
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            qemu-user-static binfmt-support
+            qemu-user-static binfmt-support gcc-powerpc64le-linux-gnu
     '
 fi
 
@@ -124,9 +124,11 @@ run "
     if ! rustc --version 2>/dev/null | grep -qE '1\\.(8[5-9]|9[0-9])'; then
         curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal -y
-        # Replace system cargo wrapper (Ubuntu-specific path) with rustup shim
+        # Replace system cargo wrapper (Ubuntu-specific path) with rustup shim.
+        # Handle prepare-debian as a no-op: it's a Debian offline-vendor setup
+        # step that we don't need since we build with internet access.
         if [ -f /usr/share/cargo/bin/cargo ]; then
-            printf '#!/bin/sh\nexec /root/.cargo/bin/cargo \"\$@\"\n' \
+            printf '#!/bin/sh\n[ "$1" = "prepare-debian" ] && exit 0\nexec /root/.cargo/bin/cargo "$@"\n' \
                 > /usr/share/cargo/bin/cargo
             chmod +x /usr/share/cargo/bin/cargo
         fi
