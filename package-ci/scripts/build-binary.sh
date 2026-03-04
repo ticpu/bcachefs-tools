@@ -77,6 +77,15 @@ run() {
     podman exec "$CONTAINER" bash -euxc "$*"
 }
 
+# Clear stale apt locks that may be left by crashed previous containers.
+# Safe because each distro×arch gets its own cache dir and builds don't overlap.
+run '
+    rm -f /var/cache/apt/archives/lock
+    rm -f /var/lib/apt/lists/lock
+    rm -f /var/lib/dpkg/lock
+    rm -f /var/lib/dpkg/lock-frontend
+'
+
 # Cross-compilation setup (ppc64el on amd64)
 if [ "$ARCH" = "ppc64el" ]; then
     run '
