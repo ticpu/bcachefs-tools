@@ -231,7 +231,19 @@ impl BuildState {
             .with_context(|| format!("creating job dir {}", dir.display()))?;
         let path = dir.join("status");
         fs::write(&path, status.as_str())
-            .with_context(|| format!("writing status to {}", path.display()))
+            .with_context(|| format!("writing status to {}", path.display()))?;
+        self.regenerate_html();
+        Ok(())
+    }
+
+    fn regenerate_html(&self) {
+        let script = self.state_dir.join("scripts/generate-status-html.sh");
+        if script.exists() {
+            let _ = Command::new("bash")
+                .arg(&script)
+                .env("STATE_DIR", &self.state_dir)
+                .status();
+        }
     }
 
     fn log_path(&self, commit: &str, job_name: &str) -> PathBuf {
