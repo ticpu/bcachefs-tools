@@ -348,10 +348,11 @@ The key hierarchy has three levels:
 		not any filesystem data.
 
 	\item \textbf{Per-extent nonces}: Each extent is encrypted with the
-		master key and a 128-bit nonce derived from the extent's
-		96-bit version number, compression type, and a per-CRC nonce
-		offset. The Poly1305 MAC key is derived from the same master
-		key with a domain-separated nonce (\texttt{BCH\_NONCE\_POLY}).
+		master key and a 128-bit nonce composed of the extent's
+		96-bit version number, compression type, and uncompressed
+		size, combined with a per-CRC nonce offset. Data encryption
+		uses the \texttt{BCH\_NONCE\_EXTENT} domain separator; the
+		Poly1305 MAC key uses \texttt{BCH\_NONCE\_POLY}.
 \end{enumerate}
 
 There is currently no key rotation mechanism: the master key is fixed for the
@@ -1907,6 +1908,8 @@ making its efficiency critical for multithreaded workloads.
 	\item \texttt{KEY\_TYPE\_extent\_whiteout} \\
 		Whiteout specific to the extents btree, blocking visibility
 		of ancestor snapshot extent versions.
+	\item \texttt{KEY\_TYPE\_logged\_op\_stripe\_update} \\
+		Logged stripe creation/update operation for crash recovery.
 \end{description}
 
 \end{document}
