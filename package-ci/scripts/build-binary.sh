@@ -96,36 +96,37 @@ if [ "$ARCH" = "ppc64el" ]; then
     '
 fi
 
-# Install essential build tools
+# Install essential build tools (no Rust yet - build-dep will pull the right version)
 run '
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential ca-certificates curl devscripts dpkg-dev
 '
 
-# Install Rust via rustup if distro ships an old version.
-# Plucky ships Rust 1.84 which cannot build edition2024 (needs 1.85+).
-# debian/rules hardcodes CARGO=/usr/share/cargo/bin/cargo so we also
-# replace that Python wrapper with a shell shim pointing to rustup cargo.
-run "
-    if ! rustc --version 2>/dev/null | grep -qE '1\\.(8[5-9]|9[0-9])'; then
-        curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | \
-            sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal -y
-        # Replace the system cargo wrapper so debian/rules picks up rustup cargo
-        printf '#!/bin/sh\nexec /root/.cargo/bin/cargo \"\$@\"\n' \
-            > /usr/share/cargo/bin/cargo
-        chmod +x /usr/share/cargo/bin/cargo
-        ln -sf /root/.cargo/bin/rustc /usr/bin/rustc
-    fi
-"
-
-# Extract source package and install build-deps
+# Extract source package and install build-deps (this installs distro Rust)
 run "
     mkdir -p /build
     cp /source/* /build/
     cd /build
     dpkg-source -x ${DSC_BASENAME} src
     DEBIAN_FRONTEND=noninteractive apt-get build-dep -y ${CROSS_BUILD_DEP_ARCH} ./src
+"
+
+# If distro Rust is too old (needs 1.85+ for edition2024), install via rustup.
+# debian/rules hardcodes CARGO=/usr/share/cargo/bin/cargo, so we also replace
+# that path with a shim. Only do this if the path exists (Ubuntu-specific wrapper).
+run "
+    if ! rustc --version 2>/dev/null | grep -qE '1\\.(8[5-9]|9[0-9])'; then
+        curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal -y
+        # Replace system cargo wrapper (Ubuntu-specific path) with rustup shim
+        if [ -f /usr/share/cargo/bin/cargo ]; then
+            printf '#!/bin/sh\nexec /root/.cargo/bin/cargo \"\$@\"\n' \
+                > /usr/share/cargo/bin/cargo
+            chmod +x /usr/share/cargo/bin/cargo
+        fi
+        ln -sf /root/.cargo/bin/rustc /usr/bin/rustc
+    fi
 "
 
 # Build
