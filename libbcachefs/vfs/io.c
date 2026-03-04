@@ -874,9 +874,9 @@ static int quota_reserve_range(struct bch_inode_info *inode,
 	return ret ?: bch2_quota_reservation_add(c, inode, res, sectors, true);
 }
 
-loff_t bch2_remap_file_range(struct file *file_src, loff_t pos_src,
-			     struct file *file_dst, loff_t pos_dst,
-			     loff_t len, unsigned remap_flags)
+static loff_t bch2_remap_file_range_errcode(struct file *file_src, loff_t pos_src,
+					    struct file *file_dst, loff_t pos_dst,
+					    loff_t len, unsigned remap_flags)
 {
 	struct bch_inode_info *src = file_bch_inode(file_src);
 	struct bch_inode_info *dst = file_bch_inode(file_dst);
@@ -958,6 +958,16 @@ err:
 	unlock_two_nondirectories(&src->v, &dst->v);
 
 	return bch2_err_class(ret);
+}
+
+loff_t bch2_remap_file_range(struct file *file_src, loff_t pos_src,
+			     struct file *file_dst, loff_t pos_dst,
+			     loff_t len, unsigned remap_flags)
+{
+	loff_t ret = bch2_remap_file_range_errcode(file_src, pos_src,
+						   file_dst, pos_dst,
+						   len, remap_flags);
+	return ret < 0 ? bch2_err_class(ret) : ret;
 }
 
 /* fseek: */
