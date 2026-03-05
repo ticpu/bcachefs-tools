@@ -70,9 +70,9 @@ fn parse_target(
 
 /// Set all sb options from a bch_opts struct.
 fn opt_set_sb_all(sb: *mut c::bch_sb, dev_idx: i32, opts: &mut c::bch_opts) {
-    let nr = c::bch_opt_id::bch2_opts_nr as u32;
-    for id in 0..nr {
-        let opt_id: c::bch_opt_id = unsafe { std::mem::transmute::<u32, c::bch_opt_id>(id) };
+    for (id, opt) in bch_bindgen::opts::opt_table().iter().enumerate() {
+        // SAFETY: id is in 0..bch2_opts_nr, the valid range of bch_opt_id
+        let opt_id: c::bch_opt_id = unsafe { std::mem::transmute(id as u32) };
 
         let v = if unsafe { c::bch2_opt_defined_by_id(opts, opt_id) } {
             unsafe { c::bch2_opt_get_by_id(opts, opt_id) }
@@ -80,7 +80,6 @@ fn opt_set_sb_all(sb: *mut c::bch_sb, dev_idx: i32, opts: &mut c::bch_opts) {
             unsafe { c::bch2_opt_get_by_id(&c::bch2_opts_default, opt_id) }
         };
 
-        let opt = unsafe { c::bch2_opt_table.as_ptr().add(id as usize) };
         unsafe { c::__bch2_opt_set_sb(sb, dev_idx, opt, v) };
     }
 }

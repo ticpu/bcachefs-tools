@@ -20,14 +20,11 @@ unsafe fn c_str(p: *const std::os::raw::c_char) -> Option<&'static str> {
 
 /// Iterate bch2_opt_table entries matching flag_filter, calling f for each.
 fn for_each_opt(flag_filter: u32, mut f: impl FnMut(&'static str, &c::bch_option)) {
-    unsafe {
-        for i in 0..c::bch_opt_id::bch2_opts_nr as usize {
-            let opt = &*c::bch2_opt_table.as_ptr().add(i);
-            if opt.flags as u32 & flag_filter == 0 { continue }
-            if opt.flags as u32 & c::opt_flags::OPT_HIDDEN as u32 != 0 { continue }
-            let Some(name) = c_str(opt.attr.name) else { continue };
-            f(name, opt);
-        }
+    for opt in bch_bindgen::opts::opt_table() {
+        if opt.flags as u32 & flag_filter == 0 { continue }
+        if opt.flags as u32 & c::opt_flags::OPT_HIDDEN as u32 != 0 { continue }
+        let Some(name) = (unsafe { c_str(opt.attr.name) }) else { continue };
+        f(name, opt);
     }
 }
 
@@ -55,58 +52,55 @@ pub fn opts_usage_str(flags_all: u32, flags_none: u32) -> String {
     const HELPCOL: usize = 32;
     let mut out = String::new();
 
-    unsafe {
-        for i in 0..c::bch_opt_id::bch2_opts_nr as usize {
-            let opt = &*c::bch2_opt_table.as_ptr().add(i);
-            if opt.flags as u32 & flags_all != flags_all { continue }
-            if opt.flags as u32 & flags_none != 0 { continue }
-            let Some(name) = c_str(opt.attr.name) else { continue };
+    for opt in bch_bindgen::opts::opt_table() {
+        if opt.flags as u32 & flags_all != flags_all { continue }
+        if opt.flags as u32 & flags_none != 0 { continue }
+        let Some(name) = (unsafe { c_str(opt.attr.name) }) else { continue };
 
-            let mut col = 0;
-            let s = format!("      --{name}");
-            col += s.len();
-            out.push_str(&s);
+        let mut col = 0;
+        let s = format!("      --{name}");
+        col += s.len();
+        out.push_str(&s);
 
-            match opt.type_ {
-                c::opt_type::BCH_OPT_BOOL => {}
-                c::opt_type::BCH_OPT_STR => {
-                    out.push_str("=(");
-                    col += 2;
-                    let choices = collect_choices(opt.choices);
-                    for (j, ch) in choices.iter().enumerate() {
-                        if j > 0 { out.push('|'); col += 1; }
-                        out.push_str(ch);
-                        col += ch.len();
-                    }
-                    out.push(')');
-                    col += 1;
+        match opt.type_ {
+            c::opt_type::BCH_OPT_BOOL => {}
+            c::opt_type::BCH_OPT_STR => {
+                out.push_str("=(");
+                col += 2;
+                let choices = unsafe { collect_choices(opt.choices) };
+                for (j, ch) in choices.iter().enumerate() {
+                    if j > 0 { out.push('|'); col += 1; }
+                    out.push_str(ch);
+                    col += ch.len();
                 }
-                _ => {
-                    if let Some(h) = c_str(opt.hint) {
-                        let _ = write!(out, "={h}");
-                        col += 1 + h.len();
-                    }
+                out.push(')');
+                col += 1;
+            }
+            _ => {
+                if let Some(h) = unsafe { c_str(opt.hint) } {
+                    let _ = write!(out, "={h}");
+                    col += 1 + h.len();
                 }
             }
+        }
 
-            if let Some(help) = c_str(opt.help) {
-                for (j, line) in help.split('\n').enumerate() {
-                    if line.is_empty() && j > 0 { break; }
-                    if j > 0 || col > HELPCOL {
-                        out.push('\n');
-                        col = 0;
-                    }
-                    while col < HELPCOL - 1 {
-                        out.push(' ');
-                        col += 1;
-                    }
-                    out.push_str(line);
+        if let Some(help) = unsafe { c_str(opt.help) } {
+            for (j, line) in help.split('\n').enumerate() {
+                if line.is_empty() && j > 0 { break; }
+                if j > 0 || col > HELPCOL {
                     out.push('\n');
                     col = 0;
                 }
-            } else {
+                while col < HELPCOL - 1 {
+                    out.push(' ');
+                    col += 1;
+                }
+                out.push_str(line);
                 out.push('\n');
+                col = 0;
             }
+        } else {
+            out.push('\n');
         }
     }
 

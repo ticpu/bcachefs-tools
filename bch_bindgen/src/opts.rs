@@ -2,6 +2,19 @@ use crate::c;
 use crate::fs::Fs;
 use std::ffi::{CString, c_char};
 
+/// Return the opt table as a proper slice.
+///
+/// bindgen generates `bch2_opt_table` as a zero-length array since it can't
+/// determine the size. This wraps it safely using `bch2_opts_nr`.
+pub fn opt_table() -> &'static [c::bch_option] {
+    unsafe {
+        std::slice::from_raw_parts(
+            c::bch2_opt_table.as_ptr(),
+            c::bch_opt_id::bch2_opts_nr as usize,
+        )
+    }
+}
+
 #[macro_export]
 macro_rules! opt_set {
     ($opts:ident, $n:ident, $v:expr) => {
