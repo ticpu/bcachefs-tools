@@ -14,6 +14,34 @@ use clap::Parser;
 use bch_bindgen::printbuf::Printbuf;
 use crate::util::read_flag_list;
 
+// ---- RAII wrapper for C-allocated journal entries array ----
+
+struct JournalEntries {
+    inner: c::rust_journal_entries,
+}
+
+impl JournalEntries {
+    fn collect(c_fs: *mut c::bch_fs) -> Self {
+        Self { inner: unsafe { c::rust_collect_journal_entries(c_fs) } }
+    }
+
+    fn as_slice(&self) -> &[*mut c::journal_replay] {
+        if self.inner.entries.is_null() || self.inner.nr == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.inner.entries, self.inner.nr) }
+        }
+    }
+}
+
+impl Drop for JournalEntries {
+    fn drop(&mut self) {
+        if !self.inner.entries.is_null() {
+            unsafe { libc::free(self.inner.entries as *mut _) }
+        }
+    }
+}
+
 // ---- entry classification ----
 
 fn entry_is_transaction_start(entry: &c::jset_entry) -> bool {
@@ -699,13 +727,8 @@ pub fn cmd_list_journal(argv: Vec<String>) -> Result<()> {
 
     let c_fs = fs.raw;
 
-    // Collect journal entries via C shim
-    let je = unsafe { c::rust_collect_journal_entries(c_fs) };
-    let entries: &[*mut c::journal_replay] = if je.entries.is_null() || je.nr == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(je.entries, je.nr) }
-    };
+    let je = JournalEntries::collect(c_fs);
+    let entries = je.as_slice();
 
     // Compute min_seq_to_print for contiguous checking
     let mut min_seq_to_print = 0u64;
@@ -806,11 +829,6 @@ pub fn cmd_list_journal(argv: Vec<String>) -> Result<()> {
         }
 
         journal_replay_print(c_fs, &f, p);
-    }
-
-    // Free the collected entries array
-    if !je.entries.is_null() {
-        unsafe { libc::free(je.entries as *mut _) };
     }
 
     Ok(())
