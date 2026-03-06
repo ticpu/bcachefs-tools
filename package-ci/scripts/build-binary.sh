@@ -128,7 +128,7 @@ run "
         # Handle prepare-debian as a no-op: it's a Debian offline-vendor setup
         # step that we don't need since we build with internet access.
         if [ -f /usr/share/cargo/bin/cargo ]; then
-            printf '#!/bin/sh\n[ "$1" = "prepare-debian" ] && exit 0\nexec /root/.cargo/bin/cargo "$@"\n' \
+            printf '#!/bin/sh\n[ "\$1" = "prepare-debian" ] && exit 0\nexec /root/.cargo/bin/cargo "\$@"\n' \
                 > /usr/share/cargo/bin/cargo
             chmod +x /usr/share/cargo/bin/cargo
         fi
