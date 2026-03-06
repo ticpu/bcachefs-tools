@@ -497,7 +497,7 @@ fn copy_link(
 
     let mut buf = AlignedBuf::new(MAX_IO_SIZE);
     let ret = unsafe {
-        libc::readlink(src.as_ptr(), buf.as_mut_ptr() as *mut i8, buf.len())
+        libc::readlink(src.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char, buf.len())
     };
     if ret < 0 {
         return Err(last_err());
