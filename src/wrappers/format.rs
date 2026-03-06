@@ -214,6 +214,16 @@ pub extern "C" fn bch2_format(
         sb_ref.label[..label_bytes.len()].copy_from_slice(label_bytes);
     }
 
+    // Create ext field before setting options - some options (e.g.
+    // dev_readahead) use set_ext which requires this field to exist
+    unsafe {
+        c::bch2_sb_field_get_minsize_id(
+            &mut *sb,
+            c::bch_sb_field_type::BCH_SB_FIELD_ext,
+            (std::mem::size_of::<c::bch_sb_field_ext>() / std::mem::size_of::<u64>()) as u32,
+        );
+    }
+
     opt_set_sb_all(sb_ptr, -1, &mut fs_opts);
 
     // Time
