@@ -528,8 +528,9 @@ fn devs_usage_to_text(
             sub.newline();
 
             for d in &dev_ctxs {
-                let capacity = d.usage.capacity_sectors();
-                let used = d.usage.used_sectors();
+                let hidden = d.usage.hidden_sectors();
+                let capacity = d.usage.capacity_sectors() - hidden;
+                let used = d.usage.used_sectors() - hidden;
                 let label = d.info.label.as_deref().unwrap_or("(no label)");
                 let state = accounting::member_state_str(d.usage.state);
 
@@ -557,8 +558,9 @@ fn devs_usage_to_text(
 
 fn dev_usage_full_to_text(out: &mut Printbuf, d: &DevContext) {
     let u = &d.usage;
-    let capacity = u.capacity_sectors();
-    let used = u.used_sectors();
+    let hidden = u.hidden_sectors();
+    let capacity = u.capacity_sectors() - hidden;
+    let used = u.used_sectors() - hidden;
 
     let label = d.info.label.as_deref().unwrap_or("(no label)");
     let state = accounting::member_state_str(u.state);

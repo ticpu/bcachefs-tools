@@ -543,7 +543,8 @@ pub fn cmd_device_evacuate(argv: Vec<String>) -> Result<()> {
         io::stdout().flush().ok();
 
         if data_sectors == 0 {
-            println!();
+            println!("\nEvacuation complete — device ready to remove with \
+                      'bcachefs device remove {}'", cli.device);
             return Ok(());
         }
 

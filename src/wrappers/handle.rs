@@ -508,6 +508,15 @@ impl DevUsage {
         self.nr_buckets * self.bucket_size as u64
     }
 
+    /// Hidden sectors (superblock + journal) — subtracted from capacity for percentage display.
+    pub fn hidden_sectors(&self) -> u64 {
+        use super::accounting::data_type_is_hidden;
+        self.iter_typed()
+            .filter(|(t, _)| data_type_is_hidden(*t))
+            .map(|(_, dt)| dt.sectors)
+            .sum()
+    }
+
     /// Used sectors (all data types except unstriped).
     pub fn used_sectors(&self) -> u64 {
         self.iter_typed()
