@@ -1,5 +1,4 @@
 pub mod accounting;
-pub mod format;
 pub mod handle;
 pub mod ioctl;
 pub mod sb_display;

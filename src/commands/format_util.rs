@@ -8,7 +8,7 @@ use std::os::unix::fs::FileExt;
 use bch_bindgen::c;
 use bch_bindgen::{opt_defined, opt_get, opt_set};
 
-use super::super_io::{die, BCHFS_MAGIC, SUPERBLOCK_SIZE_DEFAULT};
+use crate::wrappers::super_io::{die, BCHFS_MAGIC, SUPERBLOCK_SIZE_DEFAULT};
 
 /// Features enabled on all new filesystems.
 /// Must match BCH_SB_FEATURES_ALL in bcachefs_format.h.
@@ -329,7 +329,7 @@ pub extern "C" fn bch2_format(
             dev.sb_end = size_sectors;
         }
 
-        if let Err(e) = super::super_io::sb_layout_init(
+        if let Err(e) = crate::wrappers::super_io::sb_layout_init(
             unsafe { &mut (*sb.sb).layout },
             fs_opts.block_size as u32,
             dev.opts.bucket_size,
@@ -347,12 +347,12 @@ pub extern "C" fn bch2_format(
         if dev.sb_offset == c::BCH_SB_SECTOR as u64 {
             // Zero start of disk
             let zeroes = vec![0u8; (c::BCH_SB_SECTOR as usize) << 9];
-            let file = super::super_io::borrowed_file(fd);
+            let file = crate::wrappers::super_io::borrowed_file(fd);
             file.write_all_at(&zeroes, 0)
                 .unwrap_or_else(|e| die(&format!("zeroing start of disk: {}", e)));
         }
 
-        super::super_io::bch2_super_write(fd, sb.sb);
+        crate::wrappers::super_io::bch2_super_write(fd, sb.sb);
 
         unsafe { libc::close(fd) };
     }

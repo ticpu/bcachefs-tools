@@ -510,7 +510,7 @@ pub fn cmd_format(argv: Vec<String>) -> Result<()> {
         preallocated: Default::default(),
     };
 
-    let sb = crate::wrappers::format::bch2_format(fs_opt_strs, cfg.fs_opts, fmt_opts, dev_list);
+    let sb = crate::commands::format_util::bch2_format(fs_opt_strs, cfg.fs_opts, fmt_opts, dev_list);
     if sb.is_null() {
         bail!("bch2_format returned null");
     }

@@ -508,7 +508,7 @@ fn image_create_inner(
         preallocated: Default::default(),
     };
 
-    let sb = crate::wrappers::format::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
+    let sb = crate::commands::format_util::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
     if sb.is_null() {
         bail!("bch2_format returned null");
     }

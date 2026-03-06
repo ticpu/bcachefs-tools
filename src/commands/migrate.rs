@@ -19,7 +19,7 @@ use clap::Parser;
 use crate::commands::format::take_opt_value;
 use crate::commands::opts::{bch_opt_lookup_negated, parse_opt_val};
 use crate::key::Passphrase;
-use crate::wrappers::format::format_opts_default;
+use crate::commands::format_util::format_opts_default;
 use crate::wrappers::super_io;
 
 // ---- C shim declarations ----
@@ -409,7 +409,7 @@ fn migrate_fs(
         preallocated: Default::default(),
     };
 
-    let sb = crate::wrappers::format::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
+    let sb = crate::commands::format_util::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
     if sb.is_null() {
         unsafe { libc::close(fs_fd) };
         bail!("bch2_format failed");

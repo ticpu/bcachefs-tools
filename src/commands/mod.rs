@@ -27,6 +27,7 @@ pub mod counters;
 pub mod device;
 pub mod dump;
 pub mod format;
+pub mod format_util;
 pub mod fs_usage;
 pub mod image;
 pub mod fsck;
