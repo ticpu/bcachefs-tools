@@ -1,7 +1,8 @@
 \documentclass{article}
 
+\usepackage[T1]{fontenc}
 \usepackage{imakeidx}
-\usepackage[pdfborder={0 0 0},bookmarks=true,bookmarksnumbered=true]{hyperref}
+\usepackage[pdfborder={0 0 0},bookmarks=true,bookmarksnumbered=true,breaklinks=true]{hyperref}
 \usepackage{bookmark}
 \usepackage{longtable}
 \usepackage{upquote}
@@ -18,6 +19,8 @@
 \begin{document}
 
 \maketitle
+\setcounter{tocdepth}{4}
+\setcounter{secnumdepth}{4}
 \tableofcontents
 
 \section{Introduction and overview}
@@ -31,7 +34,7 @@ bcachefs is architected more like a filesystem on top of a relational database,
 with tables for the different filesystem data types - extents, inodes, dirents,
 xattrs, et cetera.
 
-The entire filesystem is built on two primitives: btrees and buckets. All
+The entire filesystem is built on two primitives: \hyperref[sec:btrees]{btrees} and buckets. All
 filesystem state is a key-value pair in a btree. A handful of btrees store core
 filesystem data (extents, inodes, dirents, xattrs, subvolumes), while others
 handle allocation tracking, reverse mappings, background maintenance, and crash
@@ -122,7 +125,7 @@ logged operations are replayed to completion.
 
 \subsection{Recovery}
 
-On unclean shutdown, the journal is replayed to bring the btrees up to date.
+On unclean shutdown, the \hyperref[sec:journal]{journal} is replayed to bring the btrees up to date.
 Journal entries record btree updates in commit order; replay applies them
 sequentially to reconstruct the state at the last completed commit.
 
@@ -135,7 +138,7 @@ During btree node reads, bcachefs detects this situation: bsets (sorted key
 arrays within a node) whose journal sequence number is newer than the last
 successfully written journal entry indicate the btree node was written to disk
 but the corresponding journal entry was not. These sequences are blacklisted
-in the superblock (\texttt{bch\_sb\_field\_journal\_seq\_blacklist}), and
+in the \hyperref[sec:superblock]{superblock} (\texttt{bch\_sb\_field\_journal\_seq\_blacklist}), and
 bsets referencing them are ignored until the btree node is next rewritten.
 After an unclean shutdown, a padding of 64 sequence numbers past the last
 journal entry read is also blacklisted, to cover in-flight btree writes.
@@ -256,7 +259,7 @@ eliminated those corner cases.
 There are some advantages to structuring the allocator this way, besides being
 able to support cached data:
 \begin{itemize}
-	\item By maintaining multiple write points that are writing to different buckets,
+	\item By maintaining multiple \hyperref[sec:write-points]{write points} that are writing to different buckets,
 		we're able to easily and naturally segregate unrelated IO from different
 		processes, which helps greatly with fragmentation.
 
@@ -285,27 +288,13 @@ able to support cached data:
 
 Every sector range on disk that contains data or metadata has a corresponding
 backpointer: a reverse reference from the physical location back to the logical
-btree entry that owns it. Backpointers are stored in a dedicated write-buffered
-btree (ID 13), keyed by (device, starting offset, discriminator), with the value
-recording the btree ID, level, and position of the owning key.
+btree entry that owns it. Backpointers enable efficient answers to the question
+``what data lives in this bucket?'' without scanning the entire extents btree.
+This is essential for copygc, device evacuation, scrub, and the reconcile
+subsystem.
 
-The discriminator field exists because compressed extents complicate ownership:
-a single highly-compressed block can map to a large extent, and if that extent
-is partially overwritten, multiple smaller extents may share ownership of the
-same physical block. Erasure code stripes also get backpointers because they
-co-own data with the extents they protect --- even after an extent is deleted,
-the stripe may still need the data for EC reconstruction until the stripe itself
-is reclaimed. Stripe backpointers are flagged with
-\texttt{BACKPOINTER\_STRIPE\_PTR} and routed to the separate
-\texttt{stripe\_backpointers} btree.
-
-Backpointers enable efficient answers to the question ``what data lives in this
-bucket?'' without scanning the entire extents btree. This is essential for device
-evacuation (moving all data off a device), scrub (verifying data integrity in
-physical order), and the reconcile subsystem (tracking what needs to be moved on
-rotational devices in LBA order). Three recovery passes validate backpointers:
-\texttt{check\_extents\_to\_backpointers}, \texttt{check\_backpointers\_to\_extents},
-and \texttt{check\_btree\_backpointers}.
+See \hyperref[sec:backpointers]{Backpointers} in subsystem details for
+on-disk structure, maintenance, and consistency validation.
 
 \section{Feature overview}
 
@@ -317,22 +306,25 @@ or on individual inodes (files and directories). When set on a directory via the
 \texttt{bcachefs set-file-option} command, they will be automatically applied
 recursively.
 
+Checksumming, compression, and encryption all operate at the granularity of
+entire extents (up to \texttt{encoded\_extent\_max}, default 256 KB). An extent
+that has been through any of these transformations is called an \emph{encoded
+extent}. Because the checksum covers the full encoded extent, any read within it
+--- even a single sector --- must read, verify, and (if compressed) decompress
+the whole thing. This is the fundamental performance tradeoff shared by all
+three features: they improve data integrity and storage efficiency at the cost
+of read amplification for small random IO. For workloads dominated by small
+random reads (databases, VMs), reducing \texttt{encoded\_extent\_max} or
+disabling these features may be appropriate.
+
 \subsubsection{Checksumming}
 
-bcachefs supports both metadata and data checksumming - crc32c by default, but
+bcachefs supports both metadata and data checksumming --- crc32c by default, but
 stronger checksums are available as well. Enabling data checksumming incurs some
-performance overhead - besides the checksum calculation, writes have to be
+performance overhead: besides the checksum calculation, writes have to be
 bounced for checksum stability (Linux generally cannot guarantee that the buffer
 being written is not modified in flight), but reads generally do not have to be
 bounced.
-
-Checksum granularity in bcachefs is at the level of individual extents, which
-results in smaller metadata but means we have to read entire extents in order to
-verify the checksum. By default, checksummed and compressed extents are capped
-at 256 KB (controlled by \texttt{encoded\_extent\_max}).
-For most applications and usage scenarios this is an ideal trade off, but
-small random \texttt{O\_DIRECT} reads will incur significant overhead. In the
-future, checksum granularity will be a per-inode option.
 
 \subsubsection{Encryption}
 
@@ -340,135 +332,94 @@ bcachefs supports authenticated (AEAD) encryption using ChaCha20/Poly1305.
 Unlike typical block layer or filesystem encryption (usually AES-XTS), which
 operates on fixed blocks with no room for nonces or MACs, bcachefs stores a
 nonce and cryptographic MAC alongside every data pointer. This creates a chain
-of trust from the superblock (or journal) down to individual extents: any
+of trust from the \hyperref[sec:superblock]{superblock} (or \hyperref[sec:journal]{journal}) down to individual extents: any
 modification, deletion, reordering, or rollback of metadata is detectable.
 
 Encryption is all-or-nothing at the filesystem level: all data and metadata
 except the superblock is encrypted, and all data and metadata is authenticated.
 Per-file or per-directory encryption is not supported because btree nodes are
-shared structures that do not belong to any individual file.
+shared structures that do not belong to any individual file. Encryption can
+only be enabled at format time; it cannot be added to an existing filesystem.
 
 \textbf{Critical exception}: Data written with the \texttt{nocow} option is
-stored \textbf{unencrypted}, even on an encrypted filesystem. The nocow write
-path bypasses the normal data path transformations including encryption. This
-is because the current AEAD encryption scheme is fundamentally incompatible
-with mutable data. Encryption can only be enabled at format time; it cannot
-be added to an existing filesystem.
+stored \textbf{unencrypted}, even on an encrypted filesystem (see the Nocow
+section below).
 
-\paragraph{Key hierarchy}
+The key hierarchy uses a passphrase (never stored on disk) to derive a
+passphrase key via scrypt, which decrypts a random master key stored in the
+superblock. The master key encrypts all data and metadata. Changing the
+passphrase re-encrypts only the master key, not filesystem data. The KDF runs
+in userspace, so alternative key sources (hardware tokens, key files) can be
+integrated without kernel changes. There is currently no key rotation, key
+escrow, or multi-passphrase support. Losing the passphrase means permanent
+data loss.
 
-The key hierarchy has three levels:
-\begin{enumerate}
-	\item \textbf{Passphrase}: User-supplied, never stored on disk. Fed to
-		the scrypt KDF (parameters stored in the superblock's
-		\texttt{bch\_sb\_field\_crypt}) to derive a 256-bit
-		passphrase key. The KDF runs entirely in userspace, so
-		alternative key sources (hardware tokens, key files) can be
-		integrated without kernel changes.
+At mount time, the kernel retrieves the passphrase key from the Linux kernel
+keyring (\texttt{bcachefs:<UUID>}). Note that keys added to a session keyring
+are not visible from other sessions --- use \texttt{KEY\_SPEC\_USER\_KEYRING}
+for cross-session visibility. Similarly, \texttt{sudo mount} uses root's
+keyring, not the calling user's.
 
-	\item \textbf{Master key}: A random 256-bit key generated at format
-		time, stored in the superblock encrypted by the passphrase
-		key. A magic value (\texttt{BCH\_KEY\_MAGIC}) stored
-		alongside the encrypted master key allows verification of a
-		correct passphrase without trial decryption of filesystem
-		data. Changing the passphrase re-encrypts only the master key,
-		not any filesystem data.
+By default, MACs are truncated to 80 bits, which is sufficient for most threat
+models. The \texttt{wide\_macs} option stores the full 128-bit MAC and is
+recommended when the storage device itself is untrusted (e.g. USB drives,
+network storage). Metadata always uses full-width MACs.
 
-	\item \textbf{Per-extent nonces}: Each extent is encrypted with the
-		master key and a 128-bit nonce composed of the extent's
-		96-bit version number, compression type, and uncompressed
-		size, combined with a per-CRC nonce offset. Data encryption
-		uses the \texttt{BCH\_NONCE\_EXTENT} domain separator; the
-		Poly1305 MAC key uses \texttt{BCH\_NONCE\_POLY}.
-\end{enumerate}
+\paragraph{Nonce reuse with external snapshots}
 
-There is currently no key rotation mechanism: the master key is fixed for the
-lifetime of the filesystem. Key escrow, multi-passphrase unlock, and hardware
-key (TPM, FIDO2) support are not implemented. Losing the passphrase means
-permanent data loss.
+If the underlying storage is snapshotted externally (LVM, ZFS zvol, VM
+snapshot) and the snapshot is mounted read-write, both instances share the
+same master key and will reuse nonces, breaking encryption security.
+bcachefs's own snapshots do not have this problem.
 
-\paragraph{Kernel keyring integration}
+\textbf{Mitigation}: Never mount an external snapshot of an encrypted volume
+read-write --- keep external snapshots read-only (\texttt{-o nochanges}).
+Alternatively, place LUKS between the snapshot layer and bcachefs (e.g.
+LVM $\to$ LUKS $\to$ bcachefs).
 
-The kernel never sees the passphrase. Instead, userspace derives the passphrase
-key via scrypt and adds it to the Linux kernel keyring as a \texttt{user} type
-key with description \texttt{bcachefs:<UUID>}. At mount time, the kernel calls
-\texttt{request\_key()} to find this key, uses it to decrypt the master key
-from the superblock, and caches the decrypted master key in kernel memory for
-the lifetime of the mount.
-
-This design inherits the well-known pain points of the Linux keyring subsystem:
-
-\begin{itemize}
-	\item \textbf{Session isolation}: Keys added to a session keyring are
-		not visible from other sessions of the same user. An
-		\texttt{ssh} session that runs \texttt{bcachefs unlock} does
-		not make the key available to a different terminal, to
-		systemd mount units, or to cron jobs. The key must be added
-		to \texttt{KEY\_SPEC\_USER\_KEYRING} (the per-UID keyring) to
-		be visible across sessions, but this is not always the
-		default.
-
-	\item \textbf{Privilege boundaries}: \texttt{sudo mount} uses root's
-		keyring, not the calling user's. Systemd units run in
-		isolated session contexts. The key must be explicitly placed
-		in a keyring that the mounting process can access.
-\end{itemize}
-
-\paragraph{MAC storage}
-
-The Poly1305 MAC is stored in the extent's CRC entry. By default, the MAC is
-truncated to 80 bits (\texttt{chacha20\_poly1305\_80}), which is sufficient for
-most threat models. The \texttt{wide\_macs} option stores the full 128-bit MAC
-at the cost of 8 bytes per extent, and is recommended when the storage device
-itself is untrusted (e.g. USB drives, network storage) and an attacker can make
-repeated forgery attempts or perform rollback attacks (taking a snapshot without
-your knowledge, then tricking you into mounting the older snapshot read-write).
-Metadata always uses 128-bit MACs regardless of the \texttt{wide\_macs} setting.
-
-\paragraph{Nonce reuse vulnerability with external snapshots}
-
-AEAD algorithms require that a (key, nonce) pair is never reused for different
-plaintexts. bcachefs derives extent nonces from the extent's version number
-(\texttt{struct bversion}), which is part of the on-disk key and is unique
-within a single filesystem instance. However, if the underlying storage is
-snapshotted externally (LVM, ZFS zvol, VM snapshot, loop device on a reflinked
-file) and the snapshot is mounted read-write, both instances share the same
-master key and will derive the same nonces for new writes to the same logical
-locations. This breaks ChaCha20's semantic security: an attacker observing
-both ciphertexts can XOR them to obtain the XOR of the plaintexts.
-
-bcachefs's own snapshot mechanism does not have this problem: internal snapshots
-share extents via reflinks with COW semantics, and new writes get new version
-numbers and therefore new nonces.
-
-\textbf{Mitigation}: Never mount a snapshot of an externally-snapshotted
-encrypted volume read-write --- keep external snapshots linear, not branching.
-The most recent (non-snapshot) version is safe to mount read-write; only the
-older snapshots must remain read-only (use \texttt{-o nochanges}). Alternatively,
-place LUKS between the snapshot layer and bcachefs --- the LUKS ciphertext
-hides the ChaCha20 nonce reuse from observation. For example, on LVM: LVM
-$\to$ LUKS $\to$ bcachefs.
+See \hyperref[sec:encryption]{Encryption} in subsystem details for key
+hierarchy internals, keyring integration, and MAC storage details.
 
 \subsubsection{Compression}
 
-bcachefs supports gzip, lz4 and zstd compression. As with data checksumming, we
-compress entire extents, not individual disk blocks - this gives us better
-compression ratios than other filesystems, at the cost of reduced small random
-read performance. Compression algorithms are fundamentally able to find more
-redundancy when fed more data at once; compressing at 4K page granularity
-also creates painful alignment issues, because rounding compressed output
-back up to block alignment loses much of the compression ratio. Per-extent
-granularity also simplifies the IO path: everything works in terms of
+bcachefs supports gzip, lz4 and zstd compression, operating at extent
+granularity as described above. This gives better compression ratios than
+filesystems that compress at the 4K page level: compression algorithms find more
+redundancy when fed more data at once, and rounding compressed output back up to
+block alignment at small granularity loses much of the compression ratio.
+Per-extent granularity also simplifies the IO path: everything works in terms of
 extents, and there is nothing smaller than an extent to write code to handle.
 
 Data can also be compressed or recompressed with a different algorithm in the
 background by the reconcile subsystem, if the \texttt{background\_compression}
 option is set.
 
+\subsubsection{Nocow}
+
+The \texttt{nocow} option enables in-place writes: data is overwritten directly
+rather than being written to a new location (copy-on-write). This bypasses the
+normal encoded-extent pipeline --- nocow data is not checksummed, not compressed,
+and not encrypted, even on an encrypted filesystem.
+
+Nocow mode is useful for workloads that require stable disk offsets or that
+cannot tolerate the write amplification of COW (databases, VM images). It can
+be set per-file or per-directory.
+
+\hyperref[sec:snapshots]{Snapshots} and \hyperref[sec:reflink]{reflink} still trigger COW semantics even for nocow files --- when
+a nocow file has shared extents (via snapshot or reflink), writes to those
+extents will COW as usual. Once the shared reference is gone, subsequent writes
+resume in-place.
+
+Because nocow data has no checksums, it cannot be verified by scrub, cannot be
+self-healed from a replica on checksum mismatch, and is not protected against
+bitrot. On encrypted filesystems, nocow data is stored in plaintext. These
+tradeoffs should be weighed carefully; for most workloads, the default COW
+behavior with checksumming is the better choice.
+
 \subsection{Multiple devices}
 
 bcachefs is a multi-device filesystem. Devices need not be the same size: by
-default, the allocator will stripe across all available devices but biasing in
+default, the allocator will \hyperref[sec:write-points]{stripe across all available devices} but biasing in
 favor of the devices with more free space, so that all devices in the filesystem
 fill up at the same rate. Devices need not have the same performance
 characteristics: we track device IO latency and direct reads to the device that
@@ -482,6 +433,13 @@ fixed as with RAID10: a given extent can be replicated across any set of
 devices; the \texttt{bcachefs fs usage} command shows how data is replicated
 within a filesystem.
 
+Replica placement is flexible: each write picks devices from those available
+for the requested data type, respecting target group constraints and balancing
+across devices by free space. When a read detects a checksum error on one
+replica, it transparently falls back to another replica and repairs the
+corrupted copy by rewriting it. If the desired replica count is reduced (or
+increased), the reconcile subsystem adjusts existing data in the background.
+
 \subsubsection{Erasure coding}
 
 bcachefs supports Reed-Solomon erasure coding, the same algorithm used by
@@ -493,25 +451,6 @@ desired redundancy is taken from the \texttt{data\_replicas} option:
 \texttt{data\_replicas=3} yields two (RAID-6 style), and
 \texttt{data\_replicas=1} disables erasure coding entirely. Parity is limited
 to at most two blocks. Erasure coding of metadata is not supported.
-
-Each block in a stripe is one bucket on one device. Stripe width is determined
-dynamically: all eligible devices in the target group are used, up to a maximum
-of 16 blocks per stripe. Eligible devices must be read-write, have nonzero
-durability, and share the same bucket size (the most common bucket size among
-candidates is chosen; devices with a different bucket size are excluded). The
-minimum is \texttt{redundancy + 2} devices (3 for RAID-5, 4 for RAID-6). With
-$n$ eligible devices, a stripe has $n - \mathrm{redundancy}$ data blocks and
-\texttt{redundancy} parity blocks, maximizing storage efficiency. There is no
-configuration to limit stripe width to a subset of available devices.
-
-Stripe fragmentation is tracked in the LRU btree. When all data blocks in a
-stripe become empty (sector count zero), the stripe is automatically deleted.
-Partially empty stripes are candidates for reuse: new stripe creation scans
-the fragmentation LRU for a stripe with matching parameters (same disk label,
-algorithm, and redundancy), copies the non-empty blocks into the new stripe,
-and fills the remaining slots with fresh data. This consolidation recovers
-space without a full copygc pass. Changing the \texttt{erasure\_code} option
-at runtime triggers reconcile to add or remove EC protection on existing data.
 
 In conventional RAID, the ``write hole'' is a significant problem: a small write
 within a stripe requires updating the P and Q (parity) blocks, and since those
@@ -527,39 +466,9 @@ per-extent stripes would cause the same fragmentation as ZFS, we erasure code
 entire buckets, taking advantage of bucket-based allocation and copying
 garbage collection.
 
-Writes with erasure coding enabled are initially replicated, but one replica is
-allocated from a bucket queued for a new stripe. When the stripe is full, parity
-buckets are written, the stripe key is committed to the stripes btree, and then
-the extra replicas are dropped from each extent individually. The effect is
-similar to full data journalling, producing an ideal on-disk layout. Since
-device write caches are only flushed on journal commit, the allocator can
-immediately return the extra-replica buckets to the write point for reuse,
-so the overhead of this full data journalling approach is negligible in
-practice.
-
-Erasure coding involves several btrees: the stripes btree (ID 6) stores stripe
-metadata and parity checksums, the \texttt{bucket\_to\_stripe} btree (ID 26)
-maps each stripe-member bucket to the stripes referencing it, the
-\texttt{stripe\_backpointers} btree (ID 27) stores backpointers indexed by
-stripe pointers for data on invalid or removed devices (enabling stripe repair),
-the alloc btree tracks per-bucket \texttt{stripe\_refcount} and
-\texttt{stripe\_sectors} separately from \texttt{dirty\_sectors}, and after
-stripe creation each data extent receives an inline \texttt{stripe\_ptr} entry.
-Backpointers for stripe blocks point back to the stripes btree rather than the
-extents btree. Stripe fragmentation is tracked in the LRU btree so that copygc
-and stripe reuse can reclaim mostly-empty stripes.
-
-The allocator segregates EC and non-EC writes at the open-bucket level: a write
-requesting EC will only be placed in a bucket already tagged for stripe
-membership, and non-EC writes will never use such buckets. This means a bug in
-stripe creation, parity computation, or extent updating is structurally scoped
-to EC-enabled data: non-EC extents never carry \texttt{stripe\_ptr} entries
-and are never read through EC reconstruction paths. Btree nodes are never
-placed in EC buckets; this is explicitly checked and flagged as a filesystem
-inconsistency. If stripe creation fails partway (e.g.\ a crash between
-writing parity and updating extents), the extra replicas from the staging
-phase remain valid; the reconcile subsystem detects the incomplete state and
-retries.
+See \hyperref[sec:erasure-coding]{Erasure coding} in subsystem details for
+write path mechanics, stripe layout, fragmentation handling, and on-disk
+representation.
 
 \subsubsection{Device labels and targets}
 
@@ -590,47 +499,31 @@ file or directory:
 		this target on read, if none exists
 \end{description}
 
-\subsubsection{Caching}
+\subsubsection{Caching and durability}
 
-When an extent has multiple copies on different devices, some of those copies
-may be marked as cached. Buckets containing only cached data are discarded as
-needed by the allocator in LRU order.
-
-When data is moved from one device to another according to the \\
-\texttt{background\_target} option, the original copy is left in place but
-marked as cached. With the \texttt{promote\_target} option, the original copy is
-left unchanged and the new copy on the \texttt{promote\_target} device is marked
-as cached.
-
-To do writeback caching, set \texttt{foreground\_target} and
-\texttt{promote\_target} to the cache device, and \texttt{background\_target} to
-the backing device. To do writearound caching, set \texttt{foreground\_target}
-to the backing device and \texttt{promote\_target} to the cache device.
-
-\subsubsection{Durability}
-
-Some devices may be considered to be more reliable than others. For example, we
-might have a filesystem composed of a hardware RAID array and several NVME flash
-devices, to be used as cache. We can set replicas=2 so that losing any of the
-NVME flash devices will not cause us to lose data, and then additionally we can
-set durability=2 for the hardware RAID device to tell bcachefs that we don't
-need extra replicas for data on that device - data on that device will count as
-two replicas, not just one.
-
-The durability option can also be used for writethrough caching: by setting
-durability=0 for a device, it can be used as a cache and only as a cache -
-bcachefs won't consider copies on that device to count towards the number of
-replicas we're supposed to keep.
+Devices can be configured for tiered storage using the target options and
+per-device durability settings. See \hyperref[sec:devices]{Device management}
+in subsystem details for the full treatment of caching modes (writeback,
+writearound), durability counting, and how they interact with replication.
 
 \subsubsection{Splitbrain detection}
 
 When assembling a multi-device filesystem, bcachefs detects devices that have
-diverged - been mounted and modified independently. Every superblock records a
+diverged---been mounted and modified independently. Every superblock records a
 sequence number (\texttt{seq}) and write timestamp (\texttt{write\_time});
-devices with the same sequence but different write times have diverged. Since
-version 1.4, superblocks also track the last known sequence of every other
-member device: if a device's actual sequence exceeds what another member
-expected, it was modified independently while that member was offline.
+devices with the same sequence but different write times have diverged.
+
+Since version 1.4, superblocks also track the last known sequence of every
+other member device---a \emph{vector clock}. A vector clock is a
+distributed-systems technique where each participant maintains a vector of
+counters, one per participant. Each device's superblock records not just its
+own sequence number, but the last sequence number it observed for every other
+device. When devices are reassembled, bcachefs compares each device's actual
+sequence against what the other devices expected it to be: if device~A's
+actual sequence exceeds what device~B recorded for it, then A was modified
+independently while B was offline. This catches divergence even in cases where
+simple timestamp comparison would not (e.g.\ clock skew, or writes that happen
+to produce the same sequence but different content).
 
 The two common causes of splitbrain are:
 
@@ -656,131 +549,24 @@ but is only safe when no actual modifications occurred on the excluded device.
 
 \subsection{Reflink}
 
-bcachefs supports reflink, similarly to other filesystems with the same feature.
-\texttt{cp --reflink} will create a copy that shares the underlying storage.
-Reading from that file will become slightly slower - the extent pointing to that
-data is moved to the reflink btree (with a refcount added) and in the extents
-btree we leave a key that points to the indirect extent in the reflink btree,
-meaning that we now have to do two btree lookups to read from that data instead
-of just one.
+bcachefs supports reflink (\texttt{cp --reflink}, \texttt{FICLONE} ioctl),
+creating copies that share underlying storage. The original extent is moved to
+a separate reflink btree with a reference count; reads through a reflinked
+extent require two btree lookups instead of one. Writing new data over a
+reflinked range works through normal COW --- the refcount is decremented, and
+when it reaches zero the shared extent and its disk space are freed.
 
-\subsubsection{On-disk representation}
+Reflink is currently a one-way transformation: once an extent becomes indirect,
+it stays indirect even when only one reference remains. This means a file that
+was once reflinked permanently pays the double-lookup cost on reads.
 
-In the extents btree, a \texttt{KEY\_TYPE\_reflink\_p} replaces the original
-extent. It contains an index (\texttt{REFLINK\_P\_IDX}, 56 bits) pointing
-into the reflink btree (ID 7), plus \texttt{front\_pad} and
-\texttt{back\_pad} fields. In the reflink btree, a
-\texttt{KEY\_TYPE\_reflink\_v} stores the actual data pointers, CRCs, and
-compression metadata (identical to a regular \texttt{KEY\_TYPE\_extent})
-preceded by a 64-bit reference count.
+IO option propagation (compression, checksums, replicas) for shared extents is
+controlled by a security boundary: only the source file's options can propagate
+to the shared data, preventing a reflink copy from degrading another user's data
+protection settings.
 
-The pad fields exist because copygc or reconcile may split an indirect extent
-into fragments. Without the pads, fragments outside the pointer's nominal
-range would have their refcounts leaked. The pads remember the full range
-originally referenced so that triggers walk all fragments when updating
-refcounts. If the indirect extent is missing in the live data range (e.g.
-due to corruption), fsck sets the \texttt{REFLINK\_P\_ERROR} flag on the
-pointer; gaps only in the padded region adjust the pad instead.
-
-The \texttt{reflink\_p} also carries a
-\texttt{REFLINK\_P\_MAY\_UPDATE\_OPTIONS} flag that controls whether IO path
-options (compression, checksum type, replicas, targets) may propagate from the
-referencing file to the shared indirect extent. This is a security boundary: a
-reflink copy of data owned by another user must not allow the copier to
-decrease replicas or change checksum settings on data they do not own. At
-creation time, the source file's \texttt{reflink\_p} gets this flag set, but
-the destination's does not (the VFS layer does not yet pass down the
-permission context needed to determine whether the copier has write access to
-the source).
-
-\subsubsection{Creation and lifecycle}
-
-When \texttt{cp --reflink} (or the \texttt{FICLONE} ioctl) creates a reflink,
-the source extent is converted in place. A new \texttt{KEY\_TYPE\_reflink\_v}
-is allocated at the end of the reflink btree (by seeking to
-\texttt{POS\_MAX}), containing the original data pointers and a refcount
-initialized to zero. The source extent is replaced with a
-\texttt{KEY\_TYPE\_reflink\_p}. If the source is already a
-\texttt{reflink\_p}, no conversion is needed. A new \texttt{reflink\_p} is
-then created in the destination file; btree triggers on the inserts increment
-the refcount.
-
-On insertion or deletion of a \texttt{reflink\_p}, the trigger walks the full
-referenced range (including pad) in the reflink btree and increments or
-decrements the refcount on each overlapping \texttt{reflink\_v} fragment,
-expanding the pads if the indirect extent is larger than expected (due to a
-prior split). Writing new data over a \texttt{reflink\_p} requires no special
-logic: the normal btree update inserts a regular \texttt{KEY\_TYPE\_extent},
-the overwrite trigger decrements the refcount, and when a
-\texttt{reflink\_v}'s refcount reaches zero, its trigger converts the key to
-\texttt{KEY\_TYPE\_deleted}, cascading through the normal extent trigger to
-free disk space and remove backpointers.
-
-Reflink is currently a one-way transformation: once an extent becomes
-indirect, it never converts back, even when the refcount drops to 1. The
-\texttt{reflink\_v} trigger fires at refcount 0 to delete the indirect
-extent, but does not de-indirect at refcount 1 because the trigger would
-need to walk transaction updates to find the sole remaining
-\texttt{reflink\_p}, and operations like \texttt{fcollapse} and
-\texttt{finsert} can cause transient refcount fluctuations (1 $\to$ 0
-$\to$ 1) within a single transaction as extents are moved around. With IO
-option propagation, de-indirecting at refcount 1 is becoming a more
-pressing concern, since a lone indirect extent with one reference still
-pays the cost of an extra btree lookup on every read.
-Additionally, \texttt{reflink\_p} keys are not merged during btree
-compaction because a merged pointer could span an unbounded number of
-\texttt{reflink\_v} fragments; merging requires triggers to walk pending
-transaction updates and diff overlapping \texttt{reflink\_p} ranges.
-
-\subsubsection{IO option propagation}
-
-A \texttt{reflink\_v} has no backpointer to its owning inode, so it cannot
-look up per-inode IO options at read time. Instead, the indirect extent
-embeds a \texttt{bch\_extent\_reconcile} entry that stores the desired IO
-options (compression, checksum type, replicas, targets) alongside
-\texttt{*\_from\_inode} flags recording which options came from a per-inode
-setting rather than the filesystem default. At creation time no reconcile
-entry is added; the data is simply copied verbatim from the source extent.
-
-When reconcile scans the extents btree and encounters a \texttt{reflink\_p}
-with \texttt{REFLINK\_P\_MAY\_UPDATE\_OPTIONS} set, it follows through to
-the corresponding \texttt{reflink\_v} keys in the reflink btree and updates
-their embedded reconcile entries with the referencing inode's current
-options. If the on-disk data does not match (e.g. the inode now requests
-zstd compression but the data is uncompressed), the reconcile entry's
-\texttt{need\_rb} bits are set and the data is scheduled for background
-rewrite. Without the flag, reconcile does not propagate that
-\texttt{reflink\_p}'s inode options to the indirect extent.
-
-The \texttt{reflink\_v} can only hold one set of IO options at a time. Since
-only the source file's \texttt{reflink\_p} currently gets the
-\texttt{MAY\_UPDATE\_OPTIONS} flag, there is no conflict when multiple files
-reference the same indirect extent: the source file's options take
-precedence, and other referencing files cannot influence the indirect
-extent's IO path behavior. The read path always uses the CRC and compression
-metadata stored in the \texttt{reflink\_v}'s extent entries (reflecting how
-the data was actually written), regardless of the referencing file's current
-options; the referencing inode's options only affect promote decisions.
-
-\subsubsection{Interaction with snapshots}
-
-The reflink btree is not snapshot-aware: \texttt{reflink\_v} keys are shared
-across all snapshots. The \texttt{reflink\_p} keys in the extents btree are
-snapshot-aware, so when a file is snapshotted both subvolumes see the same
-\texttt{reflink\_p} keys through normal snapshot visibility. Writing to
-either subvolume creates a new extent in that snapshot and decrements the
-shared refcount; the other snapshot's \texttt{reflink\_p} is unchanged.
-
-\subsection{Inline data extents}
-
-bcachefs supports inline data extents, controlled by the \texttt{inline\_data}
-option (on by default). When the end of a file is being written and is smaller
-than \texttt{min(blocksize/2, 1024)} bytes, it will be written as an inline data
-extent. Inline data extents can also be reflinked: the inline data is moved to
-the reflink btree as a \texttt{KEY\_TYPE\_indirect\_inline\_data} (which carries
-a refcount and the inline data bytes) and a \texttt{KEY\_TYPE\_reflink\_p} is
-left in the extents btree, following the same mechanics as regular extent
-reflinks.
+See \hyperref[sec:reflink]{Reflink} in subsystem details for the full
+on-disk representation, lifecycle mechanics, and snapshot interaction.
 
 \subsection{Subvolumes and snapshots}
 
@@ -795,54 +581,6 @@ as with btrfs, but instead are based on versioning of individual keys in the
 btrees. Many thousands or millions of snapshots can be created, with the only
 limitation being disk space.
 
-\subsubsection{Subvolume and snapshot architecture}
-
-A subvolume is a named entry point into the filesystem: it holds a root inode
-number and a snapshot ID. The snapshot ID links the subvolume to a leaf node in
-the snapshots btree, which records the snapshot tree structure: parent, children
-(up to two), depth, and a skiplist for fast ancestor queries. Only leaf snapshot
-nodes are associated with subvolumes; interior nodes exist purely for tree
-structure. Snapshot trees are grouped under \texttt{snapshot\_tree} entries,
-each recording the root snapshot and a master subvolume. Each subvolume carries
-a \texttt{BCH\_SUBVOLUME\_SNAP} flag that records whether it was created as a
-snapshot of another subvolume; exactly one subvolume per snapshot tree (the
-master) does not have this flag set.
-
-Four btrees are snapshot-aware: extents, inodes, dirents, and xattrs. Every key
-in these btrees includes a snapshot ID in its position
-(\texttt{bpos.snapshot}), so keys from different snapshots coexist in the same
-btree ordered by (inode, offset, snapshot). When reading from a snapshot, the
-iterator walks up the snapshot tree: a key is visible if its snapshot ID is an
-ancestor of (or equal to) the requested snapshot, and no closer ancestor has
-overwritten it. Deletion within a snapshot inserts a whiteout key that blocks
-visibility of the ancestor's version without affecting other snapshots. To
-avoid a linear parent-pointer walk on every lookup, each snapshot node stores a
-128-bit ancestor bitmap for O(1) checks when ancestor and descendant are
-within 128 snapshot IDs of each other, plus a randomized skiplist of three
-ancestor IDs for O(log $n$) convergence on deeper trees. During early
-recovery, before this data is validated, queries fall back to a simple parent
-walk.
-
-When a snapshot is created, two new snapshot nodes are allocated as children of
-the source subvolume's current snapshot node. One child becomes the new
-snapshot's ID; the other replaces the source subvolume's snapshot ID. No keys
-are copied: both children inherit visibility of all ancestor keys through the
-snapshot tree. Subsequent writes to either subvolume create new keys tagged with
-that subvolume's snapshot ID, diverging only where modifications occur.
-
-Deleting a snapshot marks it for asynchronous cleanup by a background thread
-that must walk every snapshot-aware btree to remove or relocate affected keys.
-For leaf snapshots, keys are deleted or converted to whiteouts where ancestor
-visibility must be preserved. For interior nodes that have lost all but one
-child, keys are moved to the surviving child before the node is removed. The
-eytzinger-layout search trees within each btree node make this scan efficient:
-they allow cache-friendly binary search over the packed keys, so the deletion
-thread can seek through large btree nodes without excessive cache misses even
-when processing millions of keys. Interior node removal is deferred to the next
-mount because it requires updating depth and skiplist fields across the
-subtree. Progress can be monitored via
-\texttt{/sys/fs/bcachefs/<uuid>/snapshot\_delete\_status}.
-
 The following subcommands exist for managing subvolumes and snapshots:
 \begin{itemize}
 	\item \texttt{bcachefs subvolume create}: Create a new, empty subvolume
@@ -855,6 +593,9 @@ The following subcommands exist for managing subvolumes and snapshots:
 A subvolume can also be deleted with a normal rmdir after deleting all the
 contents, as with \texttt{rm -rf}. Still to be implemented: recursive snapshot
 creation and a method for recursively listing subvolumes.
+
+See \hyperref[sec:snapshots]{Subvolumes and snapshots} in subsystem details
+for the full architecture, key visibility model, and snapshot lifecycle.
 
 \subsection{Quotas}
 
@@ -901,6 +642,22 @@ while the original is preserved for display.
 The Unicode version used for case folding is hardcoded to Unicode 12.1.0. The
 kernel will fail to mount (or use an older version correctly) if built with
 different Unicode tables.
+
+\subsection{Migration}
+
+\texttt{bcachefs migrate} converts an existing filesystem (ext4, XFS, etc.)
+to bcachefs in place, without reformatting or copying data to a separate
+device. The original data is preserved and incorporated into the new bcachefs
+filesystem. After migration, \texttt{bcachefs migrate-superblock} writes a
+standard superblock so the filesystem can be mounted normally.
+
+\subsection{Images}
+
+\texttt{bcachefs image create} builds a bcachefs filesystem image from a
+directory tree, suitable for embedding in OS images, containers, or VM
+disks. \texttt{bcachefs image update} incrementally updates an existing image
+to reflect changes in the source directory, minimizing the amount of data
+rewritten.
 
 \section{Management}
 
@@ -950,200 +707,73 @@ would be missing.
 The \texttt{-o verbose} option enables additional log output during the mount
 process.
 
-\subsection{Fsck}
+\subsection{Monitoring}
 
-The \texttt{bcachefs fsck} subcommand (also available as \texttt{fsck.bcachefs})
-can run fsck in userspace (\texttt{-K}), in the kernel at mount time
-(\texttt{-k}), or online on a mounted filesystem, selecting the mode
-automatically or via command line options. The in-kernel offline mode is useful
-when an older bcachefs-tools binary cannot handle the filesystem version. In
-all cases the exact same fsck implementation runs - the recovery passes
-described above. Running in userspace allows stopping with ctrl-c and prompting
-for fixes; \texttt{bcachefs fsck -y} auto-fixes, \texttt{-n} runs read-only.
-
-The \texttt{-o nochanges} mount option disallows any writes to the underlying
-devices, pinning dirty data in memory if journal replay is necessary. This is
-the primary tool for safe inspection of a damaged filesystem: it allows
-recovery to run and metadata to be read without risking further damage. It is
-also used for testing on-disk format upgrades (\texttt{-o version\_upgrade})
-before committing to them. \texttt{bcachefs fsck -n} implies
-\texttt{-o nochanges}; \texttt{bcachefs fsck -ny} can be used to test
-filesystem repair in dry-run mode.
-
-When running fsck at mount time via \texttt{-o fsck}, use
-\texttt{-o fix\_errors} to auto-fix. Before committing to a repair, test it
-with \texttt{-o ro,nochanges,fsck,fix\_errors} first: this runs the full repair
-in memory without writing to disk, allowing the filesystem to be mounted and
-its contents verified before repeating without \texttt{nochanges}.
-
-Online fsck runs the validation passes that are marked as safe for concurrent
-use (\texttt{PASS\_ONLINE}) on a mounted, read-write filesystem. Since version
-1.19, the default error action is \texttt{errors=fix\_safe}: when the filesystem
-detects a metadata inconsistency during normal operation - for example, a dirent
-pointing to a nonexistent inode - it automatically schedules the relevant repair
-pass to run online in the background, without requiring user intervention, a
-remount, or taking the filesystem offline. Errors that are not safe to
-auto-repair cause the filesystem to go emergency read-only, with a message
-suggesting to run fsck and report the issue to developers so it can be marked
-for self-healing in future versions.
-
-\subsection{Self-healing}
-
-Bcachefs classifies metadata errors into three tiers based on severity and
-whether a safe automatic repair is known:
+Three commands provide a comprehensive view of filesystem health and
+performance:
 
 \begin{description}
-\item[Autofix errors (\texttt{FSCK\_AUTOFIX})] Inconsistencies with a
-  well-understood, always-safe repair that can be applied immediately inline
-  during normal operation, without interrupting I/O or requiring a recovery
-  pass. An example is a missing journal entry replica marker: the repair is
-  simply to write the correct marker, with no data at risk.
+\item[\texttt{bcachefs fs usage}] Displays filesystem space usage broken out
+  by data type (superblock, journal, btree, data, cached data, parity), by
+  which sets of devices extents are replicated across, and per-device usage
+  including fragmentation from partially-used buckets. This is the primary
+  tool for understanding where space is going and how data is distributed
+  across devices.
 
-\item[Fixable errors (\texttt{FSCK\_CAN\_FIX})] Inconsistencies that have a
-  known repair procedure but require a dedicated recovery pass to execute
-  safely. Under \texttt{errors=fix\_safe} (the default since version 1.19),
-  detecting such an error schedules the relevant recovery pass to run online
-  in the background. The pass runs concurrently with normal filesystem
-  operation without taking the filesystem offline, provided it carries the
-  \texttt{PASS\_ONLINE} flag. Errors detected during recovery that would
-  rewind the recovery sequence are handled specially: recovery restarts from
-  the affected pass rather than aborting.
+\item[\texttt{bcachefs fs top}] Real-time display of btree operations by
+  process, similar to \texttt{top(1)} for CPU usage. Shows which processes are
+  generating btree reads, writes, and transaction restarts. This is the
+  primary tool for diagnosing metadata performance problems---if the
+  filesystem feels slow, \texttt{fs top} will show what's generating the
+  load. Every counter displayed by \texttt{fs top} has a corresponding
+  tracepoint, so once you identify which operation is hot, you can drill
+  down into individual events with \texttt{perf trace} or \texttt{bpftrace}.
 
-\item[Inconsistent errors] Structural corruption for which no safe automatic
-  repair is known, or where continuing operation risks further data loss. These
-  trigger emergency read-only regardless of the \texttt{errors} setting (except
-  \texttt{errors=continue}, which logs the error and proceeds). The filesystem
-  logs a message directing the administrator to run fsck. If a repair procedure
-  is subsequently developed and deemed safe, the error can be reclassified to
-  \texttt{FSCK\_CAN\_FIX} in a future kernel release.
+\item[\texttt{bcachefs fs timestats}] Real-time display of operation latency
+  statistics: min, max, mean, standard deviation, and EWMA for both duration
+  and inter-arrival time. Covers all major IO and internal operations (data
+  reads, data writes, btree reads, btree splits, journal flushes, copygc,
+  etc.). This is the primary tool for understanding latency---if an
+  operation is slow, timestats will show which stage of the pipeline is
+  responsible.
 \end{description}
 
-The \texttt{errors} mount option controls the policy for the second and third
-tiers; see \S\ref{sec:error-actions}. The default \texttt{fix\_safe} enables
-background self-repair for fixable errors while taking the conservative
-read-only path for inconsistent ones.
+For deeper investigation, sysfs
+(\texttt{/sys/fs/bcachefs/<uuid>/}) provides per-option tunables, persistent
+counters, and internal state; debugfs
+(\texttt{/sys/kernel/debug/bcachefs/<uuid>/}) provides btree contents,
+transaction state, lock contention, and journal pin diagnostics. See
+\S\ref{sec:debugging} for details.
 
-Every error detection event is recorded as a persistent count in the
-superblock's errors section. These counts survive across reboots and accumulate
-over the filesystem's lifetime, providing an audit trail of what has been
-detected and repaired. The counts are visible in \texttt{bcachefs show-super}
-output (included by default) and via the sysfs \texttt{errors} file. A count
-of zero for an error type means it has never been detected; a nonzero count
-means it was detected and, if the error type has \texttt{FSCK\_CAN\_FIX},
-automatically scheduled for repair.
+\subsection{Journal tuning}
 
-\subsection{Status of data}
+The journal has tunables that affect filesystem performance; see
+\hyperref[sec:journal]{Journal} in subsystem details for the full architecture.
+The key tunables:
 
-The \texttt{bcachefs fs usage} may be used to display filesystem usage broken
-out in various ways. Data usage is broken out by type: superblock, journal,
-btree, data, cached data, and parity, and by which sets of devices extents are
-replicated across. We also give per-device usage which includes fragmentation
-due to partially used buckets.
+\begin{description}
+\item[\texttt{journal\_flush\_delay}] Milliseconds before auto-flushing
+  (default 1000). Sync and fsync force immediate flushes.
+\item[\texttt{journal\_flush\_disabled}] Disables sync/fsync flushes. The
+  \texttt{journal\_flush\_delay} timer still applies, so at most one second of
+  work is lost on crash. Useful on workstations, less appropriate on servers.
+\item[\texttt{journal\_reclaim\_delay}] Background reclaim interval (default
+  100\,ms).
+\end{description}
 
-\subsection{Journal}
-
-The journal has a number of tunables that affect filesystem performance. Journal
-commits are fairly expensive operations as they require issuing FLUSH and FUA
-operations to the underlying devices. By default, we issue a journal flush one
-second after a filesystem update has been done; this is controlled with the
-\texttt{journal\_flush\_delay} option, which takes a parameter in milliseconds.
-
-Filesystem sync and fsync operations issue journal flushes; this can be disabled
-with the \texttt{journal\_flush\_disabled} option - the
-\texttt{journal\_flush\_delay} option will still apply, and in the event of a
-system crash we will never lose more than (by default) one second of work. This
-option may be useful on a personal workstation or laptop, and perhaps less
-appropriate on a server.
-
-The journal reclaim thread runs in the background, kicking off btree node writes
-and btree key cache flushes to free up space in the journal. Even in the absence
-of space pressure it will run slowly in the background: this is controlled by
-the \texttt{journal\_reclaim\_delay} parameter, with a default of 100
-milliseconds.
-
-The journal should be sized sufficiently that bursts of activity do not fill up
-the journal too quickly; also, a larger journal means that we can queue up
-larger btree writes. The \texttt{bcachefs device resize-journal} can be used for
-resizing the journal on disk on a particular device - it can be used on a
-mounted or unmounted filesystem. Note that post-format journal resizing
-inherently fragments the journal (allocating new buckets that may not be
-contiguous), so it is best done on a relatively empty device and as few times
-as possible; reducing journal size is not currently implemented. Current journal
-utilization can be inspected via
-\texttt{/sys/fs/bcachefs/<uuid>/internal/journal\_debug}, which reports dirty
-entries out of total capacity, sequence numbers, watermark level, and reclaim
-statistics.
-
-\subsubsection{Journal rewind}
-
-The \texttt{journal\_rewind} mount option accepts a journal sequence number and
-rolls back the most important filesystem metadata to that point, discarding
-subsequent updates and fixing up inconsistencies afterwards. This is a tool
-specifically for reverting changes from a bug in recovery that irreversibly
-corrupted or deleted metadata, or (combined with \texttt{-o nochanges}) for
-attempting to recover recently deleted files. It drops all leaf-level btree
-updates to non-allocator btrees at or above the specified sequence number, then
-automatically triggers a full fsck to rebuild allocation metadata.
-
-Journal rewind is used in conjunction with \texttt{bcachefs list\_journal} to
-identify the sequence number to rewind to. The
-\texttt{journal\_transaction\_names} option (on by default) is required for
-journal rewind: it controls whether \texttt{BCH\_JSET\_ENTRY\_overwrite}
-entries (the old values being replaced) are stored in the journal, which is
-what rewind replays to undo changes. It also records which function created
-each journal entry, making it easier to identify which transactions caused a
-problem. Since rewind operates on metadata only, data in
-buckets that have been reused (generation incremented and overwritten with new
-data) is unrecoverable, and \texttt{nocow} data cannot be rolled back at all.
-The journal records allocator updates, so \texttt{list\_journal -b alloc} can
-identify when specific buckets were recycled. The rewind window is bounded by
-the journal size: only sequences between \texttt{last\_seq} (oldest entry still
-on disk) and the current sequence are available, so a larger journal provides a
-deeper rewind history.
+The journal should be sized so that bursts of activity do not fill it; a
+larger journal also allows larger batched btree writes. Use
+\texttt{bcachefs device resize-journal} to grow the journal online. Current
+utilization is visible via
+\texttt{/sys/fs/bcachefs/<uuid>/internal/journal\_debug}.
 
 \subsection{Device management}
 
-\subsubsection{Filesystem resize}
-
-A filesystem can be resized on a particular device with the
-\texttt{bcachefs device resize} subcommand. Currently only growing is supported,
-not shrinking.
-
-\subsubsection{Device add/removal}
-
-The following subcommands exist for adding and removing devices from a mounted
-filesystem:
-\begin{itemize}
-	\item \texttt{bcachefs device add}: Formats and adds a new device to an
-		existing filesystem.
-	\item \texttt{bcachefs device remove}: Permanently removes a device from
-		an existing filesystem. Offline devices can be removed by index
-		(found in the superblock via \texttt{show-super}).
-	\item \texttt{bcachefs device online}: Connects a device to a running
-		filesystem that was mounted without it (i.e. in degraded mode)
-	\item \texttt{bcachefs device offline}: Disconnects a device from a
-		mounted filesystem without removing it.
-	\item \texttt{bcachefs device evacuate}: Migrates data off of a
-		particular device to prepare for removal, setting it read-only
-		if necessary.
-	\item \texttt{bcachefs device set-state}: Changes the state of a member
-		device: one of rw (readwrite), ro (readonly), evacuating, or spare.
-
-		An evacuating device is considered to have 0 durability, and
-		replicas on that device won't be counted towards the number of
-		replicas an extent should have - as a result, reconcile will
-		write new replicas elsewhere and drop the old ones, evacuating
-		all data from the device. bcachefs will still attempt to read
-		from evacuating devices.
-\end{itemize}
-
-The \texttt{bcachefs device remove}, \texttt{bcachefs device offline} and
-\texttt{bcachefs device set-state} commands take force options for when they
-would leave the filesystem degraded or with data missing.
-
-\subsubsection{Device labeling}
-Devices can be labeled after formatting by setting \\
-\texttt{/sys/fs/bcachefs/<uuid>/dev-<device-id>/label}
+Devices can be added, removed, resized, and taken online/offline at any time
+without unmounting. The \texttt{bcachefs device} subcommands handle all device
+lifecycle operations; see \hyperref[sec:devices]{Device management} in
+subsystem details for the full treatment of device states, durability,
+caching, degraded mode, and error tracking.
 
 \subsection{Data management}
 
@@ -1186,9 +816,217 @@ completes for specified work types. The \texttt{reconcile\_enabled} and
 
 \subsubsection{Scrub}
 
-The \texttt{bcachefs data scrub} command validates all data with checksums,
-fixing bitrot when a valid copy can be found. Affected file paths are currently
-logged to the kernel log only.
+Scrub reads all data on a running filesystem and verifies checksums, detecting
+silent data corruption (bitrot). When a checksum mismatch is found and a valid
+redundant copy exists (from replication or erasure coding), the corrupted copy
+is automatically repaired by rewriting it from the good copy. Scrub walks data
+in physical (LBA) order using \hyperref[sec:backpointers]{backpointers}, which is efficient for rotational
+devices and avoids the random access pattern that would result from walking the
+logical extent tree.
+
+Scrub can be run on a specific device or on all devices in the filesystem.
+Progress is reported via sysfs and can be monitored with
+\texttt{bcachefs data scrub}. Affected file paths are currently logged to the
+kernel log only.
+
+\section{Repair and recovery}
+
+bcachefs is designed to detect, report, and repair problems at every level:
+inline during normal IO, in the background via scheduled recovery passes, and
+through explicit administrator-driven tools. This section covers all of these
+mechanisms.
+
+\subsection{Online self-healing}
+
+Bcachefs classifies metadata errors into three tiers based on severity and
+whether a safe automatic repair is known:
+
+\begin{description}
+\item[Autofix errors (\texttt{FSCK\_AUTOFIX})] Inconsistencies with a
+  well-understood, always-safe repair that can be applied immediately inline
+  during normal operation, without interrupting I/O or requiring a recovery
+  pass. An example is a missing journal entry replica marker: the repair is
+  simply to write the correct marker, with no data at risk.
+
+\item[Fixable errors (\texttt{FSCK\_CAN\_FIX})] Inconsistencies that have a
+  known repair procedure but require a dedicated recovery pass to execute
+  safely. Under \texttt{errors=fix\_safe} (the default since version 1.19),
+  detecting such an error schedules the relevant recovery pass to run online
+  in the background. The pass runs concurrently with normal filesystem
+  operation without taking the filesystem offline, provided it carries the
+  \texttt{PASS\_ONLINE} flag. Errors detected during recovery that would
+  rewind the recovery sequence are handled specially: recovery restarts from
+  the affected pass rather than aborting.
+
+\item[Inconsistent errors] Structural corruption for which no safe automatic
+  repair is known, or where continuing operation risks further data loss. These
+  trigger emergency read-only regardless of the \texttt{errors} setting (except
+  \texttt{errors=continue}, which logs the error and proceeds). The filesystem
+  logs a message directing the administrator to run fsck. If a repair procedure
+  is subsequently developed and deemed safe, the error can be reclassified to
+  \texttt{FSCK\_CAN\_FIX} in a future kernel release.
+\end{description}
+
+The \texttt{errors} mount option controls the policy for the second and third
+tiers; see \S\ref{sec:error-actions}. The default \texttt{fix\_safe} enables
+background self-repair for fixable errors while taking the conservative
+read-only path for inconsistent ones.
+
+\textbf{Read path self-healing}: When a read detects a checksum mismatch and
+a valid replica exists, the corrupted copy is automatically repaired by
+rewriting it from the good copy. This happens transparently on every read
+without administrator intervention. If erasure coding is available, data can
+be reconstructed from parity even with no good replica.
+
+\textbf{Error accounting}: Every error detection event is recorded as a
+persistent count in the superblock's errors section. These counts survive
+across reboots and accumulate over the filesystem's lifetime, providing an
+audit trail of what has been detected and repaired. The counts are visible in
+\texttt{bcachefs show-super} output and via the sysfs \texttt{errors} file.
+
+\subsection{Fsck}
+
+The \texttt{bcachefs fsck} subcommand (also available as \texttt{fsck.bcachefs})
+can run fsck in userspace (\texttt{-K}), in the kernel at mount time
+(\texttt{-k}), or online on a mounted filesystem, selecting the mode
+automatically or via command line options. The in-kernel offline mode is useful
+when an older bcachefs-tools binary cannot handle the filesystem version. In
+all cases the exact same fsck implementation runs---the recovery passes
+described in the introduction. Running in userspace allows stopping with
+ctrl-c and prompting for fixes; \texttt{bcachefs fsck -y} auto-fixes,
+\texttt{-n} runs read-only.
+
+Online fsck runs the validation passes marked as safe for concurrent use
+(\texttt{PASS\_ONLINE}) on a mounted, read-write filesystem. Combined with
+\texttt{errors=fix\_safe}, this means most metadata inconsistencies are
+detected and repaired automatically without administrator intervention.
+
+\subsubsection{Safe inspection with nochanges}
+
+The \texttt{-o nochanges} mount option disallows any writes to the underlying
+devices, pinning dirty data in memory if journal replay is necessary. This is
+the primary tool for safe inspection of a damaged filesystem: it allows
+recovery to run and metadata to be read without risking further damage.
+
+\texttt{bcachefs fsck -n} implies \texttt{-o nochanges}. To test a repair
+before committing:
+\texttt{-o ro,nochanges,fsck,fix\_errors} runs the full repair in memory
+without writing to disk, allowing the filesystem to be mounted and its
+contents verified before repeating without \texttt{nochanges}.
+
+\subsection{Journal rewind}
+
+The \texttt{journal\_rewind} mount option accepts a journal sequence number and
+rolls back filesystem metadata to that point, discarding subsequent updates and
+fixing up inconsistencies afterwards. This is a disaster recovery tool for
+reverting damage from a bug in recovery that irreversibly corrupted or deleted
+metadata, or (combined with \texttt{-o nochanges}) for attempting to recover
+recently deleted files.
+
+Journal rewind drops all leaf-level btree updates to non-allocator btrees at
+or above the specified sequence number, then automatically triggers a full
+fsck to rebuild allocation metadata.
+
+\subsubsection{Usage}
+
+Journal rewind is used in conjunction with \texttt{bcachefs list\_journal} to
+identify the sequence number to rewind to. The
+\texttt{journal\_transaction\_names} option (on by default) is required: it
+controls whether \texttt{BCH\_JSET\_ENTRY\_overwrite} entries (the old values
+being replaced) are stored in the journal, which is what rewind replays to undo
+changes. It also records which function created each journal entry, making it
+easier to identify which transactions caused a problem.
+
+\subsubsection{Limitations}
+
+Since rewind operates on metadata only, data in buckets that have been reused
+(generation incremented and overwritten with new data) is unrecoverable, and
+\texttt{nocow} data cannot be rolled back at all. The journal records allocator
+updates, so \texttt{list\_journal -b alloc} can identify when specific buckets
+were recycled. The rewind window is bounded by the journal size: only sequences
+between \texttt{last\_seq} (oldest entry still on disk) and the current
+sequence are available, so a larger journal provides a deeper rewind history.
+
+\subsection{Disaster recovery}
+
+bcachefs is designed to recover from catastrophic metadata damage---not just
+the routine inconsistencies that fsck handles, but situations where entire
+btrees are lost or corrupted beyond normal repair. The key insight is that
+the filesystem's data is recoverable as long as the leaf nodes of the extents
+and dirents btrees survive, because those two btrees contain the essential
+mappings: which data belongs to which file, and which files exist in which
+directories. Everything else can be reconstructed from them.
+
+In practical terms: if every btree except extents and dirents is destroyed,
+recovery can still place every file's data in its correct directory with its
+correct name. File sizes may be slightly off if inode metadata is lost
+(inodes record the precise file size, while extents only record block-aligned
+ranges), and permissions, ownership, and timestamps will be lost with the
+inodes, but the actual data---the bytes the user cares about---will be intact
+and in the right place. This is a much stronger recovery guarantee than most
+filesystems provide.
+
+\subsubsection{Reconstruction passes}
+
+When normal recovery detects structural damage, it automatically schedules
+heavier reconstruction passes:
+
+\begin{description}
+\item[\texttt{scan\_for\_btree\_nodes} + \texttt{check\_topology}] These two
+  passes work together. When \texttt{check\_topology} finds missing or
+  unreachable btree nodes, it schedules \texttt{scan\_for\_btree\_nodes}, which
+  physically scans every device for valid btree node headers (identified by
+  magic number), deduplicates replicas, and builds a table of recovered nodes.
+  Then \texttt{check\_topology} runs again, using the scan results to
+  reconstruct missing interior nodes and reconnect orphaned subtrees. Together
+  they can recover a btree even when the root node and multiple levels of
+  interior nodes are lost---as long as the leaf nodes are intact. This reads
+  every sector of every device and may take considerable time on large
+  filesystems.
+
+\item[\texttt{reconstruct\_snapshots}] Scheduled when the snapshots btree
+  itself is lost, or when references to missing snapshots cannot be resolved
+  by deletion alone. Scans all snapshot-aware btrees to find which snapshot
+  IDs are actually in use, then reconstructs the snapshot tree structure from
+  that evidence.
+
+\item[\texttt{check\_allocations}] Full allocation rebuild: walks all btrees
+  marking which buckets are referenced, then compares against the alloc btree
+  to repair data types, sector counts, and stripe references. This is the
+  pass that makes it possible to lose the entire alloc btree and recover---the
+  allocation state is fully derivable from the extent and backpointer btrees.
+\end{description}
+
+These passes are not part of normal recovery and are only triggered when
+damage is detected. They run automatically---no special flags or manual
+intervention is required. After reconstruction, the filesystem schedules
+a full fsck to validate the rebuilt metadata.
+
+\subsubsection{Superblock recovery}
+
+The superblock itself has multiple layers of redundancy. Up to 61 backup
+copies can be stored on each device, and every device in the filesystem has
+a complete copy of the superblock. The \texttt{bcachefs recover-super} command
+can reconstruct a completely overwritten primary superblock from backup copies
+on the same device or from any other device in the filesystem.
+
+\subsubsection{Diagnostic tools}
+
+When investigating damage before attempting repair:
+
+\begin{description}
+\item[\texttt{bcachefs fsck -n}] Runs all recovery and repair passes without
+  writing to disk (\texttt{-o nochanges}). Shows what would be repaired.
+\item[\texttt{bcachefs list}] Dumps btree contents for offline inspection.
+  Useful for examining what data survived in specific btrees.
+\item[\texttt{bcachefs list\_journal}] Lists journal contents with sequence
+  numbers, transaction names, and per-btree filtering. Essential for
+  understanding what happened before a crash and for identifying journal
+  rewind targets.
+\item[\texttt{bcachefs dump}] Exports all metadata as qcow2 images for
+  offline analysis, without including user data. For encrypted filesystems,
+  the passphrase must first be removed with \texttt{bcachefs remove-passphrase}.
+\end{description}
 
 \section{Command reference}
 
@@ -1276,6 +1114,7 @@ Valid hash types for string hash tables are:
 \bchdoc{str-hash-opts}
 
 \section{Debugging tools}
+\label{sec:debugging}
 
 \subsection{Sysfs interface}
 
@@ -1472,6 +1311,49 @@ filesystems) as qcow2 images: when encountering issues that \texttt{fsck} can
 not recover from and need attention from the developers, this makes it possible
 to send the developers only the required metadata. Encrypted filesystems must
 first be unlocked with \texttt{bcachefs remove-passphrase}.
+
+\section{Subsystem details}
+
+\subsection{Data paths}
+
+This section describes the end-to-end flow of read and write operations through
+the filesystem.
+
+\bchdoc{data-paths}
+
+\subsection{Allocator}
+
+\bchdoc{allocator}
+
+\subsection{Subvolumes and snapshots}
+\label{sec:snapshots}
+
+\bchdoc{snapshots}
+
+\subsection{Superblock}
+\label{sec:superblock}
+
+The superblock stores all filesystem-wide configuration and per-device
+metadata. Each device maintains its own copy, and the copies are kept in sync:
+most fields are shared across all devices, with the exception of the device
+index and journal bucket locations.
+
+\bchdoc{superblock}
+
+\subsection{Device management}
+\label{sec:devices}
+
+\bchdoc{device-management}
+
+\subsection{Journal}
+\label{sec:journal}
+
+\bchdoc{journal}
+
+\subsection{Btrees}
+\label{sec:btrees}
+
+\bchdoc{btrees}
 
 \section{ioctl interface}
 

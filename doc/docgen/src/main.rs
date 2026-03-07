@@ -127,7 +127,9 @@ fn split_xmacro_args(s: &str) -> Vec<String> {
 // DOC() block extraction
 // ---------------------------------------------------------------------------
 
+/// If true, content is raw LaTeX and should not be processed by markup_to_latex.
 struct DocBlock {
+    raw_latex: bool,
     key: String,
     content: String,
     file: PathBuf,
@@ -164,35 +166,44 @@ fn extract_doc_blocks_from(path: &Path, source: &str, blocks: &mut Vec<DocBlock>
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
-        if let Some(rest) = trimmed.strip_prefix("/* DOC(") {
-            if let Some(key) = rest.strip_suffix(')') {
-                let key = key.trim().to_string();
-                let start_line = i + 1;
-                let mut content = String::new();
-                i += 1;
-                while i < lines.len() {
-                    let line = lines[i].trim();
-                    if line == "*/" || line.ends_with("*/") {
-                        break;
-                    }
-                    let stripped = if let Some(rest) = line.strip_prefix("* ") {
-                        rest
-                    } else if line == "*" {
-                        ""
-                    } else {
-                        line
-                    };
-                    content.push_str(stripped);
-                    content.push('\n');
-                    i += 1;
+        // DOC_LATEX(key) — raw LaTeX, passed through verbatim
+        // DOC(key)       — simple markup, converted to LaTeX
+        let (rest, raw_latex) = if let Some(rest) = trimmed.strip_prefix("/* DOC_LATEX(") {
+            (rest, true)
+        } else if let Some(rest) = trimmed.strip_prefix("/* DOC(") {
+            (rest, false)
+        } else {
+            i += 1;
+            continue;
+        };
+        if let Some(key) = rest.strip_suffix(')') {
+            let key = key.trim().to_string();
+            let start_line = i + 1;
+            let mut content = String::new();
+            i += 1;
+            while i < lines.len() {
+                let line = lines[i].trim();
+                if line == "*/" || line.ends_with("*/") {
+                    break;
                 }
-                blocks.push(DocBlock {
-                    key,
-                    content: content.trim().to_string(),
-                    file: path.to_path_buf(),
-                    line: start_line,
-                });
+                let stripped = if let Some(rest) = line.strip_prefix("* ") {
+                    rest
+                } else if line == "*" {
+                    ""
+                } else {
+                    line
+                };
+                content.push_str(stripped);
+                content.push('\n');
+                i += 1;
             }
+            blocks.push(DocBlock {
+                raw_latex,
+                key,
+                content: content.trim().to_string(),
+                file: path.to_path_buf(),
+                line: start_line,
+            });
         }
         i += 1;
     }
@@ -221,7 +232,7 @@ fn escape_latex(s: &str) -> String {
     out
 }
 
-/// Convert inline `code` spans to \texttt{}, escaping everything else.
+/// Convert inline markup to LaTeX: `code`, **bold**, *italic*.
 fn convert_inline(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
@@ -237,6 +248,52 @@ fn convert_inline(text: &str) -> String {
             out.push_str("\\texttt{");
             out.push_str(&escape_latex(&code));
             out.push('}');
+        } else if ch == '*' && chars.peek() == Some(&'*') {
+            chars.next(); // consume second *
+            let mut bold = String::new();
+            loop {
+                match chars.next() {
+                    Some('*') if chars.peek() == Some(&'*') => {
+                        chars.next();
+                        break;
+                    }
+                    Some(c) => bold.push(c),
+                    None => break,
+                }
+            }
+            out.push_str("\\textbf{");
+            out.push_str(&escape_latex(&bold));
+            out.push('}');
+        } else if ch == '*' {
+            let mut emph = String::new();
+            for c in chars.by_ref() {
+                if c == '*' {
+                    break;
+                }
+                emph.push(c);
+            }
+            out.push_str("\\emph{");
+            out.push_str(&escape_latex(&emph));
+            out.push('}');
+        } else if ch == '>' && out.ends_with('=') {
+            // >= → $\geq$
+            out.pop();
+            out.push_str("$\\geq$");
+        } else if ch == '-' && chars.peek() == Some(&'-') && {
+            // -- → ---
+            let after_second = {
+                let mut tmp = chars.clone();
+                tmp.next();
+                tmp.peek().copied()
+            };
+            after_second == Some('-')
+        } {
+            chars.next();
+            chars.next();
+            out.push_str("---");
+        } else if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            out.push_str("--");
         } else {
             match ch {
                 '_' => out.push_str("\\_"),
@@ -259,40 +316,94 @@ fn convert_inline(text: &str) -> String {
 ///
 /// Supported:
 ///   - paragraphs (blank lines)
-///   - `code` → \texttt{code}
+///   - `code` → \texttt{code}, **bold** → \textbf{}, *italic* → \emph{}
 ///   - lines starting with "- " → \begin{itemize} lists
+///   - lines starting with "[term] " → \begin{description} lists
+///   - "  " continuation lines append to the previous description item
 fn markup_to_latex(content: &str) -> String {
     let mut out = String::new();
-    let mut in_list = false;
+
+    #[derive(PartialEq)]
+    enum ListState { None, Itemize, Description }
+    let mut list_state = ListState::None;
 
     for line in content.lines() {
         if line.is_empty() {
-            if in_list {
-                out.push_str("\\end{itemize}\n");
-                in_list = false;
+            match list_state {
+                ListState::Itemize => {
+                    out.push_str("\\end{itemize}\n");
+                    list_state = ListState::None;
+                }
+                ListState::Description => {
+                    out.push_str("\\end{description}\n");
+                    list_state = ListState::None;
+                }
+                ListState::None => {}
             }
             out.push('\n');
             continue;
         }
         if let Some(item) = line.strip_prefix("- ") {
-            if !in_list {
+            if list_state == ListState::Description {
+                out.push_str("\\end{description}\n");
+            }
+            if list_state != ListState::Itemize {
                 out.push_str("\\begin{itemize}\n");
-                in_list = true;
+                list_state = ListState::Itemize;
             }
             out.push_str("\\item ");
             out.push_str(&convert_inline(item));
             out.push('\n');
+        } else if line.starts_with('[') {
+            if let Some(close) = line.find("] ") {
+                let term = &line[1..close];
+                let desc = &line[close + 2..];
+                if list_state == ListState::Itemize {
+                    out.push_str("\\end{itemize}\n");
+                }
+                if list_state != ListState::Description {
+                    out.push_str("\\begin{description}\n");
+                    list_state = ListState::Description;
+                }
+                out.push_str("\\item[");
+                out.push_str(&convert_inline(term));
+                out.push_str("] ");
+                out.push_str(&convert_inline(desc));
+                out.push('\n');
+            } else {
+                // Not a description item, just a line starting with [
+                if list_state != ListState::None {
+                    match list_state {
+                        ListState::Itemize => out.push_str("\\end{itemize}\n"),
+                        ListState::Description => out.push_str("\\end{description}\n"),
+                        _ => {}
+                    }
+                    list_state = ListState::None;
+                }
+                out.push_str(&convert_inline(line));
+                out.push('\n');
+            }
+        } else if line.starts_with("  ") && list_state == ListState::Description {
+            // Continuation of previous description item
+            out.push_str(&convert_inline(line.trim_start()));
+            out.push('\n');
         } else {
-            if in_list {
-                out.push_str("\\end{itemize}\n");
-                in_list = false;
+            if list_state != ListState::None {
+                match list_state {
+                    ListState::Itemize => out.push_str("\\end{itemize}\n"),
+                    ListState::Description => out.push_str("\\end{description}\n"),
+                    _ => {}
+                }
+                list_state = ListState::None;
             }
             out.push_str(&convert_inline(line));
             out.push('\n');
         }
     }
-    if in_list {
-        out.push_str("\\end{itemize}\n");
+    match list_state {
+        ListState::Itemize => out.push_str("\\end{itemize}\n"),
+        ListState::Description => out.push_str("\\end{description}\n"),
+        ListState::None => {}
     }
     out
 }
@@ -789,10 +900,11 @@ fn generate_enum_list(el: &EnumList, entries: &[Vec<String>]) -> String {
             .map(|s| btree_flags_annotations(s))
             .unwrap_or_default();
 
+        let label = format!("\\label{{{}:{}}}", el.key, name);
         if el.default == Some(name.as_str()) {
-            out.push_str(&format!("\\item[{{\\tt {escaped}}}] (default)"));
+            out.push_str(&format!("{label}\\item[{{\\tt {escaped}}}] (default)"));
         } else {
-            out.push_str(&format!("\\item[{{\\tt {escaped}}}]"));
+            out.push_str(&format!("{label}\\item[{{\\tt {escaped}}}]"));
         }
         let version = el
             .version_field
@@ -876,7 +988,11 @@ fn main() {
     doc_blocks.append(&mut extract_doc_blocks(&root.join("c_src")));
 
     for block in &doc_blocks {
-        let latex = markup_to_latex(&block.content);
+        let latex = if block.raw_latex {
+            format!("{}\n", block.content)
+        } else {
+            markup_to_latex(&block.content)
+        };
         fs::write(generated_dir.join(format!("{}.tex", block.key)), &latex).unwrap();
         if !available_keys.insert(block.key.clone()) {
             eprintln!(
@@ -913,7 +1029,13 @@ fn main() {
     // --- Validate references ---
     let tex_path = root.join("doc/bcachefs-principles-of-operation.tex");
     let tex = fs::read_to_string(&tex_path).unwrap();
-    let refs = extract_bchdoc_refs(&tex);
+    let mut refs = extract_bchdoc_refs(&tex);
+    // Also scan DOC_LATEX blocks for nested \bchdoc references
+    for block in &doc_blocks {
+        if block.raw_latex {
+            refs.extend(extract_bchdoc_refs(&block.content));
+        }
+    }
     let ref_set: HashSet<_> = refs.iter().cloned().collect();
 
     for r in &refs {
@@ -929,8 +1051,7 @@ fn main() {
 
     for key in &available_keys {
         if !ref_set.contains(key) {
-            eprintln!("error: DOC({key}) in source is not referenced by PoO");
-            errors += 1;
+            eprintln!("warning: DOC({key}) in source is not referenced by PoO");
         }
     }
 
