@@ -5,6 +5,10 @@
 # The container provides isolation; sbuild is not used (it requires nested user
 # namespaces which don't work in rootless podman).
 #
+# Build environments are cached as podman images to avoid re-installing deps
+# on every build. Cache is keyed on distro×arch×rust_version; invalidated by
+# touching $CACHE_DIR/rebuild-$DISTRO-$ARCH or passing REBUILD_CACHE=1.
+#
 # Usage: build-binary.sh DISTRO ARCH COMMIT SOURCE_DIR RESULT_DIR RUST_VERSION
 #
 # DISTRO:     unstable|forky|trixie|questing|plucky
@@ -23,10 +27,9 @@ RUST_VERSION="$6"
 
 CACHE_DIR="${CACHE_DIR:-/home/aptbcachefsorg/package-ci/cache}"
 CONTAINER="ci-binary-${DISTRO}-${ARCH}-$$"
+CACHE_IMAGE="ci-deps:${DISTRO}-${ARCH}-rust${RUST_VERSION}"
 
-# Per-distro-arch apt cache to avoid lock contention when multiple builds run concurrently
-APT_CACHE_DIR="$CACHE_DIR/apt-$DISTRO-$ARCH"
-mkdir -p "$RESULT_DIR" "$APT_CACHE_DIR"
+mkdir -p "$RESULT_DIR"
 
 cleanup() {
     podman rm -f "$CONTAINER" 2>/dev/null || true
@@ -35,13 +38,13 @@ trap cleanup EXIT
 
 echo "=== Building binary: $DISTRO $ARCH (commit ${COMMIT:0:12}) ==="
 
-# Select container image per distro
+# Select base container image per distro
 case "$DISTRO" in
-    unstable) IMAGE="debian:unstable-slim" ;;
-    forky)    IMAGE="debian:forky-slim" ;;
-    trixie)   IMAGE="debian:trixie-slim" ;;
-    plucky)   IMAGE="ubuntu:plucky" ;;
-    questing) IMAGE="ubuntu:questing" ;;
+    unstable) BASE_IMAGE="debian:unstable-slim" ;;
+    forky)    BASE_IMAGE="debian:forky-slim" ;;
+    trixie)   BASE_IMAGE="debian:trixie-slim" ;;
+    plucky)   BASE_IMAGE="ubuntu:plucky" ;;
+    questing) BASE_IMAGE="ubuntu:questing" ;;
     *) echo "ERROR: unknown distro $DISTRO"; exit 1 ;;
 esac
 
@@ -61,6 +64,107 @@ if [ -z "$DSC_FILE" ]; then
 fi
 DSC_BASENAME=$(basename "$DSC_FILE")
 
+# ---------------------------------------------------------------------------
+# Cached build environment
+# ---------------------------------------------------------------------------
+#
+# First build: install all deps, commit the container as $CACHE_IMAGE.
+# Subsequent builds: start from $CACHE_IMAGE, skip straight to dpkg-buildpackage.
+# The cache includes: build-essential, build-deps, cross-compilers, rustup.
+
+REBUILD_CACHE="${REBUILD_CACHE:-0}"
+REBUILD_MARKER="$CACHE_DIR/rebuild-$DISTRO-$ARCH"
+if [ -f "$REBUILD_MARKER" ]; then
+    REBUILD_CACHE=1
+    rm -f "$REBUILD_MARKER"
+fi
+
+need_cache_build() {
+    [ "$REBUILD_CACHE" = "1" ] && return 0
+    ! podman image exists "$CACHE_IMAGE" 2>/dev/null
+}
+
+if need_cache_build; then
+    echo "--- Building cached environment: $CACHE_IMAGE ---"
+
+    BUILD_CONTAINER="ci-cache-build-${DISTRO}-${ARCH}-$$"
+    podman rm -f "$BUILD_CONTAINER" 2>/dev/null || true
+
+    podman run --name "$BUILD_CONTAINER" \
+        --detach --init \
+        --volume "$SOURCE_DIR:/source:ro" \
+        --tmpfs /tmp:exec \
+        "$BASE_IMAGE" sleep infinity
+
+    crun() {
+        podman exec "$BUILD_CONTAINER" bash -euxc "$*"
+    }
+
+    # Cross-compilation setup: add foreign arch before first apt-get update
+    if [ "$ARCH" = "ppc64el" ]; then
+        crun 'dpkg --add-architecture ppc64el'
+    fi
+
+    # Install essential build tools
+    crun '
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl devscripts dpkg-dev
+    '
+
+    # Install cross-compilation tools
+    if [ "$ARCH" = "ppc64el" ]; then
+        crun '
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                qemu-user-static binfmt-support gcc-powerpc64le-linux-gnu
+        '
+    fi
+
+    # Extract source package and install build-deps (this installs distro Rust)
+    crun "
+        mkdir -p /build
+        cp /source/* /build/
+        cd /build
+        dpkg-source -x ${DSC_BASENAME} src
+        DEBIAN_FRONTEND=noninteractive apt-get build-dep -y ${CROSS_BUILD_DEP_ARCH} ./src
+        rm -rf /build
+    "
+
+    # If distro Rust is too old (needs 1.85+ for edition2024), install via rustup
+    # and replace the distro cargo/rustc with symlinks to the rustup-managed versions.
+    crun "
+        if ! rustc --version 2>/dev/null | grep -qE '1\\.(8[5-9]|9[0-9])'; then
+            curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | \
+                sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal -y
+
+            # Make rustup's cargo/rustc the system default so dpkg-buildpackage finds them
+            ln -sf /root/.cargo/bin/cargo /usr/bin/cargo
+            ln -sf /root/.cargo/bin/rustc /usr/bin/rustc
+
+            # Replace Ubuntu's /usr/share/cargo/bin/cargo wrapper with a shim that
+            # delegates to rustup cargo and handles prepare-debian as a no-op
+            if [ -f /usr/share/cargo/bin/cargo ]; then
+                printf '#!/bin/sh\n[ \"\\\$1\" = \"prepare-debian\" ] && exit 0\nexec /usr/bin/cargo \"\\\$@\"\n' \
+                    > /usr/share/cargo/bin/cargo
+                chmod +x /usr/share/cargo/bin/cargo
+            fi
+        fi
+    "
+
+    # Clean apt caches to keep the image small
+    crun 'apt-get clean && rm -rf /var/lib/apt/lists/*'
+
+    # Commit as cached image
+    podman commit "$BUILD_CONTAINER" "$CACHE_IMAGE"
+    podman rm -f "$BUILD_CONTAINER"
+
+    echo "--- Cached environment ready: $CACHE_IMAGE ---"
+fi
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+
 podman run --name "$CONTAINER" \
     --detach --init \
     --security-opt seccomp=unconfined \
@@ -69,76 +173,25 @@ podman run --name "$CONTAINER" \
     --cap-add SYS_ADMIN \
     --volume "$SOURCE_DIR:/source:ro" \
     --volume "$RESULT_DIR:/result:rw" \
-    --volume "$APT_CACHE_DIR:/var/cache/apt:rw" \
     --tmpfs /tmp:exec \
-    "$IMAGE" sleep infinity
+    "$CACHE_IMAGE" sleep infinity
 
 run() {
     podman exec "$CONTAINER" bash -euxc "$*"
 }
 
-# Clear stale apt locks that may be left by crashed previous containers.
-# Safe because each distro×arch gets its own cache dir and builds don't overlap.
-run '
-    rm -f /var/cache/apt/archives/lock
-    rm -f /var/lib/apt/lists/lock
-    rm -f /var/lib/dpkg/lock
-    rm -f /var/lib/dpkg/lock-frontend
-'
-
-# Cross-compilation setup (ppc64el on amd64): add foreign arch before first apt-get update
-if [ "$ARCH" = "ppc64el" ]; then
-    run '
-        dpkg --add-architecture ppc64el
-    '
-fi
-
-# Install essential build tools (no Rust yet - build-dep will pull the right version)
-run '
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl devscripts dpkg-dev
-'
-
-# Install cross-compilation tools after apt-get update
-if [ "$ARCH" = "ppc64el" ]; then
-    run '
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            qemu-user-static binfmt-support gcc-powerpc64le-linux-gnu
-    '
-fi
-
-# Extract source package and install build-deps (this installs distro Rust)
+# Extract source and install any new build-deps not in the cached image
 run "
     mkdir -p /build
     cp /source/* /build/
     cd /build
     dpkg-source -x ${DSC_BASENAME} src
+    apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get build-dep -y ${CROSS_BUILD_DEP_ARCH} ./src
-"
-
-# If distro Rust is too old (needs 1.85+ for edition2024), install via rustup.
-# debian/rules hardcodes CARGO=/usr/share/cargo/bin/cargo, so we also replace
-# that path with a shim. Only do this if the path exists (Ubuntu-specific wrapper).
-run "
-    if ! rustc --version 2>/dev/null | grep -qE '1\\.(8[5-9]|9[0-9])'; then
-        curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | \
-            sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal -y
-        # Replace system cargo wrapper (Ubuntu-specific path) with rustup shim.
-        # Handle prepare-debian as a no-op: it's a Debian offline-vendor setup
-        # step that we don't need since we build with internet access.
-        if [ -f /usr/share/cargo/bin/cargo ]; then
-            printf '#!/bin/sh\n[ \"\$1\" = \"prepare-debian\" ] && exit 0\nexec /root/.cargo/bin/cargo \"\$@\"\n' \
-                > /usr/share/cargo/bin/cargo
-            chmod +x /usr/share/cargo/bin/cargo
-        fi
-        ln -sf /root/.cargo/bin/rustc /usr/bin/rustc
-    fi
 "
 
 # Build
 run "
-    export PATH=\"\${HOME}/.cargo/bin:\${PATH}\"
     cd /build/src
     dpkg-buildpackage -us -uc -b ${CROSS_DPKG_ARCH}
 "

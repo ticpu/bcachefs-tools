@@ -110,9 +110,11 @@ for distro in "${!DISTRO_DONE[@]}"; do
 
     echo "--- $distro: publish ---"
     if aptly publish show "$REPO_SUITE" "$PUBLISH_PREFIX" &>/dev/null; then
-        aptly publish switch "$REPO_SUITE" "$PUBLISH_PREFIX" "$SNAPSHOT_NAME"
+        aptly publish switch -force-overwrite \
+            "$REPO_SUITE" "$PUBLISH_PREFIX" "$SNAPSHOT_NAME"
     else
         aptly publish snapshot \
+            -force-overwrite \
             -acquire-by-hash \
             -origin="apt.bcachefs.org" \
             -label="apt.bcachefs.org Packages" \
