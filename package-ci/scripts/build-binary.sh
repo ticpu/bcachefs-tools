@@ -27,7 +27,7 @@ RUST_VERSION="$6"
 
 CACHE_DIR="${CACHE_DIR:-/home/aptbcachefsorg/package-ci/cache}"
 CONTAINER="ci-binary-${DISTRO}-${ARCH}-$$"
-CACHE_VERSION=2  # bump to force cache rebuild
+CACHE_VERSION=3  # bump to force cache rebuild
 CACHE_IMAGE="ci-deps:${DISTRO}-${ARCH}-rust${RUST_VERSION}-v${CACHE_VERSION}"
 
 mkdir -p "$RESULT_DIR"
@@ -143,6 +143,13 @@ if need_cache_build; then
             ln -sf /root/.cargo/bin/rustc /usr/bin/rustc
         fi
     "
+
+    # Cross-compilation: tell cargo which linker to use for the foreign target,
+    # and add the Rust target if using rustup
+    if [ "$ARCH" = "ppc64el" ]; then
+        crun 'mkdir -p /root/.cargo && echo -e "[target.powerpc64le-unknown-linux-gnu]\nlinker = \"powerpc64le-linux-gnu-gcc\"" >> /root/.cargo/config.toml'
+        crun 'command -v rustup >/dev/null && rustup target add powerpc64le-unknown-linux-gnu || true'
+    fi
 
     # Replace Ubuntu's /usr/share/cargo/bin/cargo wrapper with a shim that
     # delegates to rustup cargo and handles prepare-debian as a no-op.
