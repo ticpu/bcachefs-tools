@@ -140,16 +140,23 @@ if need_cache_build; then
             # Make rustup's cargo/rustc the system default so dpkg-buildpackage finds them
             ln -sf /root/.cargo/bin/cargo /usr/bin/cargo
             ln -sf /root/.cargo/bin/rustc /usr/bin/rustc
-
-            # Replace Ubuntu's /usr/share/cargo/bin/cargo wrapper with a shim that
-            # delegates to rustup cargo and handles prepare-debian as a no-op
-            if [ -f /usr/share/cargo/bin/cargo ]; then
-                printf '#!/bin/sh\n[ \"\\\$1\" = \"prepare-debian\" ] && exit 0\nRUSTUP_HOME=/root/.rustup exec /usr/bin/cargo \"\\\$@\"\n' \
-                    > /usr/share/cargo/bin/cargo
-                chmod +x /usr/share/cargo/bin/cargo
-            fi
         fi
     "
+
+    # Replace Ubuntu's /usr/share/cargo/bin/cargo wrapper with a shim that
+    # delegates to rustup cargo and handles prepare-debian as a no-op.
+    # Written via podman cp to avoid shell escaping issues.
+    SHIM=$(mktemp)
+    cat > "$SHIM" <<'EOF'
+#!/bin/sh
+[ "$1" = "prepare-debian" ] && exit 0
+RUSTUP_HOME=/root/.rustup exec /usr/bin/cargo "$@"
+EOF
+    if podman exec "$BUILD_CONTAINER" test -f /usr/share/cargo/bin/cargo; then
+        podman cp "$SHIM" "$BUILD_CONTAINER":/usr/share/cargo/bin/cargo
+        podman exec "$BUILD_CONTAINER" chmod +x /usr/share/cargo/bin/cargo
+    fi
+    rm -f "$SHIM"
 
     # Clean apt caches to keep the image small
     crun 'apt-get clean && rm -rf /var/lib/apt/lists/*'
