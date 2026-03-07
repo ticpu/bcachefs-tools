@@ -558,8 +558,18 @@ fn migrate_superblock(dev_path: &str, sb_offset: u64) -> Result<()> {
 
     // Clear no_default_sb feature so recovery doesn't force ro
     unsafe {
-        let sb = &mut *(*fs.raw).disk_sb.sb;
+        let fs_raw = fs.raw;
+        let _lock = fs.sb_lock();
+        let sb = &mut *(*fs_raw).disk_sb.sb;
         sb.features[0] &= !(1u64 << c::bch_sb_feature::BCH_FEATURE_no_default_sb as u64).to_le();
+        // Also update the cached copy — c->sb.features is host-endian
+        (*fs_raw).sb.features &= !(1u64 << c::bch_sb_feature::BCH_FEATURE_no_default_sb as u64);
+        fs.write_super_ret()
+            .map_err(|e| anyhow!("Error writing superblock: {}", e))?;
+
+        // This is normall set in fs_init if BCH_FEATURE_no_default_sb is
+        // cleared - but fs_init already happened:
+        (*fs_raw).flags |= (1 as c_ulong) << c::bch_fs_flags::BCH_FS_may_upgrade_downgrade as u32;
     }
 
     fs.start()
@@ -572,12 +582,6 @@ fn migrate_superblock(dev_path: &str, sb_offset: u64) -> Result<()> {
     // Apply superblock layout changes (FS is already RW)
     let sb_ref = unsafe { &mut *(*ca).disk_sb.sb };
     add_default_sb_layout(sb_ref)?;
-
-    {
-        let _lock = fs.sb_lock();
-        fs.write_super_ret()
-            .map_err(|e| anyhow!("Error writing superblock: {}", e))?;
-    }
 
     // Mark the new sb buckets in FS metadata
     let ca_ref = fs.dev_get(0)
