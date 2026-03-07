@@ -144,7 +144,7 @@ if need_cache_build; then
             # Replace Ubuntu's /usr/share/cargo/bin/cargo wrapper with a shim that
             # delegates to rustup cargo and handles prepare-debian as a no-op
             if [ -f /usr/share/cargo/bin/cargo ]; then
-                printf '#!/bin/sh\n[ \"\\\$1\" = \"prepare-debian\" ] && exit 0\nexec /usr/bin/cargo \"\\\$@\"\n' \
+                printf '#!/bin/sh\n[ \"\\\$1\" = \"prepare-debian\" ] && exit 0\nRUSTUP_HOME=/root/.rustup exec /usr/bin/cargo \"\\\$@\"\n' \
                     > /usr/share/cargo/bin/cargo
                 chmod +x /usr/share/cargo/bin/cargo
             fi
