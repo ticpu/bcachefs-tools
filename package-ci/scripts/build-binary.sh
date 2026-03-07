@@ -27,7 +27,8 @@ RUST_VERSION="$6"
 
 CACHE_DIR="${CACHE_DIR:-/home/aptbcachefsorg/package-ci/cache}"
 CONTAINER="ci-binary-${DISTRO}-${ARCH}-$$"
-CACHE_IMAGE="ci-deps:${DISTRO}-${ARCH}-rust${RUST_VERSION}"
+CACHE_VERSION=2  # bump to force cache rebuild
+CACHE_IMAGE="ci-deps:${DISTRO}-${ARCH}-rust${RUST_VERSION}-v${CACHE_VERSION}"
 
 mkdir -p "$RESULT_DIR"
 
