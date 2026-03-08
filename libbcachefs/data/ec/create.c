@@ -462,27 +462,15 @@ static void zero_out_rest_of_ec_bucket(struct bch_fs *c,
 				       unsigned block,
 				       struct open_bucket *ob)
 {
-	struct bch_dev *ca = bch2_dev_get_ioref(c, ob->dev, WRITE,
-				BCH_DEV_WRITE_REF_ec_bucket_zero);
-	if (!ca) {
-		s->err = bch_err_throw(c, erofs_no_writes);
-		return;
-	}
-
+	struct bch_dev *ca = ob_dev(c, ob);
 	unsigned offset = ca->mi.bucket_size - ob->sectors_free;
+
 	memset(s->new_stripe.data[block] + (offset << 9),
 	       0,
 	       ob->sectors_free << 9);
 
-	int ret = blkdev_issue_zeroout(ca->disk_sb.bdev,
-			ob->bucket * ca->mi.bucket_size + offset,
-			ob->sectors_free,
-			GFP_KERNEL, 0);
-
-	enumerated_ref_put(&ca->io_ref[WRITE], BCH_DEV_WRITE_REF_ec_bucket_zero);
-
-	if (ret)
-		s->err = ret;
+	bch2_ec_block_io_range(c, &s->new_stripe, REQ_OP_WRITE, block,
+			       offset, ob->sectors_free);
 }
 
 void bch2_ec_stripe_new_free(struct bch_fs *c, struct ec_stripe_new *s)
@@ -508,10 +496,8 @@ static int __ec_stripe_create(struct ec_stripe_new *s)
 	for (unsigned i = s->old_blocks_nr; i < nr_data; i++) {
 		struct open_bucket *ob = c->allocator.open_buckets + s->blocks[i];
 
-		if (ob->sectors_free) {
-			/* XXX: do this IO asynchronously */
+		if (ob->sectors_free)
 			zero_out_rest_of_ec_bucket(c, s, i, ob);
-		}
 	}
 
 	if (s->have_old_stripe) {
@@ -670,35 +656,20 @@ static void ec_stripe_create(struct ec_stripe_new *s)
 	ec_stripe_new_put(c, s, STRIPE_REF_stripe);
 }
 
-static struct ec_stripe_new *get_pending_stripe(struct bch_fs *c)
+static void ec_stripe_create_work_fn(struct work_struct *work)
 {
-	struct ec_stripe_new *s;
+	struct ec_stripe_new *s = container_of(work, struct ec_stripe_new, work);
+	struct bch_fs *c = s->c;
 
-	guard(mutex)(&c->ec.stripe_new_lock);
-	list_for_each_entry(s, &c->ec.stripe_new_list, list)
-		if (!atomic_read(&s->ref[STRIPE_REF_io]))
-			return s;
-	return NULL;
-}
-
-void bch2_ec_stripe_create_work(struct work_struct *work)
-{
-	struct bch_fs *c = container_of(work,
-		struct bch_fs, ec.stripe_create_work);
-	struct ec_stripe_new *s;
-
-	while ((s = get_pending_stripe(c)))
-		ec_stripe_create(s);
+	ec_stripe_create(s);
 
 	enumerated_ref_put(&c->writes, BCH_WRITE_REF_stripe_create);
 }
 
-void bch2_ec_do_stripe_creates(struct bch_fs *c)
+void bch2_ec_stripe_create_start(struct bch_fs *c, struct ec_stripe_new *s)
 {
 	enumerated_ref_get(&c->writes, BCH_WRITE_REF_stripe_create);
-
-	if (!queue_work(system_long_wq, &c->ec.stripe_create_work))
-		enumerated_ref_put(&c->writes, BCH_WRITE_REF_stripe_create);
+	queue_work(c->ec.stripe_create_wq, &s->work);
 }
 
 void bch2_ec_bucket_cancel(struct bch_fs *c, struct open_bucket *ob, int err)
@@ -827,6 +798,7 @@ static struct ec_stripe_new *ec_new_stripe_alloc(struct bch_fs *c,
 		return NULL;
 
 	mutex_init(&s->lock);
+	INIT_WORK(&s->work, ec_stripe_create_work_fn);
 	closure_init(&s->old_stripe.io, NULL);
 	closure_init(&s->new_stripe.io, NULL);
 	atomic_set(&s->ref[STRIPE_REF_stripe], 1);
