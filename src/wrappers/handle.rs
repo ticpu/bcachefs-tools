@@ -15,8 +15,9 @@ use bch_bindgen::c::{
     bch_ioctl_subvolume, bch_ioctl_subvolume_v2,
     BCH_BY_INDEX, BCH_SUBVOL_SNAPSHOT_CREATE,
 };
-use crate::wrappers::ioctl::bch_ioc_wr;
+use crate::wrappers::ioctl::{bch_ioc_w, bch_ioc_wr};
 use crate::wrappers::sysfs;
+use bch_bindgen::c::bch_sb;
 use bch_bindgen::errcode::BchError;
 use bch_bindgen::path_to_cstr;
 use errno::Errno;
@@ -413,6 +414,60 @@ impl BcachefsHandle {
             bch_ioctl_disk_resize_journal_v2 { flags: BCH_BY_INDEX, dev: dev_idx as u64, nbuckets, ..Default::default() },
             bch_ioctl_disk_resize_journal    { flags: BCH_BY_INDEX, dev: dev_idx as u64, nbuckets, ..Default::default() }
         )
+    }
+
+    /// Read the filesystem superblock via BCH_IOCTL_READ_SUPER.
+    ///
+    /// Returns a heap-allocated buffer containing the raw superblock.
+    /// The kernel may return ERANGE if the buffer is too small, so we
+    /// start with a reasonable size and retry once if needed.
+    pub(crate) fn read_super(&self) -> Result<Vec<u8>, Errno> {
+        let mut size: usize = 4096;
+
+        loop {
+            let mut buf = vec![0u8; size];
+
+            #[repr(C)]
+            struct BchIoctlReadSuper {
+                flags: u32,
+                pad:   u32,
+                dev:   u64,
+                size:  u64,
+                sb:    u64,
+            }
+
+            let arg = BchIoctlReadSuper {
+                flags: 0,
+                pad:   0,
+                dev:   0,
+                size:  size as u64,
+                sb:    buf.as_mut_ptr() as u64,
+            };
+
+            let request = bch_ioc_w::<BchIoctlReadSuper>(12);
+            let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, &arg) };
+
+            if ret == 0 {
+                return Ok(buf);
+            }
+
+            let err = io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
+            if err == libc::ERANGE && size < 1 << 20 {
+                size *= 4;
+                continue;
+            }
+            return Err(Errno(err));
+        }
+    }
+
+    /// Read the on-disk metadata version from the filesystem superblock.
+    pub(crate) fn sb_version(&self) -> Result<u16, Errno> {
+        let buf = self.read_super()?;
+        if buf.len() < mem::size_of::<bch_sb>() {
+            return Err(Errno(libc::EIO));
+        }
+        let sb = unsafe { &*(buf.as_ptr() as *const bch_sb) };
+        Ok(sb.version)
     }
 
     /// Query device usage (v2 with flex array, v1 fallback).

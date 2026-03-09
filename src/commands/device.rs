@@ -516,6 +516,17 @@ pub fn cmd_device_evacuate(argv: Vec<String>) -> Result<()> {
     }
 
     let (handle, dev_idx) = open_dev(&cli.device)?;
+    let sysfs_path = sysfs::sysfs_path_from_fd(handle.sysfs_fd())?;
+
+    // Reconcile drives evacuation — check the filesystem has been upgraded
+    let sb_ver = handle.sb_version()
+        .context("reading filesystem superblock")?;
+    if (sb_ver as u64) < bcachefs_metadata_version_reconcile as u64 {
+        return Err(anyhow!(
+            "Filesystem has not been upgraded to the reconcile version.\n\
+             Device evacuation requires reconcile. Remount with:\n  \
+             mount -o remount,version_upgrade=incompatible <mountpoint>"));
+    }
 
     let usage = handle.dev_usage(dev_idx)
         .context("querying device usage")?;
@@ -529,6 +540,9 @@ pub fn cmd_device_evacuate(argv: Vec<String>) -> Result<()> {
     println!("Setting {} evacuating", cli.device);
     handle.disk_set_state(dev_idx, BCH_MEMBER_STATE_evacuating as u32, BCH_FORCE_IF_DEGRADED)
         .context("setting device evacuating")?;
+
+    // Trigger reconcile wakeup so it starts processing the evacuation
+    let _ = std::fs::write(sysfs_path.join("internal/trigger_reconcile_wakeup"), "1");
 
     loop {
         let usage = handle.dev_usage(dev_idx)
