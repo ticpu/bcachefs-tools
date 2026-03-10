@@ -299,6 +299,8 @@ struct Config {
     poll_interval: Duration,
     /// Pinned Rust version for rustup
     rust_version: String,
+    /// Maximum time for a single build before it gets killed
+    build_timeout: Duration,
 }
 
 impl Default for Config {
@@ -313,6 +315,7 @@ impl Default for Config {
             max_remote_jobs: 1,
             poll_interval:   Duration::from_secs(60),
             rust_version:    "1.89.0".into(),
+            build_timeout:   Duration::from_secs(2 * 60 * 60), // 2 hours
         }
     }
 }
@@ -322,10 +325,11 @@ impl Default for Config {
 // ---------------------------------------------------------------------------
 
 struct RunningJob {
-    child:    Child,
-    job_name: String,
-    commit:   String,
-    remote:   bool,
+    child:      Child,
+    job_name:   String,
+    commit:     String,
+    remote:     bool,
+    started_at: Instant,
 }
 
 // ---------------------------------------------------------------------------
@@ -448,10 +452,24 @@ impl Orchestrator {
         status
     }
 
-    /// Reap finished child processes and update their state
+    /// Reap finished child processes, kill timed-out builds, update state
     fn reap_children(&mut self) -> Result<()> {
         let mut i = 0;
         while i < self.running.len() {
+            // Kill builds that have exceeded the timeout
+            if self.running[i].started_at.elapsed() > self.config.build_timeout {
+                let job = self.running.remove(i);
+                error!("[{}] {} timed out after {:?}, killing",
+                       &job.commit[..12], job.job_name,
+                       job.started_at.elapsed());
+                let mut child = job.child;
+                let _ = child.kill();
+                let _ = child.wait();
+                self.state.write_status(&job.commit, &job.job_name, JobStatus::Failed)?;
+                let _ = fs::remove_file(self.state.pid_path(&job.commit, &job.job_name));
+                continue;
+            }
+
             match self.running[i].child.try_wait() {
                 Ok(Some(exit_status)) => {
                     let job = self.running.remove(i);
@@ -463,11 +481,9 @@ impl Orchestrator {
                     info!("[{}] {} finished: {:?}",
                           &job.commit[..12], job.job_name, status);
                     self.state.write_status(&job.commit, &job.job_name, status)?;
-                    // Clean up PID file
                     let _ = fs::remove_file(self.state.pid_path(&job.commit, &job.job_name));
                 }
                 Ok(None) => {
-                    // Still running
                     i += 1;
                 }
                 Err(e) => {
@@ -514,6 +530,7 @@ impl Orchestrator {
             job_name: "source".into(),
             commit: commit.into(),
             remote: false,
+            started_at: Instant::now(),
         });
         Ok(())
     }
@@ -562,6 +579,7 @@ impl Orchestrator {
             job_name: name,
             commit: commit.into(),
             remote: job.arch.is_remote(),
+            started_at: Instant::now(),
         });
         Ok(())
     }
@@ -585,6 +603,7 @@ impl Orchestrator {
             job_name: "publish".into(),
             commit: commit.into(),
             remote: false,
+            started_at: Instant::now(),
         });
         Ok(())
     }
