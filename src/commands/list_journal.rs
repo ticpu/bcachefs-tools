@@ -469,6 +469,7 @@ fn journal_replay_print(c_fs: *mut c::bch_fs, f: &JournalFilter, p: &c::journal_
 }
 
 fn print_buf(buf: &Printbuf, blacklisted: bool) {
+    use std::io::Write;
     let s = buf.as_str();
     if !s.is_empty() {
         if blacklisted {
@@ -476,6 +477,7 @@ fn print_buf(buf: &Printbuf, blacklisted: bool) {
         } else {
             print!("{s}");
         }
+        std::io::stdout().flush().ok();
     }
 }
 
