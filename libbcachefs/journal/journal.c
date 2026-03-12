@@ -536,6 +536,7 @@ static int journal_entry_open(struct journal *j)
 	buf->write_allocated	= false;
 	buf->write_done		= false;
 	buf->empty		= false;
+	buf->has_overwrites	= READ_ONCE(c->opts.journal_transaction_names);
 
 	memset(buf->data, 0, sizeof(*buf->data));
 	buf->data->seq	= cpu_to_le64(journal_cur_seq(j));
@@ -979,6 +980,28 @@ void bch2_journal_advance_rewind_seq(struct journal *j, u64 seq)
 		j->rewind_seq = max(j->rewind_seq, seq);
 }
 
+int bch2_journal_add_rewind_range(struct bch_fs *c, u64 from, u64 to)
+{
+	struct journal *j = &c->journal;
+
+	struct journal_rewind_range range = {
+		.from	= from,
+		.to	= to,
+	};
+	try(darray_push(&j->rewind_ranges, range));
+
+	unsigned u64s = 2;
+	try(darray_make_room(&j->early_journal_entries, jset_u64s(u64s)));
+	struct jset_entry_rewind *rw =
+		(void *) &darray_top(j->early_journal_entries);
+	journal_entry_init(&rw->entry, BCH_JSET_ENTRY_rewind, 0, 0, u64s);
+	rw->from	= cpu_to_le64(from);
+	rw->to		= cpu_to_le64(to);
+	j->early_journal_entries.nr += jset_u64s(u64s);
+
+	return 0;
+}
+
 /*
  * bch2_journal_noflush_seq - ask the journal not to issue any flushes in the
  * range [start, end)
@@ -1189,6 +1212,8 @@ void __bch2_journal_debug_to_text(struct printbuf *out, struct journal *j)
 	prt_printf(out, "last_seq_ondisk:\t%llu\n",		j->last_seq_ondisk);
 	prt_printf(out, "flushed_seq_ondisk:\t%llu\n",		j->flushed_seq_ondisk);
 	prt_printf(out, "last_empty_seq:\t%llu\n",		j->last_empty_seq);
+	prt_printf(out, "rewind_seq:\t%llu\n",			j->rewind_seq);
+	prt_printf(out, "rewind_seq_ondisk:\t%llu\n",		j->rewind_seq_ondisk);
 	prt_printf(out, "watermark:\t%s\n",			bch2_watermarks[j->watermark]);
 	prt_printf(out, "each entry reserved:\t%u\n",		j->entry_u64s_reserved);
 	prt_printf(out, "nr flush writes:\t%llu\n",		j->nr_flush_writes);

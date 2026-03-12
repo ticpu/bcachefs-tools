@@ -103,6 +103,7 @@
 
 #include "snapshots/types.h"
 
+#include "vfs/fdm.h"
 #include "vfs/types.h"
 
 #define bch2_fs_init_fault(name)					\
@@ -433,6 +434,7 @@ enum bch_dev_read_ref {
 	x(journal_write)				\
 	x(journal_discard)				\
 	x(dev_do_discards)				\
+	x(discard_sectors_to_release)			\
 	x(discard_one_bucket_fast)			\
 	x(do_invalidates)				\
 	x(stripe_update_extents)			\
@@ -516,7 +518,6 @@ struct bch_dev {
 
 	struct work_struct	discard_work;
 	struct work_struct	discard_fast_work;
-	struct mutex		discard_lock;
 	darray_u64		discard_fast;
 	FIFO(struct discard_fifo_entry) discard_fifo;
 	bool			discard_buckets_degraded;
@@ -761,6 +762,10 @@ struct bch_fs {
 	struct list_head	moving_context_list;
 	struct mutex		moving_context_lock;
 
+	/* Journal scrub: extents needing repair after recovery */
+	darray_scrub_journal_repair		scrub_journal_repairs;
+	struct mutex				scrub_journal_repairs_lock;
+
 	struct bch_fs_compress	compress;
 	struct bch_fs_reconcile	reconcile;
 	struct bch_fs_copygc	copygc;
@@ -772,6 +777,7 @@ struct bch_fs {
 
 #ifndef NO_BCACHEFS_FS
 	struct bch_fs_vfs	vfs;
+	struct fdm_hash		fdm_table;
 #endif
 
 	/* QUOTAS */

@@ -882,11 +882,12 @@ struct bch_sb_field_ext {
 	__le64			recovery_passes_required[2];
 	__le64			errors_silent[8];
 	__le64			btrees_lost_data;
-	__le64			dev_readahead;		/* per-device readahead size, in sectors; 0 = default */
+	__le64			flags0;
 };
 
-LE64_BITMASK(BCH_SB_EXT_DEV_READAHEAD,		struct bch_sb_field_ext, dev_readahead, 0, 20);
-LE64_BITMASK(BCH_SB_EXT_EC_STRIPE_BUF_LIMIT,	struct bch_sb_field_ext, dev_readahead, 20, 26);
+LE64_BITMASK(BCH_SB_EXT_DEV_READAHEAD,		struct bch_sb_field_ext, flags0, 0, 20);
+LE64_BITMASK(BCH_SB_EXT_EC_STRIPE_BUF_LIMIT,	struct bch_sb_field_ext, flags0, 20, 26);
+LE64_BITMASK(BCH_SB_EXT_SCRUB_MAX_REWIND_SECS,	struct bch_sb_field_ext, flags0, 26, 38);
 
 /* Superblock: */
 
@@ -1474,8 +1475,8 @@ enum bch_compression_opts {
 };
 
 #define BCH_SCRUB_JOURNAL_OPTS()	\
-	x(no,		0)		\
-	x(unclean,	1)		\
+	x(unclean,	0)		\
+	x(no,		1)		\
 	x(always,	2)
 
 enum bch_scrub_journal_opts {
@@ -1562,7 +1563,10 @@ static inline __u64 __bset_magic(struct bch_sb *sb)
 	  "Structured log entry containing a btree key")	\
 	x(rewind_limit,		14,				\
 	  "Oldest journal seq safe for rewind "			\
-	  "(discards may have invalidated earlier seqs)")
+	  "(discards may have invalidated earlier seqs)")	\
+	x(rewind,		15,				\
+	  "Rewind in progress: keys from entries in this "	\
+	  "seq range use overwrite entries")
 
 enum bch_jset_entry_type {
 #define x(f, nr, ...)	BCH_JSET_ENTRY_##f	= nr,
@@ -1682,6 +1686,16 @@ struct jset_entry_rewind_limit {
 } __packed __aligned(8);
 
 /*
+ * Records a journal rewind in progress. Keys from journal entries
+ * with seq in (to, from] use overwrite entries instead of btree_keys.
+ */
+struct jset_entry_rewind {
+	struct jset_entry	entry;
+	__le64			from;
+	__le64			to;
+} __packed __aligned(8);
+
+/*
  * On disk format for a journal entry:
  * seq is monotonically increasing; every journal entry has its own unique
  * sequence number.
@@ -1717,6 +1731,7 @@ struct jset {
 LE32_BITMASK(JSET_CSUM_TYPE,	struct jset, flags, 0, 4);
 LE32_BITMASK(JSET_BIG_ENDIAN,	struct jset, flags, 4, 5);
 LE32_BITMASK(JSET_NO_FLUSH,	struct jset, flags, 5, 6);
+LE32_BITMASK(JSET_HAS_OVERWRITES, struct jset, flags, 6, 7);
 
 #define BCH_JOURNAL_BUCKETS_MIN		8
 
