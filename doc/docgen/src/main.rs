@@ -640,8 +640,9 @@ fn generate_opts_table(opts: &[OptEntry]) -> String {
             .map(|h| escape_latex(&h.replace('\n', " ")))
             .unwrap_or_default();
 
+        let label_name = opt.name.replace('_', "-");
         out.push_str(&format!(
-            "\\item[\\texttt{{{name}}}] \\hfill \\\\\n"
+            "\\label{{opt:{label_name}}}\\item[\\texttt{{{name}}}] \\hfill \\\\\n"
         ));
 
         // Metadata line: scope, type, default

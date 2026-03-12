@@ -92,11 +92,10 @@ operation that modifies multiple nodes to hold intent locks for its duration,
 upgrading to write only for each individual in-memory update, avoiding the need
 to hold write locks across entire split or merge operations.
 
-Rather than blocking on lock contention, when a transaction encounters a
-potential deadlock it drops all locks and restarts from the beginning. Deadlock
-detection is integrated into the lock acquisition path: before sleeping on a
-contended lock, the transaction checks for lock cycles and aborts if one is
-found. This restart-based approach avoids deadlocks entirely and keeps
+Deadlock avoidance uses standard database cycle detection: before sleeping on a
+contended lock, the transaction checks for lock cycles among all waiting
+transactions. If a cycle is found, one transaction drops all its locks and
+restarts from the beginning. This avoids deadlocks entirely and keeps
 worst-case latency bounded, at the cost of
 requiring all transaction code to be idempotent and prepared for restarts at any
 point. This idempotency requirement has a profound consequence for reliability:
@@ -220,7 +219,7 @@ The complete list of recovery passes, in execution order:
 
 \subsection{Bucket based allocation}
 
-As mentioned bcachefs is descended from bcache, where the ability to efficiently
+As mentioned, bcachefs is descended from bcache, where the ability to efficiently
 invalidate cached data and reuse disk space was a core design requirement. To
 make this possible the allocator divides the disk up into buckets, typically
 512k to 2M but possibly larger or smaller. Buckets and data pointers have
@@ -502,9 +501,37 @@ file or directory:
 \subsubsection{Caching and durability}
 
 Devices can be configured for tiered storage using the target options and
-per-device durability settings. See \hyperref[sec:devices]{Device management}
-in subsystem details for the full treatment of caching modes (writeback,
-writearound), durability counting, and how they interact with replication.
+per-device durability settings. The key concept is \emph{durability}: each
+device has a durability value (default 1) that controls how many replicas a
+copy on that device counts for.
+
+Setting \texttt{durability=0} on a device makes it a pure cache---copies
+there do not count toward replication requirements and are evicted in LRU
+order when space is needed. Setting \texttt{durability=2} on a hardware RAID
+device tells bcachefs the device already has internal redundancy, so one copy
+there counts as two replicas.
+
+\paragraph{Tiered storage with replication}
+
+Replication interacts with targets naturally: the filesystem satisfies the
+configured \texttt{data\_replicas} count using durability-weighted copies,
+regardless of which target they are on. For example, with
+\texttt{data\_replicas=2}, \texttt{foreground\_target=ssd}, and
+\texttt{background\_target=hdd}:
+
+\begin{itemize}
+\item Data is initially written to the SSD target
+\item The background mover copies it to the HDD target
+\item Since both SSD and HDD copies have \texttt{durability=1} by default,
+  each counts as one replica---the two copies together satisfy the replica
+  requirement
+\item To use the SSDs as a pure write cache (data evictable once on HDD),
+  set \texttt{durability=0} on the SSD devices; the allocator will then
+  write two durable copies on the HDD target
+\end{itemize}
+
+See \hyperref[sec:devices]{Device management} in subsystem details for
+writeback vs.\ writearound caching configurations and device lifecycle.
 
 \subsubsection{Splitbrain detection}
 
@@ -645,11 +672,13 @@ different Unicode tables.
 
 \subsection{Migration}
 
-\texttt{bcachefs migrate} converts an existing filesystem (ext4, XFS, etc.)
-to bcachefs in place, without reformatting or copying data to a separate
-device. The original data is preserved and incorporated into the new bcachefs
-filesystem. After migration, \texttt{bcachefs migrate-superblock} writes a
-standard superblock so the filesystem can be mounted normally.
+\texttt{bcachefs migrate} converts an existing filesystem (ext4, XFS, and
+others) to bcachefs in place, without reformatting or copying data to a
+separate device. The original data is preserved and incorporated into the new
+bcachefs filesystem. After migration, \texttt{bcachefs migrate-superblock}
+writes a standard superblock so the filesystem can be mounted normally.
+Migration from btrfs is not currently supported because its FIEMAP
+implementation does not report which device an extent resides on.
 
 \subsection{Images}
 
@@ -681,6 +710,13 @@ bcachefs format --compression=lz4               \
                 --promote_target=ssd            \
                 --background_target=hdd
 \end{verbatim} \end{quote}
+
+In this configuration, data is written to the SSD group first and migrated to
+the HDD group in the background. With \texttt{-{}-replicas=2}, the SSD and HDD
+copies each count as one replica (since all devices default to
+\texttt{durability=1}), satisfying the replication requirement across tiers. To
+make the SSDs a pure write cache instead, add \texttt{-{}-durability=0} to the
+SSD devices so their copies do not count toward replication.
 
 \subsection{Mounting}
 
@@ -916,26 +952,61 @@ contents verified before repeating without \texttt{nochanges}.
 
 \subsection{Journal rewind}
 
-The \texttt{journal\_rewind} mount option accepts a journal sequence number and
-rolls back filesystem metadata to that point, discarding subsequent updates and
-fixing up inconsistencies afterwards. This is a disaster recovery tool for
-reverting damage from a bug in recovery that irreversibly corrupted or deleted
-metadata, or (combined with \texttt{-o nochanges}) for attempting to recover
+Journal rewind rolls back filesystem metadata to an earlier point in time by
+undoing committed transactions. Each transaction records both the new key and
+the old key it replaced; rewind replays the old keys to restore the previous
+state, then triggers a full fsck to repair allocation metadata. See
+\S\ref{sec:journal} for the underlying mechanism.
+
+Rewind serves two purposes: automatic recovery from bad device flushes, and
+manual disaster recovery.
+
+\subsubsection{Automatic rewind via journal scrub}
+
+The \hyperref[opt:scrub-recent-journal-entries]{\texttt{scrub\_recent\_journal\_entries}}
+mount option can trigger journal rewind automatically. During mount, it verifies
+the data referenced by recent journal entries between flush boundaries. Each
+replica of each extent is read and checksum-verified independently. The scrub
+walks flush ranges newest-first and stops after two consecutive ranges with no
+errors, or when it reaches the time limit set by
+\texttt{scrub\_journal\_max\_rewind\_secs} (default 10 seconds).
+
+The response depends on whether the filesystem has redundancy:
+
+\begin{description}
+\item[No redundancy (single device or no replication):] If any data fails
+  checksum verification, the journal is rewound to the last flush boundary
+  before the corrupted entry, discarding the metadata that pointed to bad data.
+  Recovery then continues with a full fsck from the rewound state.
+\item[With replication:] When only some replicas of an extent are bad but at
+  least one is good, there is no need to rewind---the good replica can serve
+  reads. Instead, the bad extents are stashed in a repair list and fixed
+  immediately after the filesystem goes read-write, by rewriting the corrupted
+  replicas from the good copies. This avoids discarding valid metadata when the
+  data itself is still recoverable. Rewind only happens if \emph{all} replicas
+  of an extent are corrupted.
+\end{description}
+
+This is the primary defense against drives with buggy cache flush handling: the
+filesystem detects at mount time that acknowledged writes never reached stable
+storage, and recovers automatically without administrator intervention.
+Offending devices are identified and a per-device \texttt{flush\_errors}
+counter in the superblock is incremented, providing a persistent record visible
+in \texttt{bcachefs show-super} output.
+
+\subsubsection{Manual rewind}
+
+The \hyperref[opt:journal-rewind]{\texttt{journal\_rewind}} mount option
+accepts a journal sequence number and rewinds to that point. This is a disaster
+recovery tool for reverting damage from a bug that irreversibly corrupted or
+deleted metadata, or (combined with
+\hyperref[opt:nochanges]{\texttt{-o nochanges}}) for attempting to recover
 recently deleted files.
 
-Journal rewind drops all leaf-level btree updates to non-allocator btrees at
-or above the specified sequence number, then automatically triggers a full
-fsck to rebuild allocation metadata.
-
-\subsubsection{Usage}
-
-Journal rewind is used in conjunction with \texttt{bcachefs list\_journal} to
-identify the sequence number to rewind to. The
-\texttt{journal\_transaction\_names} option (on by default) is required: it
-controls whether \texttt{BCH\_JSET\_ENTRY\_overwrite} entries (the old values
-being replaced) are stored in the journal, which is what rewind replays to undo
-changes. It also records which function created each journal entry, making it
-easier to identify which transactions caused a problem.
+Use \texttt{bcachefs list\_journal} to identify the sequence number to rewind
+to. The \texttt{journal\_transaction\_names} option (on by default) must have
+been enabled when the entries were written---it controls whether the old keys
+needed for rewind are stored in the journal.
 
 \subsubsection{Limitations}
 
@@ -1009,6 +1080,39 @@ copies can be stored on each device, and every device in the filesystem has
 a complete copy of the superblock. The \texttt{bcachefs recover-super} command
 can reconstruct a completely overwritten primary superblock from backup copies
 on the same device or from any other device in the filesystem.
+
+\subsubsection{Drive firmware failures}
+
+Storage devices almost always have volatile write caches: a write is sent and
+acknowledged, but not actually written to stable media until a separate flush
+operation. Unfortunately, not all devices handle flushes reliably; this is
+particularly known to be a problem on cheaper devices (including at the
+controller level), and has historically been a major (potentially disastrous)
+problem for COW filesystems.
+
+bcachefs mitigates this at multiple levels:
+
+\begin{itemize}
+\item \textbf{Checksumming} detects the corruption when the data is eventually
+  read, preventing silent data corruption from propagating to applications.
+\item \textbf{Replication} provides a correct copy to serve reads from and
+  repair the corrupted copy automatically.
+\item \textbf{Journal scrub} (\hyperref[opt:scrub-recent-journal-entries]{\texttt{scrub\_recent\_journal\_entries}}) detects
+  the problem at mount time by verifying recently written data from the
+  previous mount. If problems are found, the bad flush will be logged and
+  recorded in the superblock entry for the faulty member device, and then the
+  data will be immediately repaired from other replicas (on a replicated
+  filesystem), or if there are no good replicas the entire filesystem will be
+  rolled back to the previous consistent state (with a default maximum rollback
+  of 10 seconds).
+\end{itemize}
+
+With journal scrub enabled, even a single-device filesystem without replication
+recovers cleanly from a flush-lying drive: the corrupted entries are detected
+at mount time and the journal is rewound, losing only the unflushed data (which
+would have been lost in a legitimate power failure anyway) rather than leaving
+files permanently unreadable. With replication, recovery is even better: the
+metadata is preserved and only the corrupted replicas are rewritten.
 
 \subsubsection{Diagnostic tools}
 
