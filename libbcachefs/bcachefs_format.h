@@ -1218,6 +1218,7 @@ LE64_BITMASK(BCH_SB_CASEFOLD,		struct bch_sb, flags[6], 22, 23);
 LE64_BITMASK(BCH_SB_REBALANCE_AC_ONLY,	struct bch_sb, flags[6], 23, 24);
 LE64_BITMASK(BCH_SB_WRITEBACK_TIMEOUT,	struct bch_sb, flags[6], 24, 40);
 LE64_BITMASK(BCH_SB_EXTENT_BP_SHIFT,	struct bch_sb, flags[6], 40, 48);
+LE64_BITMASK(BCH_SB_SCRUB_JOURNAL,	struct bch_sb, flags[6], 48, 50);
 
 #define BCH_SB_EXTENT_BP_SHIFT_DEFAULT	10
 
@@ -1470,6 +1471,18 @@ enum bch_compression_opts {
 	BCH_COMPRESSION_OPTS()
 #undef x
 	BCH_COMPRESSION_OPT_NR
+};
+
+#define BCH_SCRUB_JOURNAL_OPTS()	\
+	x(no,		0)		\
+	x(unclean,	1)		\
+	x(always,	2)
+
+enum bch_scrub_journal_opts {
+#define x(t, n) BCH_SCRUB_JOURNAL_##t = n,
+	BCH_SCRUB_JOURNAL_OPTS()
+#undef x
+	BCH_SCRUB_JOURNAL_OPT_NR
 };
 
 /*

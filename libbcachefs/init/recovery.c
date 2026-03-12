@@ -141,7 +141,7 @@ static void kill_btree(struct bch_fs *c, enum btree_id btree)
 }
 
 /* for -o reconstruct_alloc: */
-void bch2_reconstruct_alloc(struct bch_fs *c)
+static void bch2_reconstruct_alloc(struct bch_fs *c)
 {
 	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
@@ -193,6 +193,37 @@ void bch2_reconstruct_alloc(struct bch_fs *c)
 	for (unsigned i = 0; i < btree_id_nr_alive(c); i++)
 		if (btree_id_is_alloc(i))
 			kill_btree(c, i);
+}
+
+void bch2_ignore_journal_rewind_errors(struct bch_fs *c)
+{
+	pr_info("ignoring rewind errors");
+	/*
+	 * Silence expected allocation errors: after journal rewind, alloc info
+	 * will be stale for buckets whose state changed between the rewind
+	 * point and the original journal head.
+	 */
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
+	guard(mutex)(&c->sb_lock);
+	struct bch_sb_field_ext *ext =
+		bch2_sb_field_get(c->disk_sb.sb, ext);
+
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_data_type_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_gen_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_dirty_sectors_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_cached_sectors_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_stripe_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_stripe_redundancy_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_need_discard_key_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_freespace_key_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_freespace_hole_missing, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_bucket_gens_key_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_to_missing_lru_entry, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_lru_entry_bad, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_accounting_mismatch, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_backpointer_to_missing_ptr, ext->errors_silent);
+
+	bch2_write_super(c);
 }
 
 /*
@@ -491,7 +522,7 @@ int bch2_journal_replay(struct bch_fs *c)
 
 	/* if we did any repair, flush it immediately */
 	if (immediate_flush) {
-		bch2_journal_flush_all_pins(&c->journal);
+		bch2_journal_flush_outstanding_pins(&c->journal);
 		ret = bch2_journal_meta(&c->journal);
 	}
 
@@ -658,7 +689,9 @@ static int __bch2_fs_recovery(struct bch_fs *c)
 
 	bch2_journal_pos_from_member_info_resume(c);
 
-	if (!c->sb.clean || c->opts.retain_recovery_info) {
+	if (!c->sb.clean ||
+	    c->opts.retain_recovery_info ||
+	    c->opts.scrub_recent_journal_entries == BCH_SCRUB_JOURNAL_always) {
 		struct genradix_iter iter;
 		struct journal_replay **i;
 
@@ -757,6 +790,9 @@ use_clean:
 		bch2_reconstruct_alloc(c);
 	}
 
+	if (c->opts.journal_rewind)
+		bch2_ignore_journal_rewind_errors(c);
+
 	if (c->sb.features & BIT_ULL(BCH_FEATURE_no_alloc_info)) {
 		/* We can't go RW to fix errors without alloc info */
 		if (c->opts.fix_errors == FSCK_FIX_yes ||
@@ -806,6 +842,33 @@ use_clean:
 
 	try(bch2_sb_set_upgrade_extra(c));
 
+	if (c->opts.scrub_recent_journal_entries &&
+	    (!c->sb.clean ||
+	     c->opts.scrub_recent_journal_entries == BCH_SCRUB_JOURNAL_always)) {
+		u64 rewind_seq = 0;
+		set_bit(BCH_FS_scrub_journal, &c->flags);
+		try(bch2_scrub_journal(c, &rewind_seq));
+		clear_bit(BCH_FS_scrub_journal, &c->flags);
+		if (rewind_seq) {
+			bch_info(c, "journal scrub found bad data, rewinding to seq %llu",
+				 rewind_seq);
+			bch2_journal_log_msg(c, "journal scrub found bad data, rewinding to seq %llu",
+					     rewind_seq);
+			c->opts.journal_rewind = rewind_seq;
+			c->opts.fsck = true;
+
+			bch2_ignore_journal_rewind_errors(c);
+
+			/*
+			 * Re-read journal buckets to pick up entries that
+			 * were dropped during the first read because they
+			 * were older than last_seq:
+			 */
+			try(bch2_journal_reread_for_rewind(c, rewind_seq));
+			try(bch2_journal_keys_sort(c));
+		}
+	}
+
 	try(bch2_run_recovery_passes_startup(c, 0));
 
 	/*
@@ -827,7 +890,7 @@ use_clean:
 		test_bit(BCH_FS_errors_fixed_silent, &c->flags);
 
 	if (errors_fixed) {
-		bch2_journal_flush_all_pins(&c->journal);
+		bch2_journal_flush_outstanding_pins(&c->journal);
 		bch2_journal_meta(&c->journal);
 	}
 
@@ -1039,8 +1102,10 @@ int bch2_fs_initialize(struct bch_fs *c)
 		return ret;
 
 	/* Don't allow rewind into initialization entries */
-	bch2_journal_advance_rewind_seq(&c->journal,
-			atomic64_read(&c->journal.seq) + 1);
+	u64 init_seq = atomic64_read(&c->journal.seq) + 1;
+	bch2_journal_advance_rewind_seq(&c->journal, init_seq);
+	bch_info(c, "fs initialized, journal seq %llu rewind_seq %llu",
+		 init_seq - 1, init_seq);
 
 	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
 		guard(mutex)(&c->sb_lock);

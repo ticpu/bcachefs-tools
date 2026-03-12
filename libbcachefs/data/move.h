@@ -124,6 +124,7 @@ int bch2_evacuate_bucket(struct moving_context *,
 			   struct move_bucket *,
 			   struct bpos, int,
 			   struct data_update_opts);
+int bch2_scrub_journal(struct bch_fs *, u64 *);
 int bch2_data_job(struct bch_fs *,
 		  struct bch_move_stats *,
 		  struct bch_ioctl_data *);

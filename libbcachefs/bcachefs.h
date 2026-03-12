@@ -552,6 +552,7 @@ struct bch_dev {
 	x(btree_running)		\
 	x(accounting_replay_done)	\
 	x(may_go_rw)			\
+	x(scrub_journal)		\
 	x(may_upgrade_downgrade)	\
 	x(rw)				\
 	x(rw_init_done)			\

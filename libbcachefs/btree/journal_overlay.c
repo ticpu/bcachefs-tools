@@ -734,6 +734,28 @@ void bch2_journal_keys_put(struct bch_fs *c)
 	genradix_free(&c->journal_entries);
 }
 
+/*
+ * Free the sorted journal keys array without freeing journal_entries,
+ * so that bch2_journal_keys_sort() can re-sort from the raw entries
+ * (e.g. after changing journal_rewind).
+ */
+static void bch2_journal_keys_reset(struct bch_fs *c)
+{
+	struct journal_keys *keys = &c->journal_keys;
+
+	move_gap(keys, keys->nr);
+
+	darray_for_each(*keys, i)
+		if (i->allocated)
+			kfree(i->allocated_k);
+
+	kvfree(keys->data);
+	keys->data = NULL;
+	keys->nr = keys->gap = keys->size = 0;
+
+	darray_exit(&keys->overwrites);
+}
+
 static void __journal_keys_sort(struct journal_keys *keys)
 {
 	struct bch_fs *c = container_of(keys, struct bch_fs, journal_keys);
@@ -771,6 +793,10 @@ int bch2_journal_keys_sort(struct bch_fs *c)
 	size_t nr_read = 0;
 	size_t nr_extra_sorts = 0;
 
+	/* We may be called more than once - when deciding to rewind because of
+	 * opts.scrub_recent_journal_entries */
+	bch2_journal_keys_reset(c);
+
 	u64 rewind_seq = c->opts.journal_rewind ?: U64_MAX;
 
 	genradix_for_each(&c->journal_entries, iter, _i) {
@@ -784,7 +810,7 @@ int bch2_journal_keys_sort(struct bch_fs *c)
 		vstruct_for_each(&i->j, entry) {
 			bool rewind = !entry->level &&
 				!btree_id_is_alloc(entry->btree_id) &&
-				le64_to_cpu(i->j.seq) >= rewind_seq;
+				le64_to_cpu(i->j.seq) > rewind_seq;
 
 			if (entry->type != (rewind
 					    ? BCH_JSET_ENTRY_overwrite
