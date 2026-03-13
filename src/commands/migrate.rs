@@ -618,7 +618,7 @@ fn cmd_migrate(argv: Vec<String>) -> Result<()> {
 
                     match parse_opt_val(opt, &val_str)? {
                         None => deferred_opts.push((opt_id as usize, val_str)),
-                        Some(v) => unsafe { c::bch2_opt_set_by_id(&mut fs_opts, opt_id, v) },
+                        Some(v) => bch_bindgen::opts::opt_set_by_id(&mut fs_opts, opt_id, v),
                     }
                     i += 1;
                     continue;
@@ -687,13 +687,12 @@ fn cmd_migrate(argv: Vec<String>) -> Result<()> {
     let mut fs_opt_strs: c::bch_opt_strs = Default::default();
     for &(id, ref val) in &deferred_opts {
         let cstr = CString::new(val.as_str())?;
-        let ptr = unsafe { libc::strdup(cstr.as_ptr()) };
-        unsafe { fs_opt_strs.__bindgen_anon_1.by_id[id] = ptr };
+        fs_opt_strs.set(id, &cstr);
     }
 
     let result = migrate_fs(&fs_path, fs_opt_strs, fs_opts, fmt_opts, force);
 
-    unsafe { c::bch2_opt_strs_free(&mut fs_opt_strs) };
+    fs_opt_strs.free();
 
     result
 }

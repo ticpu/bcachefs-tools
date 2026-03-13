@@ -86,7 +86,7 @@ fn cmd_device_add(argv: Vec<String>) -> Result<()> {
         let Some((opt_id, opt)) = bch_opt_lookup(name) else { continue };
         let val = parse_opt_val(opt, value)?
             .ok_or_else(|| anyhow!("option {} requires open filesystem", name))?;
-        unsafe { c::bch2_opt_set_by_id(&mut dev_opts.opts, opt_id, val) };
+        bch_bindgen::opts::opt_set_by_id(&mut dev_opts.opts, opt_id, val);
     }
 
     if let Some(mpath_dev) = find_multipath_holder(Path::new(dev_path)) {

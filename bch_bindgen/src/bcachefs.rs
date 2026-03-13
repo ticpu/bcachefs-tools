@@ -164,6 +164,28 @@ impl dev_opts {
     }
 }
 
+impl bch_opt_strs {
+    /// Set a deferred option string by opt table index.
+    ///
+    /// The string is strdup'd into C heap memory so it can be freed
+    /// by `bch2_opt_strs_free`.
+    pub fn set(&mut self, id: usize, val: &std::ffi::CStr) {
+        unsafe {
+            self.__bindgen_anon_1.by_id[id] = libc::strdup(val.as_ptr());
+        }
+    }
+
+    /// Parse all option strings into a bch_opts struct.
+    pub fn parse(&self) -> bch_opts {
+        unsafe { c::bch2_parse_opts(*self) }
+    }
+
+    /// Free all strdup'd option strings.
+    pub fn free(&mut self) {
+        unsafe { c::bch2_opt_strs_free(self) }
+    }
+}
+
 // #[repr(u8)]
 pub enum rhash_lock_head {}
 pub enum srcu_struct {}

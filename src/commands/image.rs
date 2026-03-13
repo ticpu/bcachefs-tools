@@ -447,7 +447,7 @@ fn image_create_inner(
     let input_bytes = count_input_size(&src_dir);
 
     // Set up two devices: primary for data, temp for metadata
-    let primary_path = unsafe { CStr::from_ptr(dev_opts.path) }
+    let primary_path = dev_opts.path_cstr().unwrap()
         .to_string_lossy()
         .into_owned();
     let metadata_path = format!("{}.metadata", primary_path);
@@ -520,7 +520,7 @@ fn image_create_inner(
     let device_paths: Vec<PathBuf> = devs
         .iter()
         .map(|d| {
-            let s = unsafe { CStr::from_ptr(d.path) }.to_string_lossy();
+            let s = d.path_cstr().unwrap().to_string_lossy();
             PathBuf::from(s.as_ref())
         })
         .collect();
@@ -559,7 +559,7 @@ fn image_create_inner(
 
     if let Err(e) = result {
         for d in &devs {
-            let path = unsafe { CStr::from_ptr(d.path) }.to_string_lossy();
+            let path = d.path_cstr().unwrap().to_string_lossy();
             let _ = std::fs::remove_file(path.as_ref());
         }
         return Err(e);
@@ -823,9 +823,9 @@ fn cmd_image_create(argv: Vec<String>) -> Result<()> {
                         None => deferred_opts.push((opt_id as usize, val_str)),
                         Some(v) => {
                             if opt.flags as u32 & c::opt_flags::OPT_DEVICE as u32 != 0 {
-                                unsafe { c::bch2_opt_set_by_id(&mut dev_opts, opt_id, v) };
+                                bch_bindgen::opts::opt_set_by_id(&mut dev_opts, opt_id, v);
                             } else if opt.flags as u32 & c::opt_flags::OPT_FS as u32 != 0 {
-                                unsafe { c::bch2_opt_set_by_id(&mut fs_opts, opt_id, v) };
+                                bch_bindgen::opts::opt_set_by_id(&mut fs_opts, opt_id, v);
                             }
                         }
                     }
@@ -997,8 +997,7 @@ fn cmd_image_create(argv: Vec<String>) -> Result<()> {
     let mut fs_opt_strs: c::bch_opt_strs = Default::default();
     for &(id, ref val) in &deferred_opts {
         let cstr = CString::new(val.as_str())?;
-        let ptr = unsafe { libc::strdup(cstr.as_ptr()) };
-        unsafe { fs_opt_strs.__bindgen_anon_1.by_id[id] = ptr };
+        fs_opt_strs.set(id, &cstr);
     }
 
     // Build dev_opts
@@ -1022,7 +1021,7 @@ fn cmd_image_create(argv: Vec<String>) -> Result<()> {
         verbosity,
     );
 
-    unsafe { c::bch2_opt_strs_free(&mut fs_opt_strs) };
+    fs_opt_strs.free();
 
     result
 }

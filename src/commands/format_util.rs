@@ -351,7 +351,7 @@ pub fn format_for_device_add(
     btree_node_size: u32,
 ) -> i32 {
     let fs_opt_strs: c::bch_opt_strs = Default::default();
-    let mut fs_opts = unsafe { c::bch2_parse_opts(fs_opt_strs) };
+    let mut fs_opts = fs_opt_strs.parse();
     opt_set!(fs_opts, block_size, block_size as u16);
     opt_set!(fs_opts, btree_node_size, btree_node_size);
 

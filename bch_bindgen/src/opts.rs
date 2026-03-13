@@ -80,6 +80,11 @@ pub fn opt_set_sb(sb: &mut c::bch_sb, dev_idx: i32, opt: &c::bch_option, v: u64)
     unsafe { c::__bch2_opt_set_sb(sb, dev_idx, opt, v); }
 }
 
+/// Set an option value in a bch_opts struct by id.
+pub fn opt_set_by_id(opts: &mut c::bch_opts, id: c::bch_opt_id, v: u64) {
+    unsafe { c::bch2_opt_set_by_id(opts, id, v) }
+}
+
 pub fn parse_mount_opts(fs: Option<&mut Fs>, optstr: Option<&str>, ignore_unknown: bool)
         -> Result<c::bch_opts, crate::errcode::BchError> {
     let mut opts: c::bch_opts = Default::default();

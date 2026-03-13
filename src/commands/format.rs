@@ -15,7 +15,7 @@
 // bch_opt_strs. When a bare path argument is seen, it captures whatever
 // per-device options preceded it.
 
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CString, c_char};
 use std::io;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
@@ -236,10 +236,10 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
                         None => deferred_opts.push((opt_id as usize, val_str)),
                         Some(v) => {
                             if opt.flags as u32 & c::opt_flags::OPT_DEVICE as u32 != 0 {
-                                unsafe { c::bch2_opt_set_by_id(&mut cur_dev_opts, opt_id, v) };
+                                bch_bindgen::opts::opt_set_by_id(&mut cur_dev_opts, opt_id, v);
                                 unconsumed_dev_option = true;
                             } else if opt.flags as u32 & c::opt_flags::OPT_FS as u32 != 0 {
-                                unsafe { c::bch2_opt_set_by_id(&mut fs_opts, opt_id, v) };
+                                bch_bindgen::opts::opt_set_by_id(&mut fs_opts, opt_id, v);
                             }
                         }
                     }
@@ -456,8 +456,7 @@ fn cmd_format(argv: Vec<String>) -> Result<()> {
     let mut fs_opt_strs: c::bch_opt_strs = Default::default();
     for &(id, ref val) in &cfg.deferred_opts {
         let cstr = CString::new(val.as_str())?;
-        let ptr = unsafe { libc::strdup(cstr.as_ptr()) };
-        unsafe { fs_opt_strs.__bindgen_anon_1.by_id[id] = ptr };
+        fs_opt_strs.set(id, &cstr);
     }
 
     // Build C dev_opts — CStrings must outlive c_devices
@@ -498,7 +497,7 @@ fn cmd_format(argv: Vec<String>) -> Result<()> {
 
         let ret = unsafe { c::open_for_format(c_dev, 0, cfg.force) };
         if ret != 0 {
-            let path = unsafe { CStr::from_ptr(c_dev.path) }.to_string_lossy();
+            let path = c_dev.path_cstr().unwrap().to_string_lossy();
             bail!("Error opening {}: {}", path, io::Error::from_raw_os_error(-ret));
         }
     }
@@ -539,7 +538,7 @@ fn cmd_format(argv: Vec<String>) -> Result<()> {
     }
 
     // Free deferred option strings
-    unsafe { c::bch2_opt_strs_free(&mut fs_opt_strs) };
+    fs_opt_strs.free();
 
     Ok(())
 }
