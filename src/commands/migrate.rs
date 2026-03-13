@@ -18,13 +18,12 @@ use clap::Parser;
 use crate::commands::format::take_opt_value;
 use crate::commands::opts::{bch_opt_lookup_negated, parse_opt_val};
 use crate::key::Passphrase;
-use crate::commands::format_util::format_opts_default;
+use crate::commands::format_util::{format_opts_default, DevOpts};
 use crate::wrappers::super_io;
 
 // ---- C shim declarations ----
 
 extern "C" {
-    fn rust_bdev_open(dev: *mut c::dev_opts, mode: c::blk_mode_t) -> i32;
     fn rust_set_bit(nr: c_ulong, addr: *mut c_ulong);
 }
 
@@ -341,28 +340,22 @@ fn migrate_fs(
 
     // Find the underlying block device
     let dev_path = dev_t_to_path(fs_dev)?;
-    let dev_path_cstr = CString::new(dev_path.as_str())?;
 
-    // Set up dev_opts and open the device
-    let mut c_dev = c::dev_opts {
-        path: dev_path_cstr.as_ptr(),
-        ..Default::default()
-    };
+    // Set up DevOpts and open the device
+    let mut c_dev = DevOpts::new(CString::new(dev_path.as_str())?);
+    c_dev.open_no_blkid(
+        crate::wrappers::bdev::BLK_OPEN_READ | crate::wrappers::bdev::BLK_OPEN_WRITE,
+    ).map_err(|e| {
+        anyhow!("Error opening device to format {}: {}", dev_path, io::Error::from_raw_os_error(e))
+    })?;
 
-    let ret = unsafe { rust_bdev_open(&mut c_dev, c::BLK_OPEN_READ | c::BLK_OPEN_WRITE) };
-    if ret < 0 {
-        bail!("Error opening device to format {}: {}", dev_path,
-              io::Error::from_raw_os_error(-ret));
-    }
-
-    let bdev_fd = c_dev.fd();
-    let block_size = crate::wrappers::bdev::get_blocksize(bdev_fd);
+    let block_size = crate::wrappers::bdev::get_blocksize(c_dev.fd);
     opt_set!(fs_opts, block_size, block_size as u16);
 
     let file_path = format!("{}/bcachefs", fs_path);
     println!("Creating new filesystem on {} in space reserved at {}", dev_path, file_path);
 
-    let dev_size = crate::wrappers::bdev::get_size(bdev_fd);
+    let dev_size = crate::wrappers::bdev::get_size(c_dev.fd);
     c_dev.fs_size = dev_size;
 
     let bucket_size = crate::commands::format_util::pick_bucket_size(&fs_opts, std::slice::from_ref(&c_dev));
@@ -392,7 +385,7 @@ fn migrate_fs(
     c_dev.sb_offset = sb_offset;
     c_dev.sb_end = sb_end;
 
-    let sb = crate::commands::format_util::format(fs_opt_strs, fs_opts, format_opts, &mut [c_dev]);
+    let sb = crate::commands::format_util::format(fs_opt_strs, fs_opts, format_opts, std::slice::from_mut(&mut c_dev));
     if sb.is_null() {
         bail!("format failed");
     }

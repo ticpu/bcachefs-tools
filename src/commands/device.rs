@@ -69,16 +69,11 @@ fn cmd_device_add(argv: Vec<String>) -> Result<()> {
             .context("reading btree_node_size from sysfs")?,
     ).context("parsing btree_node_size")?;
 
-    // Build dev_opts with bch_opts from parsed arguments
-    let mut dev_opts: c::dev_opts = Default::default();
+    // Build DevOpts with bch_opts from parsed arguments
+    use crate::commands::format_util::DevOpts;
 
-    let c_path = CString::new(dev_path.as_str())?;
-    dev_opts.path = c_path.as_ptr();
-
-    let c_label = label.map(|l| CString::new(l.as_str())).transpose()?;
-    if let Some(ref l) = c_label {
-        dev_opts.label = l.as_ptr();
-    }
+    let mut dev_opts = DevOpts::new(CString::new(dev_path.as_str())?);
+    dev_opts.label = label.map(|l| CString::new(l.as_str())).transpose()?;
 
     // Apply bcachefs options (--discard, --durability, etc.)
     let bch_opts = bch_options_from_matches(&matches, device_add_opt_flags());
@@ -99,11 +94,9 @@ fn cmd_device_add(argv: Vec<String>) -> Result<()> {
         }
     }
 
-    let ret = unsafe { c::open_for_format(&mut dev_opts, 0, force) };
-    if ret != 0 {
-        return Err(anyhow!("error opening {}: {}",
-            dev_path, std::io::Error::from_raw_os_error(-ret)));
-    }
+    dev_opts.open(0, force).map_err(|e| {
+        anyhow!("error opening {}: {}", dev_path, std::io::Error::from_raw_os_error(e))
+    })?;
 
     let ret = crate::commands::format_util::format_for_device_add(
         &mut dev_opts, block_size as u32, btree_node_size as u32,

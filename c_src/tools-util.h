@@ -69,8 +69,7 @@ do {									\
 char *read_file_str(int, const char *);
 u64 read_file_u64(int, const char *);
 
-struct dev_opts;
-int open_for_format(struct dev_opts *, blk_mode_t, bool);
+void blkid_check(int fd, const char *path, bool force);
 
 bool ask_yn(void);
 

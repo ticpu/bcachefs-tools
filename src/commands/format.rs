@@ -459,34 +459,23 @@ fn cmd_format(argv: Vec<String>) -> Result<()> {
         fs_opt_strs.set(id, &cstr);
     }
 
-    // Build C dev_opts — CStrings must outlive c_devices
-    let dev_cstrs: Vec<(CString, Option<CString>)> = cfg.devices.iter()
-        .map(|dev| Ok((
-            CString::new(dev.path.as_str())?,
-            dev.label.as_ref().map(|l| CString::new(l.as_str())).transpose()?,
-        )))
+    // Build DevOpts
+    use crate::commands::format_util::DevOpts;
+
+    let mut devices: Vec<DevOpts> = cfg.devices.iter()
+        .map(|dev| {
+            let mut d = DevOpts::new(CString::new(dev.path.as_str())?);
+            d.label = dev.label.as_ref().map(|l| CString::new(l.as_str())).transpose()?;
+            d.fs_size = dev.fs_size;
+            d.opts = dev.opts;
+            Ok(d)
+        })
         .collect::<Result<_>>()?;
 
-    let mut c_devices: Vec<c::dev_opts> = cfg.devices.iter()
-        .zip(&dev_cstrs)
-        .map(|(dev, (path_c, label_c))| {
-            let mut c_dev = c::dev_opts {
-                path: path_c.as_ptr(),
-                fs_size: dev.fs_size,
-                opts: dev.opts,
-                ..Default::default()
-            };
-            if let Some(ref l) = label_c {
-                c_dev.label = l.as_ptr();
-            }
-            c_dev
-        })
-        .collect();
-
     // Open all devices for format
-    for (dev_cfg, c_dev) in cfg.devices.iter().zip(&mut c_devices) {
-        if let Some(mpath_dev) = find_multipath_holder(Path::new(&dev_cfg.path)) {
-            warn_multipath_component(Path::new(&dev_cfg.path), &mpath_dev);
+    for (i, dev) in devices.iter_mut().enumerate() {
+        if let Some(mpath_dev) = find_multipath_holder(Path::new(&cfg.devices[i].path)) {
+            warn_multipath_component(Path::new(&cfg.devices[i].path), &mpath_dev);
             if !cfg.force {
                 // Locking applies to the selected device path only; it is not
                 // coordinated across dm-mpath maps and component devices.
@@ -495,14 +484,12 @@ fn cmd_format(argv: Vec<String>) -> Result<()> {
             }
         }
 
-        let ret = unsafe { c::open_for_format(c_dev, 0, cfg.force) };
-        if ret != 0 {
-            let path = c_dev.path_cstr().unwrap().to_string_lossy();
-            bail!("Error opening {}: {}", path, io::Error::from_raw_os_error(-ret));
-        }
+        dev.open(0, cfg.force).map_err(|e| {
+            anyhow!("Error opening {}: {}", dev.path.to_string_lossy(), io::Error::from_raw_os_error(e))
+        })?;
     }
 
-    let sb = crate::commands::format_util::format(fs_opt_strs, cfg.fs_opts, fmt_opts, &mut c_devices);
+    let sb = crate::commands::format_util::format(fs_opt_strs, cfg.fs_opts, fmt_opts, &mut devices);
     if sb.is_null() {
         bail!("format returned null");
     }

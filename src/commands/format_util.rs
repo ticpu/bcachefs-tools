@@ -2,13 +2,70 @@
 
 //! Rust implementation of bch2_format and bch2_format_for_device_add.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::RawFd;
 
 use bch_bindgen::c;
 use bch_bindgen::{opt_defined, opt_get, opt_set};
 
 use crate::wrappers::super_io::{die, BCHFS_MAGIC, SUPERBLOCK_SIZE_DEFAULT};
+
+/// Device options for formatting — Rust replacement for C struct dev_opts.
+///
+/// Owns the file descriptor and string data. The fd is closed on drop.
+pub struct DevOpts {
+    pub fd: RawFd,
+    pub path: CString,
+    pub label: Option<CString>,
+    pub sb_offset: u64,
+    pub sb_end: u64,
+    pub nbuckets: u64,
+    pub fs_size: u64,
+    pub opts: c::bch_opts,
+}
+
+impl DevOpts {
+    /// Create a new DevOpts with the given path, no fd yet.
+    pub fn new(path: CString) -> Self {
+        DevOpts {
+            fd: -1,
+            path,
+            label: None,
+            sb_offset: 0,
+            sb_end: 0,
+            nbuckets: 0,
+            fs_size: 0,
+            opts: Default::default(),
+        }
+    }
+
+    /// Open the device for formatting, with blkid checks.
+    ///
+    /// Adds READ|WRITE|EXCL|BUFFERED to the given extra flags
+    /// (matching the old C open_for_format behavior).
+    pub fn open(&mut self, extra_mode: u32, force: bool) -> Result<(), i32> {
+        use crate::wrappers::bdev::*;
+        let mode = BLK_OPEN_READ | BLK_OPEN_WRITE | BLK_OPEN_EXCL | BLK_OPEN_BUFFERED | extra_mode;
+        self.fd = open_device(&self.path, mode)?;
+        blkid_check(self.fd, &self.path, force);
+        Ok(())
+    }
+
+    /// Open the device without blkid checks or default flags (for migrate).
+    pub fn open_no_blkid(&mut self, mode: u32) -> Result<(), i32> {
+        self.fd = crate::wrappers::bdev::open_device(&self.path, mode)?;
+        Ok(())
+    }
+}
+
+impl Drop for DevOpts {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            unsafe { libc::close(self.fd) };
+        }
+    }
+}
 
 /// Features enabled on all new filesystems.
 /// Must match BCH_SB_FEATURES_ALL in bcachefs_format.h.
@@ -42,7 +99,7 @@ fn group_to_target(group: u32) -> u32 {
 /// Resolve a target string (device path or disk group name) to a target id.
 fn parse_target(
     sb: &mut c::bch_sb_handle,
-    devs: &[c::dev_opts],
+    devs: &[DevOpts],
     s: *const std::os::raw::c_char,
 ) -> u32 {
     if s.is_null() {
@@ -52,10 +109,8 @@ fn parse_target(
     let target_str = unsafe { CStr::from_ptr(s) };
 
     for (idx, dev) in devs.iter().enumerate() {
-        if let Some(dev_path) = dev.path_cstr() {
-            if target_str == dev_path {
-                return dev_to_target(idx);
-            }
+        if target_str == dev.path.as_c_str() {
+            return dev_to_target(idx);
         }
     }
 
@@ -93,13 +148,13 @@ pub fn format(
     fs_opt_strs: c::bch_opt_strs,
     mut fs_opts: c::bch_opts,
     mut opts: c::format_opts,
-    dev_slice: &mut [c::dev_opts],
+    dev_slice: &mut [DevOpts],
 ) -> *mut c::bch_sb {
 
     // Get device size if not specified (needed for block size threshold)
     for dev in dev_slice.iter_mut() {
         if dev.fs_size == 0 {
-            dev.fs_size = crate::wrappers::bdev::get_size(dev.fd());
+            dev.fs_size = crate::wrappers::bdev::get_size(dev.fd);
         }
     }
 
@@ -113,7 +168,7 @@ pub fn format(
         let block_size = if total_size >= 1u64 << 30 {
             let mut bs = 4096u32;
             for dev in dev_slice.iter() {
-                bs = bs.max(crate::wrappers::bdev::get_blocksize(dev.fd()));
+                bs = bs.max(crate::wrappers::bdev::get_blocksize(dev.fd));
             }
             bs
         } else {
@@ -239,7 +294,7 @@ pub fn format(
         m.nbuckets = dev.nbuckets.to_le();
         m.first_bucket = 0;
 
-        let fd = dev.fd();
+        let fd = dev.fd;
         let opts = &mut dev.opts;
         if opt_defined!(opts, rotational) == 0 {
             let nonrot = crate::wrappers::bdev::nonrot(fd);
@@ -252,7 +307,7 @@ pub fn format(
 
     // Disk labels
     for (idx, dev) in dev_slice.iter().enumerate() {
-        let label = match dev.label_cstr() {
+        let label = match dev.label.as_deref() {
             Some(l) => l,
             None => continue,
         };
@@ -317,7 +372,7 @@ pub fn format(
             return std::ptr::null_mut();
         }
 
-        let fd = dev.fd();
+        let fd = dev.fd;
 
         if dev.sb_offset == c::BCH_SB_SECTOR as u64 {
             // Zero start of disk
@@ -329,16 +384,16 @@ pub fn format(
 
         crate::wrappers::super_io::bch2_super_write(fd, sb.sb);
 
-        unsafe { libc::close(fd) };
+        // Invalidate the fd so Drop doesn't close it — format() transfers
+        // ownership of the fd to the superblock write path.
+        dev.fd = -1;
     }
 
     // udevadm trigger --settle <devices>
     let mut udevadm = std::process::Command::new("udevadm");
     udevadm.args(["trigger", "--settle"]);
     for dev in dev_slice.iter() {
-        if let Some(path) = dev.path_cstr() {
-            udevadm.arg(path.to_str().unwrap_or(""));
-        }
+        udevadm.arg(dev.path.to_str().unwrap_or(""));
     }
     let _ = udevadm.status();
 
@@ -347,7 +402,7 @@ pub fn format(
 
 /// Format a single device for addition to an existing filesystem.
 pub fn format_for_device_add(
-    dev: &mut c::dev_opts,
+    dev: &mut DevOpts,
     block_size: u32,
     btree_node_size: u32,
 ) -> i32 {
@@ -435,7 +490,7 @@ fn rounddown_pow_of_two(v: u64) -> u64 {
 /// Pick the filesystem-wide bucket size based on device sizes and options.
 ///
 /// Returns the bucket size in bytes.
-pub fn pick_bucket_size(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
+pub fn pick_bucket_size(opts: &c::bch_opts, devs: &[DevOpts]) -> u64 {
     // Hard minimum: bucket must hold a btree node
     let mut bucket_size = opts.block_size as u64;
     if opt_defined!(opts, btree_node_size) != 0 {
@@ -445,9 +500,7 @@ pub fn pick_bucket_size(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
     let min_dev_size = c::BCH_MIN_NR_NBUCKETS as u64 * bucket_size;
     for dev in devs {
         if dev.fs_size < min_dev_size {
-            let path = dev.path_cstr()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "<unknown>".to_string());
+            let path = dev.path.to_string_lossy();
             die(&format!(
                 "cannot format {}, too small ({} bytes, min {})",
                 path, dev.fs_size, min_dev_size
@@ -490,7 +543,7 @@ pub fn pick_bucket_size(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
 /// Validate that a device's bucket size is consistent with filesystem options.
 ///
 /// Exits on validation failure (matches C `die()` behavior).
-pub fn check_bucket_size(opts: &c::bch_opts, dev: &c::dev_opts) {
+pub fn check_bucket_size(opts: &c::bch_opts, dev: &DevOpts) {
     if dev.opts.bucket_size < opts.block_size as u32 {
         die(&format!(
             "Bucket size ({}) cannot be smaller than block size ({})",

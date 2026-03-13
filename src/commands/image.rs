@@ -26,6 +26,8 @@ use clap::Parser;
 use crate::commands::format::{
     take_opt_value, take_short_value, metadata_version_current, version_parse,
 };
+use crate::commands::format_util::DevOpts;
+use crate::wrappers::bdev;
 use crate::commands::opts::{bch_opt_lookup_negated, opts_usage_str, parse_opt_val};
 use crate::key::Passphrase;
 use crate::util::parse_human_size;
@@ -433,7 +435,7 @@ fn image_create_inner(
     fs_opt_strs: c::bch_opt_strs,
     fs_opts: c::bch_opts,
     mut format_opts: c::format_opts,
-    dev_opts: c::dev_opts,
+    dev_opts: DevOpts,
     src_path: &str,
     keep_alloc: bool,
     verbosity: u32,
@@ -447,18 +449,11 @@ fn image_create_inner(
     let input_bytes = count_input_size(&src_dir);
 
     // Set up two devices: primary for data, temp for metadata
-    let primary_path = dev_opts.path_cstr().unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let primary_path = dev_opts.path.to_string_lossy().into_owned();
     let metadata_path = format!("{}.metadata", primary_path);
-    let metadata_path_cstr = CString::new(metadata_path.as_str())?;
 
     let mut devs = vec![dev_opts];
-    let mut meta_dev = c::dev_opts {
-        path: metadata_path_cstr.as_ptr(),
-        ..Default::default()
-    };
-    // data_allowed will be set below via opt_set
+    let mut meta_dev = DevOpts::new(CString::new(metadata_path.as_str())?);
 
     // Check temp file doesn't exist
     if std::path::Path::new(&metadata_path).exists() {
@@ -485,12 +480,10 @@ fn image_create_inner(
     // journal capacity for finish_image's btree migration.
     let target_size = std::cmp::max(input_bytes * 2, 64 << 20);
     for dev in &mut devs {
-        let ret = unsafe { c::open_for_format(dev, c::BLK_OPEN_CREAT, false) };
-        if ret != 0 {
-            let path = dev.path_cstr().unwrap().to_string_lossy();
-            bail!("Error opening {}: {}", path, std::io::Error::from_raw_os_error(-ret));
-        }
-        if unsafe { libc::ftruncate(dev.fd(), target_size as libc::off_t) } != 0 {
+        dev.open(bdev::BLK_OPEN_CREAT, false).map_err(|e| {
+            anyhow!("Error opening {}: {}", dev.path.to_string_lossy(), std::io::Error::from_raw_os_error(e))
+        })?;
+        if unsafe { libc::ftruncate(dev.fd, target_size as libc::off_t) } != 0 {
             bail!("ftruncate error: {}", std::io::Error::last_os_error());
         }
     }
@@ -519,10 +512,7 @@ fn image_create_inner(
     // Open filesystem
     let device_paths: Vec<PathBuf> = devs
         .iter()
-        .map(|d| {
-            let s = d.path_cstr().unwrap().to_string_lossy();
-            PathBuf::from(s.as_ref())
-        })
+        .map(|d| PathBuf::from(d.path.to_string_lossy().as_ref()))
         .collect();
 
     let mut opts: c::bch_opts = Default::default();
@@ -559,8 +549,7 @@ fn image_create_inner(
 
     if let Err(e) = result {
         for d in &devs {
-            let path = d.path_cstr().unwrap().to_string_lossy();
-            let _ = std::fs::remove_file(path.as_ref());
+            let _ = std::fs::remove_file(d.path.to_str().unwrap_or(""));
         }
         return Err(e);
     }
@@ -619,17 +608,12 @@ fn image_update_inner(
 
     // Add temporary metadata device
     let metadata_path = format!("{}.metadata", dst_image);
-    let metadata_path_cstr = CString::new(metadata_path.as_str())?;
 
-    let mut dev_opts = c::dev_opts {
-        path: metadata_path_cstr.as_ptr(),
-        ..Default::default()
-    };
+    let mut dev_opts = DevOpts::new(CString::new(metadata_path.as_str())?);
 
-    let ret = unsafe { c::open_for_format(&mut dev_opts, c::BLK_OPEN_CREAT, false) };
-    if ret != 0 {
-        bail!("error opening {}: {}", metadata_path, std::io::Error::last_os_error());
-    }
+    dev_opts.open(bdev::BLK_OPEN_CREAT, false).map_err(|e| {
+        anyhow!("error opening {}: {}", metadata_path, std::io::Error::from_raw_os_error(e))
+    })?;
 
     // Temp device needs enough space for btree nodes AND adequate journal
     // for the btree migration workload. With small bucket sizes, the
@@ -643,7 +627,7 @@ fn image_update_inner(
         ),
     );
 
-    if unsafe { libc::ftruncate(dev_opts.fd(), metadata_dev_size as libc::off_t) } != 0 {
+    if unsafe { libc::ftruncate(dev_opts.fd, metadata_dev_size as libc::off_t) } != 0 {
         bail!("ftruncate error: {}", std::io::Error::last_os_error());
     }
 
@@ -1000,22 +984,17 @@ fn cmd_image_create(argv: Vec<String>) -> Result<()> {
         fs_opt_strs.set(id, &cstr);
     }
 
-    // Build dev_opts
-    let mut c_dev_opts = c::dev_opts {
-        path: path_cstr.as_ptr(),
-        fs_size: dev_fs_size,
-        opts: dev_opts,
-        ..Default::default()
-    };
-    if let Some(ref l) = dev_label_cstr {
-        c_dev_opts.label = l.as_ptr();
-    }
+    // Build DevOpts
+    let mut d = DevOpts::new(path_cstr);
+    d.fs_size = dev_fs_size;
+    d.opts = dev_opts;
+    d.label = dev_label_cstr;
 
     let result = image_create_inner(
         fs_opt_strs,
         fs_opts,
         fmt_opts,
-        c_dev_opts,
+        d,
         &source,
         keep_alloc,
         verbosity,

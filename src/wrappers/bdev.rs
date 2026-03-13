@@ -91,6 +91,57 @@ pub fn nonrot(fd: RawFd) -> bool {
     }
 }
 
+// BLK_OPEN_* flags from include/linux/blk_types.h
+pub const BLK_OPEN_READ: u32     = 1 << 0;
+pub const BLK_OPEN_WRITE: u32    = 1 << 1;
+pub const BLK_OPEN_EXCL: u32     = 1 << 2;
+pub const BLK_OPEN_BUFFERED: u32 = 1 << 5;
+pub const BLK_OPEN_CREAT: u32    = 1 << 6;
+
+/// Open a block device or file for formatting.
+///
+/// Translates BLK_OPEN_* flags to POSIX open flags.
+/// Returns the raw fd on success, or a negative errno on failure.
+pub fn open_device(path: &std::ffi::CStr, mode: u32) -> Result<RawFd, i32> {
+    let mut flags = 0i32;
+
+    let rw = mode & (BLK_OPEN_READ | BLK_OPEN_WRITE);
+    if rw == (BLK_OPEN_READ | BLK_OPEN_WRITE) {
+        flags = libc::O_RDWR;
+    } else if mode & BLK_OPEN_READ != 0 {
+        flags = libc::O_RDONLY;
+    } else if mode & BLK_OPEN_WRITE != 0 {
+        flags = libc::O_WRONLY;
+    }
+
+    if mode & BLK_OPEN_BUFFERED == 0 {
+        flags |= libc::O_DIRECT;
+    }
+
+    if mode & BLK_OPEN_EXCL != 0 {
+        flags |= libc::O_EXCL;
+    }
+
+    if mode & BLK_OPEN_CREAT != 0 {
+        flags |= libc::O_CREAT;
+    }
+
+    let fd = unsafe { libc::open(path.as_ptr(), flags, 0o600) };
+    if fd < 0 {
+        Err(unsafe { *libc::__errno_location() })
+    } else {
+        Ok(fd)
+    }
+}
+
+/// Call the C blkid_check function to probe for existing filesystems.
+pub fn blkid_check(fd: RawFd, path: &std::ffi::CStr, force: bool) {
+    extern "C" {
+        fn blkid_check(fd: libc::c_int, path: *const libc::c_char, force: bool);
+    }
+    unsafe { blkid_check(fd, path.as_ptr(), force) }
+}
+
 fn fstat(fd: RawFd) -> libc::stat {
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::fstat(fd, &mut stat) };
