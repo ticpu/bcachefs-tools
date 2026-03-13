@@ -186,13 +186,14 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
 
     macro_rules! push_device {
         ($path:expr) => {{
+            // Device options are sticky: they apply to all subsequent
+            // devices until overridden by a new value.
             devices.push(DevConfig {
                 path: $path,
-                label: cur_label.take(),
+                label: cur_label.clone(),
                 fs_size: cur_fs_size,
-                opts: std::mem::take(&mut cur_dev_opts),
+                opts: cur_dev_opts,
             });
-            cur_fs_size = 0;
             unconsumed_dev_option = false;
         }};
     }
