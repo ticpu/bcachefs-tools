@@ -176,87 +176,70 @@ pub extern "C" fn bch2_format(
         die("insufficient memory");
     }
 
-    let sb_ptr = sb.sb;
-    let sb_ref = unsafe { &mut *sb_ptr };
+    sb.sb_mut().version = (opts.version as u16).to_le();
+    sb.sb_mut().version_min = (opts.version as u16).to_le();
+    sb.sb_mut().magic.b = BCHFS_MAGIC;
+    sb.sb_mut().user_uuid = opts.uuid;
+    sb.sb_mut().nr_devices = devs.nr as u8;
 
-    sb_ref.version = (opts.version as u16).to_le();
-    sb_ref.version_min = (opts.version as u16).to_le();
-    sb_ref.magic.b = BCHFS_MAGIC;
-    sb_ref.user_uuid = opts.uuid;
-    sb_ref.nr_devices = devs.nr as u8;
-
-    sb_ref.set_sb_version_incompat_allowed(opts.version as u64);
+    sb.sb_mut().set_sb_version_incompat_allowed(opts.version as u64);
     // These are no longer options, only for compatibility with old versions
-    sb_ref.set_sb_meta_replicas_req(1);
-    sb_ref.set_sb_data_replicas_req(1);
-    sb_ref.set_sb_extent_bp_shift(16);
+    sb.sb_mut().set_sb_meta_replicas_req(1);
+    sb.sb_mut().set_sb_data_replicas_req(1);
+    sb.sb_mut().set_sb_extent_bp_shift(16);
 
     let version_threshold =
         c::bcachefs_metadata_version::bcachefs_metadata_version_disk_accounting_big_endian as u32;
     if opts.version > version_threshold {
-        sb_ref.features[0] |= BCH_SB_FEATURES_ALL.to_le();
+        sb.sb_mut().features[0] |= BCH_SB_FEATURES_ALL.to_le();
     }
 
     // Internal UUID (different from user_uuid)
-    sb_ref.uuid.b = *uuid::Uuid::new_v4().as_bytes();
+    sb.sb_mut().uuid.b = *uuid::Uuid::new_v4().as_bytes();
 
     // Label
     if !opts.label.is_null() {
         let label = unsafe { CStr::from_ptr(opts.label) };
         let label_bytes = label.to_bytes();
-        if label_bytes.len() >= sb_ref.label.len() {
+        if label_bytes.len() >= sb.sb().label.len() {
             die(&format!(
                 "filesystem label too long (max {} characters)",
-                sb_ref.label.len() - 1
+                sb.sb().label.len() - 1
             ));
         }
-        sb_ref.label[..label_bytes.len()].copy_from_slice(label_bytes);
+        sb.sb_mut().label[..label_bytes.len()].copy_from_slice(label_bytes);
     }
 
     // Create ext field before setting options - some options (e.g.
     // dev_readahead) use set_ext which requires this field to exist
-    unsafe {
-        c::bch2_sb_field_get_minsize_id(
-            &mut *sb,
-            c::bch_sb_field_type::BCH_SB_FIELD_ext,
-            (std::mem::size_of::<c::bch_sb_field_ext>() / std::mem::size_of::<u64>()) as u32,
-        );
-    }
+    let ext_u64s = (std::mem::size_of::<c::bch_sb_field_ext>() / std::mem::size_of::<u64>()) as u32;
+    sb.field_get_minsize::<c::bch_sb_field_ext>(ext_u64s);
 
-    opt_set_sb_all(sb_ptr, -1, &mut fs_opts);
+    opt_set_sb_all(sb.sb, -1, &mut fs_opts);
 
     // Time
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_else(|_| die("error getting current time"));
     let nsec = now.as_secs() * 1_000_000_000 + now.subsec_nanos() as u64;
-    sb_ref.time_base_lo = nsec.to_le();
-    sb_ref.time_precision = 1u32.to_le();
+    sb.sb_mut().time_base_lo = nsec.to_le();
+    sb.sb_mut().time_precision = 1u32.to_le();
 
     // Member info
     let mi_size = std::mem::size_of::<c::bch_sb_field_members_v2>()
         + std::mem::size_of::<c::bch_member>() * devs.nr;
     let mi_u64s = mi_size / std::mem::size_of::<u64>();
 
-    let mi = unsafe {
-        c::bch2_sb_field_resize_id(
-            &mut *sb,
-            c::bch_sb_field_type::BCH_SB_FIELD_members_v2,
-            mi_u64s as u32,
-        ) as *mut c::bch_sb_field_members_v2
-    };
-    unsafe {
-        (*mi).member_bytes = (std::mem::size_of::<c::bch_member>() as u16).to_le();
-    }
+    let mi = bch_bindgen::sb::sb_field_resize::<c::bch_sb_field_members_v2>(&mut *sb, mi_u64s as u32)
+        .unwrap_or_else(|| die("failed to resize members_v2 field"));
+    mi.member_bytes = (std::mem::size_of::<c::bch_member>() as u16).to_le();
 
     for (idx, dev) in dev_slice.iter_mut().enumerate() {
-        let m = unsafe { c::bch2_members_v2_get_mut(sb.sb, idx as i32) };
-
-        unsafe {
-            (*m).uuid.b = *uuid::Uuid::new_v4().as_bytes();
-            (*m).nbuckets = dev.nbuckets.to_le();
-            (*m).first_bucket = 0;
-        }
+        let m = sb.member_mut(idx as u32)
+            .unwrap_or_else(|| die("member index out of range"));
+        m.uuid.b = *uuid::Uuid::new_v4().as_bytes();
+        m.nbuckets = dev.nbuckets.to_le();
+        m.first_bucket = 0;
 
         let opts = &mut dev.opts;
         if opt_defined!(opts, rotational) == 0 {
@@ -265,7 +248,7 @@ pub extern "C" fn bch2_format(
         }
 
         opt_set_sb_all(sb.sb, idx as i32, &mut dev.opts);
-        unsafe { &mut *m }.set_member_rotational_set(1);
+        sb.member_mut(idx as u32).unwrap().set_member_rotational_set(1);
     }
 
     // Disk labels
@@ -283,8 +266,7 @@ pub extern "C" fn bch2_format(
         }
 
         // Recompute m after sb modification (memory may have been reallocated)
-        let m = unsafe { c::bch2_members_v2_get_mut(sb.sb, idx as i32) };
-        unsafe { &mut *m }.set_member_group(path_idx as u64 + 1);
+        sb.member_mut(idx as u32).unwrap().set_member_group(path_idx as u64 + 1);
     }
 
     // Targets
@@ -294,25 +276,20 @@ pub extern "C" fn bch2_format(
     let background = parse_target(sb_handle, dev_slice, target_strs.background_target);
     let promote    = parse_target(sb_handle, dev_slice, target_strs.promote_target);
     let metadata   = parse_target(sb_handle, dev_slice, target_strs.metadata_target);
-    let sb_ref = unsafe { &mut *sb.sb };
-    sb_ref.set_sb_foreground_target(foreground as u64);
-    sb_ref.set_sb_background_target(background as u64);
-    sb_ref.set_sb_promote_target(promote as u64);
-    sb_ref.set_sb_metadata_target(metadata as u64);
+    sb.sb_mut().set_sb_foreground_target(foreground as u64);
+    sb.sb_mut().set_sb_background_target(background as u64);
+    sb.sb_mut().set_sb_promote_target(promote as u64);
+    sb.sb_mut().set_sb_metadata_target(metadata as u64);
 
     // Encryption
     if opts.encrypted {
-        let crypt_size =
+        let crypt_u64s =
             std::mem::size_of::<c::bch_sb_field_crypt>() / std::mem::size_of::<u64>();
-        let crypt = unsafe {
-            c::bch2_sb_field_resize_id(
-                &mut *sb,
-                c::bch_sb_field_type::BCH_SB_FIELD_crypt,
-                crypt_size as u32,
-            ) as *mut c::bch_sb_field_crypt
-        };
-        unsafe { c::bch_sb_crypt_init(sb.sb, crypt, opts.passphrase) };
-        unsafe { &mut *sb.sb }.set_sb_encryption_type(1);
+        let crypt: &mut c::bch_sb_field_crypt = sb.field_resize(crypt_u64s as u32)
+            .unwrap_or_else(|| die("failed to create crypt field"));
+        let crypt_ptr = crypt as *mut c::bch_sb_field_crypt;
+        unsafe { c::bch_sb_crypt_init(sb.sb, crypt_ptr, opts.passphrase) };
+        sb.sb_mut().set_sb_encryption_type(1);
     }
 
     unsafe { c::bch2_sb_members_cpy_v2_v1(&mut *sb) };
@@ -320,8 +297,7 @@ pub extern "C" fn bch2_format(
     // Write superblocks to each device
     for (idx, dev) in dev_slice.iter_mut().enumerate() {
         let size_sectors = dev.fs_size >> 9;
-        let sb_ref = unsafe { &mut *sb.sb };
-        sb_ref.dev_idx = idx as u8;
+        sb.sb_mut().dev_idx = idx as u8;
 
         if dev.sb_offset == 0 {
             dev.sb_offset = c::BCH_SB_SECTOR as u64;
@@ -329,7 +305,7 @@ pub extern "C" fn bch2_format(
         }
 
         if let Err(e) = crate::wrappers::super_io::sb_layout_init(
-            unsafe { &mut (*sb.sb).layout },
+            &mut sb.sb_mut().layout,
             fs_opts.block_size as u32,
             dev.opts.bucket_size,
             opts.superblock_size,

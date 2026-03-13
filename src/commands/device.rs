@@ -327,15 +327,15 @@ fn set_state_offline(device: &str, new_state: u32) -> Result<()> {
     if ret != 0 {
         return Err(anyhow!("error opening {}: {}", device, bch_err_str(ret)));
     }
-    let dev_idx = unsafe { (*sb_handle.sb).dev_idx as u32 };
-    unsafe { c::bch2_free_super(&mut sb_handle) };
+    let dev_idx = sb_handle.sb().dev_idx as u32;
+    drop(sb_handle);
 
     let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
         .map_err(|e| anyhow!("Error opening filesystem: {}", e))?;
 
     {
         let _lock = fs.sb_lock();
-        unsafe { fs.members_v2_get_mut(dev_idx) }.set_member_state(new_state as u64);
+        unsafe { fs.member_mut(dev_idx) }.set_member_state(new_state as u64);
         fs.write_super();
     }
     Ok(())

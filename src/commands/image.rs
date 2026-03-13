@@ -81,10 +81,10 @@ fn count_input_size(dir: &std::fs::File) -> u64 {
 fn set_data_allowed_for_image_update(fs: &Fs) {
     let _lock = fs.sb_lock();
 
-    let m0 = unsafe { fs.members_v2_get_mut(0) };
+    let m0 = unsafe { fs.member_mut(0) };
     m0.set_member_data_allowed(1 << c::bch_data_type::BCH_DATA_user as u64);
 
-    let m1 = unsafe { fs.members_v2_get_mut(1) };
+    let m1 = unsafe { fs.member_mut(1) };
     m1.set_member_data_allowed(
         (1 << c::bch_data_type::BCH_DATA_journal as u64)
             | (1 << c::bch_data_type::BCH_DATA_btree as u64),
@@ -355,7 +355,7 @@ fn finish_image(fs: &Fs, keep_alloc: bool, verbosity: u32) -> Result<(), anyhow:
     // Allow btree data on primary device
     {
         let _lock = fs.sb_lock();
-        let m = unsafe { fs.members_v2_get_mut(0) };
+        let m = unsafe { fs.member_mut(0) };
         let allowed = m.member_data_allowed() | (1 << c::bch_data_type::BCH_DATA_btree as u64);
         m.set_member_data_allowed(allowed);
         fs.write_super();
@@ -395,36 +395,33 @@ fn finish_image(fs: &Fs, keep_alloc: bool, verbosity: u32) -> Result<(), anyhow:
     unsafe { (*fs.raw).devs[1] = std::ptr::null_mut() };
 
     // Allow journal on primary device
-    let m = unsafe { fs.members_v2_get_mut(0) };
+    let m = unsafe { fs.member_mut(0) };
     let allowed = m.member_data_allowed() | (1 << c::bch_data_type::BCH_DATA_journal as u64);
     m.set_member_data_allowed(allowed);
 
     // Set nbuckets
-    unsafe { fs.members_v2_get_mut(0) }.nbuckets = nbuckets.to_le();
+    unsafe { fs.member_mut(0) }.nbuckets = nbuckets.to_le();
 
     // Set resize_on_mount for all online members
     let _ = fs.for_each_online_member(|ca| {
-        let m = unsafe { fs.members_v2_get_mut(ca.dev_idx as u32) };
+        let m = unsafe { fs.member_mut(ca.dev_idx as u32) };
         m.set_member_resize_on_mount(1);
         std::ops::ControlFlow::Continue(())
     });
 
     // Set small_image feature
-    let sb = unsafe { &mut *(*fs.raw).disk_sb.sb };
-    sb.features[0] |= (1u64 << c::bch_sb_feature::BCH_FEATURE_small_image as u64).to_le();
+    let disk_sb = unsafe { fs.disk_sb_mut() };
+    disk_sb.sb_mut().features[0] |= (1u64 << c::bch_sb_feature::BCH_FEATURE_small_image as u64).to_le();
 
     // Resize members_v2 to contain only one device
-    let mi: &c::bch_sb_field_members_v2 = sb::sb_field_get(sb)
+    let mi: &c::bch_sb_field_members_v2 = disk_sb.field()
         .expect("members_v2 field missing");
     let member_bytes = u16::from_le(mi.member_bytes);
     let u64s = (std::mem::size_of::<c::bch_sb_field_members_v2>() as u32 + member_bytes as u32)
         .div_ceil(8) as u32;
-    let disk_sb = unsafe { fs.disk_sb_mut() };
-    unsafe {
-        sb::sb_field_resize::<c::bch_sb_field_members_v2>(disk_sb, u64s);
-    }
-    unsafe { (*disk_sb.sb).nr_devices = 1 };
-    unsafe { (*disk_sb.sb).set_sb_multi_device(0) };
+    sb::sb_field_resize::<c::bch_sb_field_members_v2>(disk_sb, u64s);
+    disk_sb.sb_mut().nr_devices = 1;
+    disk_sb.sb_mut().set_sb_multi_device(0);
 
     fs.write_super();
 

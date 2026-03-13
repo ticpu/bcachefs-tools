@@ -79,8 +79,57 @@ impl bch_sb_handle {
         unsafe { &*self.sb }
     }
 
+    pub fn sb_mut(&mut self) -> &mut bch_sb {
+        unsafe { &mut *self.sb }
+    }
+
     pub fn bdev(&self) -> &block_device {
         unsafe { &*self.bdev }
+    }
+
+    /// Get a typed reference to a superblock field, or None if absent.
+    pub fn field<F: crate::sb::SbField>(&self) -> Option<&F> {
+        crate::sb::sb_field_get(self.sb())
+    }
+
+    /// Get a typed mutable reference to a superblock field, or None if absent.
+    pub fn field_mut<F: crate::sb::SbField>(&mut self) -> Option<&mut F> {
+        crate::sb::sb_field_get_mut(self)
+    }
+
+    /// Resize a superblock field to `u64s` 64-bit words.
+    pub fn field_resize<F: crate::sb::SbField>(&mut self, u64s: u32) -> Option<&mut F> {
+        crate::sb::sb_field_resize(self, u64s)
+    }
+
+    /// Get or create a superblock field with at least `min_u64s` size.
+    pub fn field_get_minsize<F: crate::sb::SbField>(&mut self, min_u64s: u32) -> Option<&mut F> {
+        crate::sb::sb_field_get_minsize(self, min_u64s)
+    }
+
+    /// Get a mutable reference to a single member entry by device index.
+    ///
+    /// This is the simple accessor for one-shot field mutation. For
+    /// iteration, use `members_v2_mut()`.
+    pub fn member_mut(&mut self, idx: u32) -> Option<&mut bch_member> {
+        let nr = self.sb().nr_devices as u32;
+        if idx >= nr { return None; }
+        unsafe { Some(&mut *c::bch2_members_v2_get_mut(self.sb, idx as i32)) }
+    }
+
+    /// Read-only, bounds-checked access to members_v2.
+    pub fn members_v2(&self) -> Option<crate::sb::MembersV2<'_>> {
+        crate::sb::members_v2(self.sb())
+    }
+
+    /// Mutable, bounds-checked access to members_v2.
+    pub fn members_v2_mut(&mut self) -> Option<crate::sb::MembersV2Mut<'_>> {
+        crate::sb::members_v2_mut(self)
+    }
+
+    /// Read-only, bounds-checked access to members_v1.
+    pub fn members_v1(&self) -> Option<crate::sb::MembersV1<'_>> {
+        crate::sb::members_v1(self.sb())
     }
 }
 
