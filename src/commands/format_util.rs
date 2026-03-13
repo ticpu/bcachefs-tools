@@ -239,9 +239,10 @@ pub fn format(
         m.nbuckets = dev.nbuckets.to_le();
         m.first_bucket = 0;
 
+        let fd = dev.fd();
         let opts = &mut dev.opts;
         if opt_defined!(opts, rotational) == 0 {
-            let nonrot = unsafe { c::bdev_nonrot(dev.bdev) };
+            let nonrot = crate::wrappers::bdev::nonrot(fd);
             opt_set!(opts, rotational, !nonrot as u8);
         }
 

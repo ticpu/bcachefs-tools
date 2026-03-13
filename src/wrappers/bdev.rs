@@ -71,6 +71,26 @@ pub fn fd_to_dev_model(fd: RawFd) -> String {
     "(unknown model)".to_string()
 }
 
+/// Returns true if the block device is non-rotational (SSD).
+///
+/// For regular files, returns false.
+pub fn nonrot(fd: RawFd) -> bool {
+    let stat = fstat(fd);
+
+    if !is_blk(stat.st_mode) {
+        return false;
+    }
+
+    let major = libc::major(stat.st_rdev);
+    let minor = libc::minor(stat.st_rdev);
+    let path = format!("/sys/dev/block/{}:{}/queue/rotational", major, minor);
+
+    match std::fs::read_to_string(&path) {
+        Ok(s) => s.trim() == "0",
+        Err(_) => false,
+    }
+}
+
 fn fstat(fd: RawFd) -> libc::stat {
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::fstat(fd, &mut stat) };
