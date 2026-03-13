@@ -9,7 +9,6 @@
 // keeps everything in Rust so the Vec is dropped with the correct
 // allocator.
 
-use std::ffi::CStr;
 use std::fmt::Write;
 use std::path::PathBuf;
 
@@ -61,12 +60,8 @@ unsafe fn print_one_member(
     write!(out, "Device {}:\t{}\t", idx, name_str).unwrap();
 
     if let Some((_, sb_handle)) = dev {
-        let model = c::fd_to_dev_model(sb_handle.bdev().bd_fd);
-        if !model.is_null() {
-            let model_str = CStr::from_ptr(model).to_string_lossy();
-            write!(out, "{}", model_str).unwrap();
-            libc::free(model as *mut _);
-        }
+        let model = crate::wrappers::bdev::fd_to_dev_model(sb_handle.bdev().bd_fd);
+        write!(out, "{}", model).unwrap();
     }
     out.newline();
 

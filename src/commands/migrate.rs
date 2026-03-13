@@ -356,13 +356,13 @@ fn migrate_fs(
     }
 
     let bdev_fd = c_dev.fd();
-    let block_size = unsafe { c::get_blocksize(bdev_fd) };
+    let block_size = crate::wrappers::bdev::get_blocksize(bdev_fd);
     opt_set!(fs_opts, block_size, block_size as u16);
 
     let file_path = format!("{}/bcachefs", fs_path);
     println!("Creating new filesystem on {} in space reserved at {}", dev_path, file_path);
 
-    let dev_size = unsafe { c::get_size(bdev_fd) };
+    let dev_size = crate::wrappers::bdev::get_size(bdev_fd);
     c_dev.fs_size = dev_size;
 
     let bucket_size = crate::commands::format_util::pick_bucket_size(&fs_opts, std::slice::from_ref(&c_dev));

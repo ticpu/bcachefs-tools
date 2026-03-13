@@ -96,32 +96,6 @@ u64 read_file_u64(int dirfd, const char *path)
 	return v;
 }
 
-/* Returns size of file or block device: */
-u64 get_size(int fd)
-{
-	struct stat statbuf = xfstat(fd);
-
-	if (!S_ISBLK(statbuf.st_mode))
-		return statbuf.st_size;
-
-	u64 ret;
-	xioctl(fd, BLKGETSIZE64, &ret);
-	return ret;
-}
-
-/* Returns blocksize, in bytes: */
-unsigned get_blocksize(int fd)
-{
-	struct stat statbuf = xfstat(fd);
-
-	if (!S_ISBLK(statbuf.st_mode))
-		return statbuf.st_blksize;
-
-	unsigned ret;
-	xioctl(fd, BLKPBSZGET, &ret);
-	return ret;
-}
-
 /* Open a block device, do magic blkid stuff to probe for existing filesystems: */
 int open_for_format(struct dev_opts *dev, blk_mode_t mode, bool force)
 {
@@ -367,47 +341,3 @@ u32 crc32c(u32 crc, const void *buf, size_t size)
 
 #endif /* HAVE_WORKING_IFUNC */
 
-static char *dev_to_sysfs_path(dev_t dev)
-{
-	return mprintf("/sys/dev/block/%u:%u", major(dev), minor(dev));
-}
-
-char *fd_to_dev_model(int fd)
-{
-	struct stat stat = xfstat(fd);
-
-	if (S_ISBLK(stat.st_mode)) {
-		char *sysfs_path = dev_to_sysfs_path(stat.st_rdev);
-
-		char *model_path = mprintf("%s/device/model", sysfs_path);
-		if (!access(model_path, R_OK))
-			goto got_model;
-		free(model_path);
-
-		/* partition? try parent */
-
-		model_path = mprintf("%s/../device/model", sysfs_path);
-		if (!access(model_path, R_OK))
-			goto got_model;
-		free(model_path);
-
-		/* loop device? try loop/backing_file */
-
-		model_path = mprintf("%s/loop/backing_file", sysfs_path);
-		if (!access(model_path, R_OK))
-			goto got_model;
-		free(model_path);
-
-		free(sysfs_path);
-		return strdup("(unknown model)");
-got_model:
-		{
-			char *model = read_file_str(AT_FDCWD, model_path);
-			free(model_path);
-			free(sysfs_path);
-			return model;
-		}
-	} else {
-		return strdup("(image file)");
-	}
-}

@@ -99,7 +99,7 @@ pub fn format(
     // Get device size if not specified (needed for block size threshold)
     for dev in dev_slice.iter_mut() {
         if dev.fs_size == 0 {
-            dev.fs_size = unsafe { c::get_size(dev.fd()) };
+            dev.fs_size = crate::wrappers::bdev::get_size(dev.fd());
         }
     }
 
@@ -113,7 +113,7 @@ pub fn format(
         let block_size = if total_size >= 1u64 << 30 {
             let mut bs = 4096u32;
             for dev in dev_slice.iter() {
-                bs = bs.max(unsafe { c::get_blocksize(dev.fd()) });
+                bs = bs.max(crate::wrappers::bdev::get_blocksize(dev.fd()));
             }
             bs
         } else {
