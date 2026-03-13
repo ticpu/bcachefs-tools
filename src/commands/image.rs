@@ -487,10 +487,10 @@ fn image_create_inner(
     for dev in &mut devs {
         let ret = unsafe { c::open_for_format(dev, c::BLK_OPEN_CREAT, false) };
         if ret != 0 {
-            let path = unsafe { CStr::from_ptr(dev.path) }.to_string_lossy();
+            let path = dev.path_cstr().unwrap().to_string_lossy();
             bail!("Error opening {}: {}", path, std::io::Error::from_raw_os_error(-ret));
         }
-        if unsafe { libc::ftruncate((*dev.bdev).bd_fd, target_size as libc::off_t) } != 0 {
+        if unsafe { libc::ftruncate(dev.fd(), target_size as libc::off_t) } != 0 {
             bail!("ftruncate error: {}", std::io::Error::last_os_error());
         }
     }
@@ -643,7 +643,7 @@ fn image_update_inner(
         ),
     );
 
-    if unsafe { libc::ftruncate((*dev_opts.bdev).bd_fd, metadata_dev_size as libc::off_t) } != 0 {
+    if unsafe { libc::ftruncate(dev_opts.fd(), metadata_dev_size as libc::off_t) } != 0 {
         bail!("ftruncate error: {}", std::io::Error::last_os_error());
     }
 

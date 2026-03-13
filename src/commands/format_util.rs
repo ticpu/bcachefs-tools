@@ -52,8 +52,7 @@ fn parse_target(
     let target_str = unsafe { CStr::from_ptr(s) };
 
     for (idx, dev) in devs.iter().enumerate() {
-        if !dev.path.is_null() {
-            let dev_path = unsafe { CStr::from_ptr(dev.path) };
+        if let Some(dev_path) = dev.path_cstr() {
             if target_str == dev_path {
                 return dev_to_target(idx);
             }
@@ -69,18 +68,19 @@ fn parse_target(
 }
 
 /// Set all sb options from a bch_opts struct.
-fn opt_set_sb_all(sb: *mut c::bch_sb, dev_idx: i32, opts: &mut c::bch_opts) {
-    for (id, opt) in bch_bindgen::opts::opt_table().iter().enumerate() {
-        // SAFETY: id is in 0..bch2_opts_nr, the valid range of bch_opt_id
-        let opt_id: c::bch_opt_id = unsafe { std::mem::transmute(id as u32) };
+fn opt_set_sb_all(sb: &mut c::bch_sb, dev_idx: i32, opts: &mut c::bch_opts) {
+    use bch_bindgen::opts;
 
-        let v = if unsafe { c::bch2_opt_defined_by_id(opts, opt_id) } {
-            unsafe { c::bch2_opt_get_by_id(opts, opt_id) }
+    for (id, opt) in opts::opt_table().iter().enumerate() {
+        let opt_id = opts::opt_id(id);
+
+        let v = if opts::opt_defined_by_id(opts, opt_id) {
+            opts::opt_get_by_id(opts, opt_id)
         } else {
-            unsafe { c::bch2_opt_get_by_id(&c::bch2_opts_default, opt_id) }
+            opts::opt_get_by_id(opts::opts_default(), opt_id)
         };
 
-        unsafe { c::__bch2_opt_set_sb(sb, dev_idx, opt, v) };
+        opts::opt_set_sb(sb, dev_idx, opt, v);
     }
 }
 
@@ -99,7 +99,7 @@ pub fn format(
     // Get device size if not specified (needed for block size threshold)
     for dev in dev_slice.iter_mut() {
         if dev.fs_size == 0 {
-            dev.fs_size = unsafe { c::get_size((*dev.bdev).bd_fd) };
+            dev.fs_size = unsafe { c::get_size(dev.fd()) };
         }
     }
 
@@ -113,7 +113,7 @@ pub fn format(
         let block_size = if total_size >= 1u64 << 30 {
             let mut bs = 4096u32;
             for dev in dev_slice.iter() {
-                bs = bs.max(unsafe { c::get_blocksize((*dev.bdev).bd_fd) });
+                bs = bs.max(unsafe { c::get_blocksize(dev.fd()) });
             }
             bs
         } else {
@@ -147,7 +147,7 @@ pub fn format(
 
     // Calculate btree node size
     if opt_defined!(fs_opts, btree_node_size) == 0 {
-        let mut s = unsafe { c::bch2_opts_default.btree_node_size };
+        let mut s = bch_bindgen::opts::opts_default().btree_node_size;
         for dev in dev_slice.iter() {
             s = s.min(dev.opts.bucket_size);
         }
@@ -213,7 +213,7 @@ pub fn format(
     let ext_u64s = (std::mem::size_of::<c::bch_sb_field_ext>() / std::mem::size_of::<u64>()) as u32;
     sb.field_get_minsize::<c::bch_sb_field_ext>(ext_u64s);
 
-    opt_set_sb_all(sb.sb, -1, &mut fs_opts);
+    opt_set_sb_all(sb.sb_mut(), -1, &mut fs_opts);
 
     // Time
     let now = std::time::SystemTime::now()
@@ -245,17 +245,18 @@ pub fn format(
             opt_set!(opts, rotational, !nonrot as u8);
         }
 
-        opt_set_sb_all(sb.sb, idx as i32, &mut dev.opts);
+        opt_set_sb_all(sb.sb_mut(), idx as i32, &mut dev.opts);
         sb.member_mut(idx as u32).unwrap().set_member_rotational_set(1);
     }
 
     // Disk labels
     for (idx, dev) in dev_slice.iter().enumerate() {
-        if dev.label.is_null() {
-            continue;
-        }
+        let label = match dev.label_cstr() {
+            Some(l) => l,
+            None => continue,
+        };
 
-        let path_idx = unsafe { c::bch2_disk_path_find_or_create(&mut *sb, dev.label) };
+        let path_idx = unsafe { c::bch2_disk_path_find_or_create(&mut *sb, label.as_ptr()) };
         if path_idx < 0 {
             die(&format!(
                 "error creating disk path: {}",
@@ -315,7 +316,7 @@ pub fn format(
             return std::ptr::null_mut();
         }
 
-        let fd = unsafe { (*dev.bdev).bd_fd };
+        let fd = dev.fd();
 
         if dev.sb_offset == c::BCH_SB_SECTOR as u64 {
             // Zero start of disk
@@ -334,8 +335,7 @@ pub fn format(
     let mut udevadm = std::process::Command::new("udevadm");
     udevadm.args(["trigger", "--settle"]);
     for dev in dev_slice.iter() {
-        if !dev.path.is_null() {
-            let path = unsafe { CStr::from_ptr(dev.path) };
+        if let Some(path) = dev.path_cstr() {
             udevadm.arg(path.to_str().unwrap_or(""));
         }
     }
@@ -416,6 +416,14 @@ fn dev_bucket_size_clamp(fs_opts: c::bch_opts, dev_size: u64, fs_bucket_size: u6
     dev_bucket_size
 }
 
+fn total_system_ram() -> u64 {
+    let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sysinfo(&mut info) } != 0 {
+        die("sysinfo() failed");
+    }
+    info.totalram as u64 * info.mem_unit as u64
+}
+
 fn rounddown_pow_of_two(v: u64) -> u64 {
     if v == 0 {
         return 0;
@@ -436,11 +444,9 @@ pub fn pick_bucket_size(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
     let min_dev_size = c::BCH_MIN_NR_NBUCKETS as u64 * bucket_size;
     for dev in devs {
         if dev.fs_size < min_dev_size {
-            let path = if dev.path.is_null() {
-                "<unknown>".to_string()
-            } else {
-                unsafe { CStr::from_ptr(dev.path) }.to_string_lossy().into_owned()
-            };
+            let path = dev.path_cstr()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<unknown>".to_string());
             die(&format!(
                 "cannot format {}, too small ({} bytes, min {})",
                 path, dev.fs_size, min_dev_size
@@ -470,11 +476,7 @@ pub fn pick_bucket_size(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
     // Upper bound on bucket count: ensure we can fsck with available
     // memory. Large fudge factor to allow for other fsck processes
     // and devices being added after creation
-    let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
-    if unsafe { libc::sysinfo(&mut info) } != 0 {
-        die("sysinfo() failed");
-    }
-    let total_ram = info.totalram as u64 * info.mem_unit as u64;
+    let total_ram = total_system_ram();
     let mem_available_for_fsck = total_ram / 8;
     let bucket_struct_size = std::mem::size_of::<c::bucket>() as u64;
     let buckets_can_fsck = mem_available_for_fsck / (bucket_struct_size * 3 / 2);
@@ -514,11 +516,4 @@ pub fn check_bucket_size(opts: &c::bch_opts, dev: &c::dev_opts) {
     }
 }
 
-pub fn pick_bucket_size_for_devs(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
-    pick_bucket_size(opts, devs)
-}
-
-pub fn check_bucket_size_for_dev(opts: &c::bch_opts, dev: &c::dev_opts) {
-    check_bucket_size(opts, dev);
-}
 

@@ -51,6 +51,35 @@ macro_rules! opt_get {
     };
 }
 
+/// Safe conversion from opt table index to bch_opt_id.
+///
+/// Panics if idx >= bch2_opts_nr (i.e. out of the opt_table range).
+pub fn opt_id(idx: usize) -> c::bch_opt_id {
+    assert!(idx < c::bch_opt_id::bch2_opts_nr as usize);
+    // SAFETY: idx is in 0..bch2_opts_nr, the valid range for bch_opt_id
+    unsafe { std::mem::transmute(idx as u32) }
+}
+
+/// Check whether an option is explicitly defined in the opts struct.
+pub fn opt_defined_by_id(opts: &c::bch_opts, id: c::bch_opt_id) -> bool {
+    unsafe { c::bch2_opt_defined_by_id(opts, id) }
+}
+
+/// Get the value of an option by id.
+pub fn opt_get_by_id(opts: &c::bch_opts, id: c::bch_opt_id) -> u64 {
+    unsafe { c::bch2_opt_get_by_id(opts, id) }
+}
+
+/// Reference to the default opts (C global).
+pub fn opts_default() -> &'static c::bch_opts {
+    unsafe { &c::bch2_opts_default }
+}
+
+/// Set a superblock option from the opt table.
+pub fn opt_set_sb(sb: &mut c::bch_sb, dev_idx: i32, opt: &c::bch_option, v: u64) {
+    unsafe { c::__bch2_opt_set_sb(sb, dev_idx, opt, v); }
+}
+
 pub fn parse_mount_opts(fs: Option<&mut Fs>, optstr: Option<&str>, ignore_unknown: bool)
         -> Result<c::bch_opts, crate::errcode::BchError> {
     let mut opts: c::bch_opts = Default::default();

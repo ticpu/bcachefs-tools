@@ -139,6 +139,31 @@ impl Drop for bch_sb_handle {
     }
 }
 
+impl dev_opts {
+    /// File descriptor for this device's block device.
+    pub fn fd(&self) -> i32 {
+        unsafe { (*self.bdev).bd_fd }
+    }
+
+    /// Device path as a CStr, or None if null.
+    pub fn path_cstr(&self) -> Option<&std::ffi::CStr> {
+        if self.path.is_null() {
+            None
+        } else {
+            Some(unsafe { std::ffi::CStr::from_ptr(self.path) })
+        }
+    }
+
+    /// Label as a CStr, or None if null.
+    pub fn label_cstr(&self) -> Option<&std::ffi::CStr> {
+        if self.label.is_null() {
+            None
+        } else {
+            Some(unsafe { std::ffi::CStr::from_ptr(self.label) })
+        }
+    }
+}
+
 // #[repr(u8)]
 pub enum rhash_lock_head {}
 pub enum srcu_struct {}
