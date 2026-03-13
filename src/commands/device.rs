@@ -105,7 +105,7 @@ fn cmd_device_add(argv: Vec<String>) -> Result<()> {
             dev_path, std::io::Error::from_raw_os_error(-ret)));
     }
 
-    let ret = crate::commands::format_util::bch2_format_for_device_add(
+    let ret = crate::commands::format_util::format_for_device_add(
         &mut dev_opts, block_size as u32, btree_node_size as u32,
     );
     if ret != 0 {

@@ -503,17 +503,9 @@ fn cmd_format(argv: Vec<String>) -> Result<()> {
         }
     }
 
-    // Call bch2_format
-    let dev_list = c::dev_opts_list {
-        nr: c_devices.len(),
-        size: c_devices.len(),
-        data: c_devices.as_mut_ptr(),
-        preallocated: Default::default(),
-    };
-
-    let sb = crate::commands::format_util::bch2_format(fs_opt_strs, cfg.fs_opts, fmt_opts, dev_list);
+    let sb = crate::commands::format_util::format(fs_opt_strs, cfg.fs_opts, fmt_opts, &mut c_devices);
     if sb.is_null() {
-        bail!("bch2_format returned null");
+        bail!("format returned null");
     }
 
     // Print superblock

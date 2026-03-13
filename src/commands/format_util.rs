@@ -89,13 +89,12 @@ fn opt_set_sb_all(sb: *mut c::bch_sb, dev_idx: i32, opts: &mut c::bch_opts) {
 /// Returns a pointer to the superblock (caller must free with `free()`).
 ///
 /// Exits on fatal errors (matching the C `die()` behavior).
-pub fn bch2_format(
+pub fn format(
     fs_opt_strs: c::bch_opt_strs,
     mut fs_opts: c::bch_opts,
     mut opts: c::format_opts,
-    devs: c::dev_opts_list,
+    dev_slice: &mut [c::dev_opts],
 ) -> *mut c::bch_sb {
-    let dev_slice = unsafe { std::slice::from_raw_parts_mut(devs.data, devs.nr) };
 
     // Get device size if not specified (needed for block size threshold)
     for dev in dev_slice.iter_mut() {
@@ -179,7 +178,7 @@ pub fn bch2_format(
     sb.sb_mut().version_min = (opts.version as u16).to_le();
     sb.sb_mut().magic.b = BCHFS_MAGIC;
     sb.sb_mut().user_uuid = opts.uuid;
-    sb.sb_mut().nr_devices = devs.nr as u8;
+    sb.sb_mut().nr_devices = dev_slice.len() as u8;
 
     sb.sb_mut().set_sb_version_incompat_allowed(opts.version as u64);
     // These are no longer options, only for compatibility with old versions
@@ -226,7 +225,7 @@ pub fn bch2_format(
 
     // Member info
     let mi_size = std::mem::size_of::<c::bch_sb_field_members_v2>()
-        + std::mem::size_of::<c::bch_member>() * devs.nr;
+        + std::mem::size_of::<c::bch_member>() * dev_slice.len();
     let mi_u64s = mi_size / std::mem::size_of::<u64>();
 
     let mi = bch_bindgen::sb::sb_field_resize::<c::bch_sb_field_members_v2>(&mut *sb, mi_u64s as u32)
@@ -346,8 +345,8 @@ pub fn bch2_format(
 }
 
 /// Format a single device for addition to an existing filesystem.
-pub fn bch2_format_for_device_add(
-    dev: *mut c::dev_opts,
+pub fn format_for_device_add(
+    dev: &mut c::dev_opts,
     block_size: u32,
     btree_node_size: u32,
 ) -> i32 {
@@ -356,15 +355,8 @@ pub fn bch2_format_for_device_add(
     opt_set!(fs_opts, block_size, block_size as u16);
     opt_set!(fs_opts, btree_node_size, btree_node_size);
 
-    let devs = c::dev_opts_list {
-        nr: 1,
-        size: 1,
-        data: dev,
-        preallocated: Default::default(),
-    };
-
     let fmt_opts = format_opts_default();
-    let sb = bch2_format(fs_opt_strs, fs_opts, fmt_opts, devs);
+    let sb = format(fs_opt_strs, fs_opts, fmt_opts, std::slice::from_mut(dev));
     unsafe { libc::free(sb as *mut _) };
 
     0
@@ -522,11 +514,11 @@ pub fn check_bucket_size(opts: &c::bch_opts, dev: &c::dev_opts) {
     }
 }
 
-pub fn bch2_pick_bucket_size(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
+pub fn pick_bucket_size_for_devs(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
     pick_bucket_size(opts, devs)
 }
 
-pub fn bch2_check_bucket_size(opts: &c::bch_opts, dev: &c::dev_opts) {
+pub fn check_bucket_size_for_dev(opts: &c::bch_opts, dev: &c::dev_opts) {
     check_bucket_size(opts, dev);
 }
 

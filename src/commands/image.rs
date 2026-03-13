@@ -497,16 +497,9 @@ fn image_create_inner(
 
     format_opts.no_sb_at_end = true;
 
-    let dev_list = c::dev_opts_list {
-        nr: devs.len(),
-        size: devs.len(),
-        data: devs.as_mut_ptr(),
-        preallocated: Default::default(),
-    };
-
-    let sb = crate::commands::format_util::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
+    let sb = crate::commands::format_util::format(fs_opt_strs, fs_opts, format_opts, &mut devs);
     if sb.is_null() {
-        bail!("bch2_format returned null");
+        bail!("format returned null");
     }
 
     if verbosity > 1 {
@@ -656,7 +649,7 @@ fn image_update_inner(
 
     let block_size = unsafe { (*fs.raw).opts.block_size as u32 };
     let btree_node_size = unsafe { (*fs.raw).opts.btree_node_size };
-    let ret = crate::commands::format_util::bch2_format_for_device_add(
+    let ret = crate::commands::format_util::format_for_device_add(
         &mut dev_opts, block_size, btree_node_size,
     );
     if ret != 0 {

@@ -365,14 +365,14 @@ fn migrate_fs(
     let dev_size = unsafe { c::get_size(bdev_fd) };
     c_dev.fs_size = dev_size;
 
-    let bucket_size = crate::commands::format_util::bch2_pick_bucket_size(&fs_opts, std::slice::from_ref(&c_dev));
+    let bucket_size = crate::commands::format_util::pick_bucket_size_for_devs(&fs_opts, std::slice::from_ref(&c_dev));
     {
         let dev_opts = &mut c_dev.opts;
         opt_set!(dev_opts, bucket_size, bucket_size as u32);
     }
     c_dev.nbuckets = c_dev.fs_size / c_dev.opts.bucket_size as u64;
 
-    crate::commands::format_util::bch2_check_bucket_size(&fs_opts, &c_dev);
+    crate::commands::format_util::check_bucket_size_for_dev(&fs_opts, &c_dev);
 
     // Reserve space for bcachefs metadata — grab as much as we can
     let (extents, bcachefs_inum) = reserve_new_fs_space(
@@ -392,17 +392,9 @@ fn migrate_fs(
     c_dev.sb_offset = sb_offset;
     c_dev.sb_end = sb_end;
 
-    // Format the filesystem
-    let dev_list = c::dev_opts_list {
-        nr: 1,
-        size: 1,
-        data: &mut c_dev,
-        preallocated: Default::default(),
-    };
-
-    let sb = crate::commands::format_util::bch2_format(fs_opt_strs, fs_opts, format_opts, dev_list);
+    let sb = crate::commands::format_util::format(fs_opt_strs, fs_opts, format_opts, &mut [c_dev]);
     if sb.is_null() {
-        bail!("bch2_format failed");
+        bail!("format failed");
     }
 
     let sb_offset_val = u64::from_le(unsafe { (*sb).layout.sb_offset[0] });
