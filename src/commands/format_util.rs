@@ -89,8 +89,7 @@ fn opt_set_sb_all(sb: *mut c::bch_sb, dev_idx: i32, opts: &mut c::bch_opts) {
 /// Returns a pointer to the superblock (caller must free with `free()`).
 ///
 /// Exits on fatal errors (matching the C `die()` behavior).
-#[no_mangle]
-pub extern "C" fn bch2_format(
+pub fn bch2_format(
     fs_opt_strs: c::bch_opt_strs,
     mut fs_opts: c::bch_opts,
     mut opts: c::format_opts,
@@ -347,8 +346,7 @@ pub extern "C" fn bch2_format(
 }
 
 /// Format a single device for addition to an existing filesystem.
-#[no_mangle]
-pub extern "C" fn bch2_format_for_device_add(
+pub fn bch2_format_for_device_add(
     dev: *mut c::dev_opts,
     block_size: u32,
     btree_node_size: u32,
@@ -524,16 +522,11 @@ pub fn check_bucket_size(opts: &c::bch_opts, dev: &c::dev_opts) {
     }
 }
 
-/// C-compatible wrapper.
-#[no_mangle]
-pub extern "C" fn bch2_pick_bucket_size(opts: c::bch_opts, devs: c::dev_opts_list) -> u64 {
-    let dev_slice = unsafe { std::slice::from_raw_parts(devs.data, devs.nr) };
-    pick_bucket_size(&opts, dev_slice)
+pub fn bch2_pick_bucket_size(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
+    pick_bucket_size(opts, devs)
 }
 
-/// C-compatible wrapper.
-#[no_mangle]
-pub extern "C" fn bch2_check_bucket_size(opts: c::bch_opts, dev: *mut c::dev_opts) {
-    check_bucket_size(&opts, unsafe { &*dev });
+pub fn bch2_check_bucket_size(opts: &c::bch_opts, dev: &c::dev_opts) {
+    check_bucket_size(opts, dev);
 }
 

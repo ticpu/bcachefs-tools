@@ -654,13 +654,11 @@ fn image_update_inner(
         bail!("ftruncate error: {}", std::io::Error::last_os_error());
     }
 
-    let ret = unsafe {
-        c::bch2_format_for_device_add(
-            &mut dev_opts,
-            (*fs.raw).opts.block_size as u32,
-            (*fs.raw).opts.btree_node_size,
-        )
-    };
+    let block_size = unsafe { (*fs.raw).opts.block_size as u32 };
+    let btree_node_size = unsafe { (*fs.raw).opts.btree_node_size };
+    let ret = crate::commands::format_util::bch2_format_for_device_add(
+        &mut dev_opts, block_size, btree_node_size,
+    );
     if ret != 0 {
         bail!("formatting metadata device: {}", unsafe {
             CStr::from_ptr(c::bch2_err_str(ret))

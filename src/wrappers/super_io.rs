@@ -39,8 +39,7 @@ fn csum_vstruct_sb(sb: *mut c::bch_sb) -> c::bch_csum {
 /// `sb` must point to a valid, fully initialized `bch_sb`.
 ///
 /// Exits on I/O errors (matches C `die()` behavior).
-#[no_mangle]
-pub extern "C" fn bch2_super_write(fd: i32, sb: *mut c::bch_sb) {
+pub fn bch2_super_write(fd: i32, sb: *mut c::bch_sb) {
     let file = borrowed_file(fd);
 
     let bs = unsafe { c::get_blocksize(fd) } as usize;
@@ -93,8 +92,7 @@ pub extern "C" fn bch2_super_write(fd: i32, sb: *mut c::bch_sb) {
 /// Returns a malloc'd `bch_sb` pointer (caller must free).
 ///
 /// Exits if the magic doesn't match or on I/O error.
-#[no_mangle]
-pub extern "C" fn __bch2_super_read(fd: i32, sector: u64) -> *mut c::bch_sb {
+pub fn __bch2_super_read(fd: i32, sector: u64) -> *mut c::bch_sb {
     let file = borrowed_file(fd);
 
     // Read the fixed-size header first

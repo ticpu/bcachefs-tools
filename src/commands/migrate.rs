@@ -365,22 +365,14 @@ fn migrate_fs(
     let dev_size = unsafe { c::get_size(bdev_fd) };
     c_dev.fs_size = dev_size;
 
-    // Build a dev_opts_list for bch2_pick_bucket_size
-    let dev_list = c::dev_opts_list {
-        nr: 1,
-        size: 1,
-        data: &mut c_dev,
-        preallocated: Default::default(),
-    };
-
-    let bucket_size = unsafe { c::bch2_pick_bucket_size(fs_opts, dev_list) };
+    let bucket_size = crate::commands::format_util::bch2_pick_bucket_size(&fs_opts, std::slice::from_ref(&c_dev));
     {
         let dev_opts = &mut c_dev.opts;
         opt_set!(dev_opts, bucket_size, bucket_size as u32);
     }
     c_dev.nbuckets = c_dev.fs_size / c_dev.opts.bucket_size as u64;
 
-    unsafe { c::bch2_check_bucket_size(fs_opts, &mut c_dev) };
+    crate::commands::format_util::bch2_check_bucket_size(&fs_opts, &c_dev);
 
     // Reserve space for bcachefs metadata — grab as much as we can
     let (extents, bcachefs_inum) = reserve_new_fs_space(
