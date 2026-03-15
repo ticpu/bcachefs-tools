@@ -1,5 +1,117 @@
 # Changelog
 
+## v1.37 - Sun Mar 15 2026
+
+bcachefs_metadata_version_erasure_coding
+
+Highlights:
+
+- Erasure coding is no longer experimental; all the core functionality is
+  complete.
+
+- Major update to the Principles of Operation - abbreviated PoO, or simply poo;
+  instead of "RTFM", you may now say "Have you checked your poo?".
+
+  It's now at 100 pages, organized into introductory, feature overview and
+  subsystem reference sections, and should be thoroughly comprehensive.
+
+- New subcommands (subvolume list, list-snapshots, reflink-option-propagate)
+
+- Journal rewind is now fully safe to use (the filesystem tracks how far back we
+  can safely rewind)
+
+- Automatic recovery from devices with bad flush/fua support
+
+- Faster recovery from unclean shutdowns
+
+- Better perforance on multidevice filesystems: saner defaults for buffered
+  readahead, controllable by the new `dev_readahead` option.
+
+- Linux 7.0 support
+
+### Erasure coding
+
+- Erasure coding is now hooked up to reconcile: degraded stripes are now
+  automatically repaired, like other degraded data, and can be reshaped as
+  needed. Tiering setups, and setups with mixed device sizes should work -
+  erasure coding will create the biggest stripes possible.
+
+- Erasure coding is no longer hidden behind `CONFIG_BCACHEFS_ERASURE_CODING`,
+  but one significant item is still remaining - stripe allocation needs to
+  allocate blocks on different devices at similar LBAs, to avoid seeking when
+  resilvering an array. This should land in 1.38.
+
+### Subcommands
+
+- **`subvolume list`** (`bcachefs subvolume ls`): List subvolumes with
+  filtering and sorting. Uses userspace ioctl helpers for batch queries.
+
+- **`subvolume list-snapshots`** (`bcachefs subvolume ls-snap`): List
+  snapshots as a tree with disk usage information.
+
+- **`reflink-option-propagate`**: Propagates a file's IO options
+  (compression, checksum, replicas, targets) to its extents, including
+  reflinked extents. Respects a new per-pointer permission flag
+  (`MAY_UPDATE_OPTIONS`) to prevent unprivileged users from altering
+  shared data they don't own.
+
+- **`fs top` TUI mode**: `fs top` and `reconcile wait` now use the
+  alternate screen for a proper terminal UI experience; fs top also shows
+  per-device stats.
+
+- **Elastic tabstops**: Tabular output (fs usage, show-super, etc.)
+  now uses elastic tabstop alignment for cleaner, consistently aligned
+  columns.
+
+### Journal rewind, automatic recovery from bad flush/fua:
+
+- We now buffer discards, up to a small percentage of the device size, and track
+  in the journal how far back we can safely rewind (i.e. which old buckets have
+  not been discarded yet). Rewind is also now transactionally consistent - if we
+  crash mid rewind, we remember the previous in-progress rewind.
+
+- The new `scrub_recent_journal_entries`, enabled by default after unclean
+  shutdowns, runs a targeted scrub during recovery on the data that was written
+  and committed just before crash or shutdown. On checksum error, indicating the
+  data wasn't actually written, an immediate repair will be queued up (on
+  replicated filesystems) - or if the data is not recoverable we'll automatically
+  rewind to the last good state. By default, we won't rewind more than 10
+  seconds, controlled by the `scrub_journal_max_rewind_secs` option.
+
+### Bug fixes
+
+- Fix stdout buffering when piped (output now flushed properly)
+- Fix utilization percentage in `fs usage` to use bucket counts
+- Fix `copy_fs` write truncation
+- Fix `readlink` c_char portability for arm64/ppc64el
+- Fix `format` to create `sb_field_ext` before setting options
+- Fix docgen command ordering
+- Fix `escape_latex` mangling `--` flags as en-dashes
+- Device evacuate: check filesystem version before starting
+
+### Build system
+
+- Package CI: cached build environments, cross-compilation fixes,
+  2-hour build timeout, architecture documentation
+- Exclude `debian/` from C source discovery in Makefile
+- Remove GitHub Actions build workflow (migrated to package-ci)
+
+### Rust conversion progress
+
+The userspace component of bcachefs has now been converted to Rust. Among other
+things, this means we finally have bash autocompletions available, courtesy of
+Clap.
+
+Cleanup work is still ongoing - unsafe reduction, "Rusty" APIs to replace C
+style ones. This is the test and staging ground for conversion of the kernel
+side code to Rust, which will start happening as soon as Rust support is
+sufficiently widespread in distro kernels.
+
+This also enables formal verification, in Verus - work here has already started,
+with proofs for eytzinger tree operations (search, inorder traversal, roundtrip
+bijection), snapshot skiplist construction, snapshot tree invariants, and extent
+overwrite conservation. 124+ verified properties.
+
 ## v1.36.1 - Fri Feb  6 2026
 
 ### New `bcachefs fs timestats` command
