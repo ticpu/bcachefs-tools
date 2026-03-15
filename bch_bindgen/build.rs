@@ -310,8 +310,8 @@ fn generate_bkey_types(entries: &[Vec<String>]) -> String {
 #[derive(Debug)]
 pub struct Fix753 {}
 impl bindgen::callbacks::ParseCallbacks for Fix753 {
-    fn item_name(&self, original_item_name: &str) -> Option<String> {
-        Some(original_item_name.trim_start_matches("Fix753_").to_owned())
+    fn item_name(&self, item: bindgen::callbacks::ItemInfo<'_>) -> Option<String> {
+        Some(item.name.trim_start_matches("Fix753_").to_owned())
     }
 }
 
