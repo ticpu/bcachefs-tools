@@ -1,6 +1,10 @@
 # Changelog
 
-## v1.37 - Sun Mar 15 2026
+## v1.37.1 - Sun Mar 15 2026
+
+Bugfix release - fix compatibility issues with bch_sb_field_ext options.
+
+## v1.37.0 - Sun Mar 15 2026
 
 bcachefs_metadata_version_erasure_coding
 
