@@ -247,7 +247,8 @@ impl BuildState {
     }
 
     fn log_path(&self, commit: &str, job_name: &str) -> PathBuf {
-        self.job_dir(commit, job_name).join("log")
+        let now = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+        self.job_dir(commit, job_name).join(format!("log-{}", now))
     }
 
     fn pid_path(&self, commit: &str, job_name: &str) -> PathBuf {
@@ -404,7 +405,6 @@ impl Orchestrator {
                 }
                 JobStatus::Failed => {
                     any_failed = true;
-                    warn!("[{}] build failed: {}", &commit[..12], name);
                 }
                 JobStatus::Pending => {
                     still_running = true;
@@ -478,8 +478,12 @@ impl Orchestrator {
                     } else {
                         JobStatus::Failed
                     };
-                    info!("[{}] {} finished: {:?}",
-                          &job.commit[..12], job.job_name, status);
+                    if status == JobStatus::Failed {
+                        let tail = Self::log_tail(&self.state.job_dir(&job.commit, &job.job_name));
+                        warn!("[{}] {} failed: {}", &job.commit[..12], job.job_name, tail);
+                    } else {
+                        info!("[{}] {} finished: {:?}", &job.commit[..12], job.job_name, status);
+                    }
                     self.state.write_status(&job.commit, &job.job_name, status)?;
                     let _ = fs::remove_file(self.state.pid_path(&job.commit, &job.job_name));
                 }
@@ -493,6 +497,24 @@ impl Orchestrator {
             }
         }
         Ok(())
+    }
+
+    fn log_tail(job_dir: &Path) -> String {
+        // Find the most recent log file in the job directory
+        let latest = fs::read_dir(job_dir).ok()
+            .and_then(|entries| {
+                entries.filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_str()
+                        .map_or(false, |n| n.starts_with("log-")))
+                    .max_by_key(|e| e.file_name())
+            });
+        let Some(entry) = latest else { return "(no log)".into() };
+        let content = fs::read_to_string(entry.path()).unwrap_or_default();
+        content.lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("(empty log)")
+            .to_string()
     }
 
     fn have_build_slot(&self, job: &Job) -> bool {
