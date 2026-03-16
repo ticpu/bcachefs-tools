@@ -484,14 +484,14 @@ be unique). This gives us ways of referring to multiple devices in target
 options: If we specify ssd in a target option, that will refer to all devices
 with the label ssd or labels that start with ssd. (e.g. ssd.ssd1, ssd.ssd2).
 
-Four target options exist. These options all may be set at the filesystem level
-(at format time, at mount time, or at runtime via sysfs), or on a particular
-file or directory:
+Four target options exist. All may be set at the filesystem level (at format
+time, at mount time, or at runtime via sysfs). All except
+\texttt{metadata\_target} may also be set on a particular file or directory:
 
 \begin{description}
 	\item \texttt{foreground\_target}: normal foreground data writes, and
 		metadata if \\ \texttt{metadata\_target} is not set
-	\item \texttt{metadata\_target}: btree writes
+	\item \texttt{metadata\_target}: btree writes (filesystem-level only)
 	\item \texttt{background\_target}: If set, user data (not metadata) will
 		be moved to this target in the background
 	\item\texttt{promote\_target}: If set, a cached copy will be added to
@@ -1161,7 +1161,7 @@ A subset of filesystem options can be set on individual files and directories,
 overriding the filesystem-wide defaults. The per-inode options are:
 \texttt{data\_checksum}, \texttt{compression}, \texttt{background\_compression},
 \texttt{data\_replicas}, \texttt{foreground\_target},
-\texttt{background\_target}, \texttt{promote\_target}, \texttt{metadata\_target},
+\texttt{background\_target}, \texttt{promote\_target},
 \texttt{erasure\_code}, \texttt{nocow}, \texttt{casefold}, and
 \texttt{inodes\_32bit}. Note that \texttt{casefold} and \texttt{inodes\_32bit}
 can only be toggled on empty directories.
