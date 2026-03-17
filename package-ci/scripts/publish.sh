@@ -10,6 +10,7 @@
 # Config read from $STATE_DIR/config:
 #   GPG_SIGNING_SUBKEY_FINGERPRINT
 #   APTLY_ROOT
+#   PUBLISH_ROOT  (where nginx serves from; defaults to $APTLY_ROOT/public)
 
 set -euo pipefail
 
@@ -25,6 +26,7 @@ SHORT="${COMMIT:0:12}"
 source "$STATE_DIR/config"
 : "${GPG_SIGNING_SUBKEY_FINGERPRINT:?not set in config}"
 : "${APTLY_ROOT:?not set in config}"
+: "${PUBLISH_ROOT:=$APTLY_ROOT/public}"
 
 SNAPSHOT_DATE="$(date -u +%Y%m%d%H%M%S)"
 
@@ -38,7 +40,7 @@ cat > "$APTLY_CONF" << EOF
     "skipContentsPublishing": true,
     "FileSystemPublishEndpoints": {
         "public": {
-            "rootDir": "$APTLY_ROOT/public",
+            "rootDir": "$PUBLISH_ROOT",
             "linkMethod": "symlink"
         }
     }
