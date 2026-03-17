@@ -276,7 +276,7 @@ impl Filesystem for BcachefsFs {
             Some(TimeOrNow::Now) => (2, 0),
             Some(TimeOrNow::SpecificTime(t)) => {
                 let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-                let ts = c::timespec { tv_sec: d.as_secs() as i64, tv_nsec: d.subsec_nanos() as i64 };
+                let ts = c::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ };
                 (1, fs.timespec_to_time(ts))
             }
         };
@@ -285,7 +285,7 @@ impl Filesystem for BcachefsFs {
             Some(TimeOrNow::Now) => (2, 0),
             Some(TimeOrNow::SpecificTime(t)) => {
                 let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-                let ts = c::timespec { tv_sec: d.as_secs() as i64, tv_nsec: d.subsec_nanos() as i64 };
+                let ts = c::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ };
                 (1, fs.timespec_to_time(ts))
             }
         };

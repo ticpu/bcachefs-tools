@@ -946,7 +946,7 @@ fn copy_dir(
             continue;
         }
 
-        if s.migrate_type == MigrateType::Migrate && d.stat.st_ino == s.bcachefs_inum {
+        if s.migrate_type == MigrateType::Migrate && d.stat.st_ino as u64 == s.bcachefs_inum {
             continue;
         }
 
@@ -965,7 +965,7 @@ fn copy_dir(
 
         // Hardlink handling
         if (d.stat.st_mode & libc::S_IFMT) == libc::S_IFREG && d.stat.st_nlink > 1 {
-            let src_ino = d.stat.st_ino;
+            let src_ino = d.stat.st_ino as u64;
             if let Some(&dst_ino) = s.hardlinks.get(&src_ino) {
                 create_or_update_link(
                     fs, dir_inum, dst, &d.name,
@@ -985,7 +985,7 @@ fn copy_dir(
 
         // Record hardlink destination
         if (d.stat.st_mode & libc::S_IFMT) == libc::S_IFREG && d.stat.st_nlink > 1 {
-            s.hardlinks.insert(d.stat.st_ino, inode.bi_inum);
+            s.hardlinks.insert(d.stat.st_ino as u64, inode.bi_inum);
         }
 
         let name_cstr = &d.name;

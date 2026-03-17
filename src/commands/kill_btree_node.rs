@@ -143,7 +143,7 @@ pub fn cmd_kill_btree_node(argv: Vec<String>) -> Result<()> {
                     dev, kill.btree, kill.level, k.to_text(&fs));
 
                 let fd = unsafe { (*ca.disk_sb.bdev).bd_fd };
-                let offset = (ptr.offset() as i64) << 9;
+                let offset = (ptr.offset() as libc::off_t) << 9;
                 let ret = unsafe {
                     libc::pwrite(fd, zeroes, block_size, offset)
                 };
