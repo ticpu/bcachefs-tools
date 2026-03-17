@@ -34,12 +34,18 @@ git clone "$GIT_REPO" "$WORK_DIR/bcachefs-tools"
 cd "$WORK_DIR/bcachefs-tools"
 git checkout "$COMMIT"
 
-# Determine version from debian/changelog + commit
-CURRENT_VERSION=$(dpkg-parsechangelog -SVersion 2>/dev/null || echo "0.0.0")
-SHORT_COMMIT=$(echo "$COMMIT" | head -c 12)
-SNAPSHOT_DATE=$(date -u +%Y%m%d%H%M%S)
-# Use the existing version with a snapshot suffix
-NEW_VERSION="${CURRENT_VERSION}+git${SNAPSHOT_DATE}.${SHORT_COMMIT}"
+# Determine version from git describe / .version, not debian/changelog
+if git describe --tags --exact-match "$COMMIT" &>/dev/null; then
+    # Tagged release: use the tag directly (strip leading 'v')
+    RAW_VERSION=$(git describe --tags --exact-match "$COMMIT" | sed 's/^v//')
+    NEW_VERSION="$RAW_VERSION"
+else
+    # Snapshot: base version from git describe or .version + snapshot suffix
+    RAW_VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || cat .version 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+    SHORT_COMMIT=$(echo "$COMMIT" | head -c 12)
+    SNAPSHOT_DATE=$(date -u +%Y%m%d%H%M%S)
+    NEW_VERSION="${RAW_VERSION}~${SNAPSHOT_DATE}.gbp${SHORT_COMMIT}"
+fi
 
 cd "$WORK_DIR"
 
@@ -90,9 +96,10 @@ run "
     export DEBFULLNAME='Kent Overstreet'
     cd /src
 
-    # Update changelog for snapshot
-    gbp dch --new-version='$NEW_VERSION' --since=HEAD~1 --snapshot \
-        --snapshot-number=\$(date -u +%Y%m%d%H%M%S) || true
+    # Update changelog with correct version
+    gbp dch --new-version='$NEW_VERSION' --since=HEAD~1 \
+        --release --distribution=unstable --urgency=medium \
+        --git-author || true
 
     # Build source-only package
     gbp buildpackage \
