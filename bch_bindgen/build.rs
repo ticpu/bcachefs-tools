@@ -529,7 +529,7 @@ fn main() {
 // target arch. Regular conditional compilation won't work here since build scripts are always
 // compiled for the host arch, not the target arch, so that won't work when cross-compiling.
 fn packed_and_align_fix(bindings: std::string::String) -> std::string::String {
-    bindings
+    let bindings = bindings
         .replace(
             "#[repr(C, packed(8))]\npub struct btree_node {",
             "#[repr(C, align(8))]\npub struct btree_node {",
@@ -549,5 +549,29 @@ fn packed_and_align_fix(bindings: std::string::String) -> std::string::String {
         .replace(
             "#[repr(C, packed(8))]\npub struct bch_sb {",
             "#[repr(C, align(8))]\npub struct bch_sb {",
+        );
+
+    // On aarch64, AAPCS64 gives empty structs alignment 4, but Rust's repr(C)
+    // gives them alignment 1. Fix the anonymous union member types in
+    // bch_replicas_padded to match what clang reports.
+    #[cfg(target_arch = "aarch64")]
+    let bindings = bindings
+        .replace(
+            "#[repr(C)]\n#[derive(Debug, Default, Copy, Clone)]\npub struct bch_replicas_padded__bindgen_ty_1 {}",
+            "#[repr(C, align(4))]\n#[derive(Debug, Default, Copy, Clone)]\npub struct bch_replicas_padded__bindgen_ty_1 {}",
         )
+        .replace(
+            "#[repr(C)]\n#[derive(Debug, Default, Copy, Clone)]\npub struct bch_replicas_padded__bindgen_ty_2 {}",
+            "#[repr(C, align(4))]\n#[derive(Debug, Default, Copy, Clone)]\npub struct bch_replicas_padded__bindgen_ty_2 {}",
+        )
+        .replace(
+            "#[repr(C)]\n#[derive(Debug, Default, Copy, Clone)]\npub struct bch_replicas_padded__bindgen_ty_3 {}",
+            "#[repr(C, align(4))]\n#[derive(Debug, Default, Copy, Clone)]\npub struct bch_replicas_padded__bindgen_ty_3 {}",
+        )
+        .replace(
+            "#[repr(C)]\n#[derive(Debug, Default, Copy, Clone)]\npub struct bch_replicas_padded__bindgen_ty_4 {}",
+            "#[repr(C, align(4))]\n#[derive(Debug, Default, Copy, Clone)]\npub struct bch_replicas_padded__bindgen_ty_4 {}",
+        );
+
+    bindings
 }
