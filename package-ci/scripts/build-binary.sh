@@ -205,6 +205,25 @@ run "
     DEBIAN_FRONTEND=noninteractive apt-get build-dep -y ${CROSS_BUILD_DEP_ARCH} ./src
 "
 
+# Cross-compilation: set the linker in .cargo/config.toml.
+#
+# Why this can't use RUSTFLAGS: Debian's cargo wrapper at
+# /usr/share/cargo/bin/cargo unconditionally unsets RUSTFLAGS before
+# invoking cargo. They did this as a workaround for
+# https://github.com/rust-lang/cargo/issues/6338 (RUSTFLAGS applying
+# to build scripts and proc macros, not just the target). The cargo
+# team fixed the underlying issue years ago with CARGO_ENCODED_RUSTFLAGS
+# (cargo 1.55+) and target-specific rustflags, but the Debian wrapper
+# was never updated. So any RUSTFLAGS set by the Makefile or environment
+# — including -C linker=<cross-compiler> — get silently discarded.
+#
+# .cargo/config.toml target-specific settings are not affected by the
+# wrapper, so we append the cross-linker config to the vendored
+# config.toml that cargo prepare-debian generates.
+if [ "$ARCH" = "ppc64el" ]; then
+    run 'printf "\n[target.powerpc64le-unknown-linux-gnu]\nlinker = \"powerpc64le-linux-gnu-gcc\"\n" >> /build/src/.cargo/config.toml'
+fi
+
 # Build
 run "
     cd /build/src
