@@ -30,7 +30,7 @@ echo "=== Building source package for $COMMIT ==="
 WORK_DIR=$(mktemp -d)
 trap 'cleanup; rm -rf "$WORK_DIR"' EXIT
 
-git clone "$GIT_REPO" "$WORK_DIR/bcachefs-tools"
+git clone --tags "$GIT_REPO" "$WORK_DIR/bcachefs-tools"
 cd "$WORK_DIR/bcachefs-tools"
 git checkout "$COMMIT"
 
