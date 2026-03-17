@@ -35,7 +35,7 @@ cd "$WORK_DIR/bcachefs-tools"
 git checkout "$COMMIT"
 
 # Determine version from git describe / .version, not debian/changelog
-if git describe --tags --exact-match "$COMMIT" &>/dev/null; then
+if git describe --tags --exact-match "$COMMIT" 2>/dev/null; then
     # Tagged release: use the tag directly (strip leading 'v')
     RAW_VERSION=$(git describe --tags --exact-match "$COMMIT" | sed 's/^v//')
     NEW_VERSION="$RAW_VERSION"
@@ -46,6 +46,16 @@ else
     SNAPSHOT_DATE=$(date -u +%Y%m%d%H%M%S)
     NEW_VERSION="${RAW_VERSION}~${SNAPSHOT_DATE}.gbp${SHORT_COMMIT}"
 fi
+
+# Preserve epoch from existing debian/changelog if present
+EXISTING_EPOCH=$(head -1 debian/changelog | sed -n 's/^[^ ]* (\([0-9]*\):.*/\1/p')
+if [ -n "$EXISTING_EPOCH" ]; then
+    DEB_VERSION="${EXISTING_EPOCH}:${NEW_VERSION}"
+else
+    DEB_VERSION="$NEW_VERSION"
+fi
+
+echo "=== Version: NEW_VERSION=$NEW_VERSION DEB_VERSION=$DEB_VERSION ==="
 
 cd "$WORK_DIR"
 
@@ -66,8 +76,8 @@ run() {
 run '
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl devscripts git git-buildpackage sbuild \
-        gcc libc6-dev mmdebstrap patch tar uidmap xz-utils gnupg
+        ca-certificates curl devscripts git \
+        gcc libc6-dev patch tar xz-utils gnupg
 '
 
 # Install/update rustup (cached across builds)
@@ -96,31 +106,19 @@ run "
     export DEBFULLNAME='Kent Overstreet'
     cd /src
 
-    # Update changelog with correct version
-    gbp dch --new-version='$NEW_VERSION' --since=HEAD~1 \
-        --release --distribution=unstable --urgency=medium \
-        --git-author || true
+    # Update changelog with correct version (use dch directly — gbp dch
+    # fails on detached HEAD and || true silently swallows the error)
+    dch --newversion '$DEB_VERSION' --distribution unstable --urgency medium \
+        'Release $NEW_VERSION'
 
     # Build source-only package
-    gbp buildpackage \
-        --git-verbose \
-        --git-ignore-branch \
-        --git-ignore-new \
-        --git-builder='dpkg-buildpackage -d -S -us -uc -nc'
+    dpkg-buildpackage -d -S -us -uc -nc
 "
 
-# Collect results — gbp puts them in the export dir one level above /src
+# Collect results — dpkg-buildpackage puts them in parent of source dir
 podman exec "$CONTAINER" bash -c "
     mkdir -p /src/result
-    find /bcachefs-tools-deb-export-dir -name '*.dsc' -exec cp {} /src/result/ \\; 2>/dev/null || true
-    find /bcachefs-tools-deb-export-dir -name '*.tar.*' -exec cp {} /src/result/ \\; 2>/dev/null || true
-    find /bcachefs-tools-deb-export-dir -name '*.changes' -exec cp {} /src/result/ \\; 2>/dev/null || true
-    find /bcachefs-tools-deb-export-dir -name '*.buildinfo' -exec cp {} /src/result/ \\; 2>/dev/null || true
-    # Also check parent of /src
-    find /src/.. -maxdepth 1 -name '*.dsc' -exec cp {} /src/result/ \\; 2>/dev/null || true
-    find /src/.. -maxdepth 1 -name '*.tar.*' -exec cp {} /src/result/ \\; 2>/dev/null || true
-    find /src/.. -maxdepth 1 -name '*.changes' -exec cp {} /src/result/ \\; 2>/dev/null || true
-    find /src/.. -maxdepth 1 -name '*.buildinfo' -exec cp {} /src/result/ \\; 2>/dev/null || true
+    cp /src/../*.dsc /src/../*.tar.* /src/../*.changes /src/../*.buildinfo /src/result/ 2>/dev/null || true
     ls -la /src/result/
 "
 podman cp "$CONTAINER:/src/result/." "$RESULT_DIR/"
