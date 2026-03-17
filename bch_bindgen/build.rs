@@ -332,6 +332,10 @@ fn main() {
         .into();
 
     let urcu = pkg_config::probe_library("liburcu").expect("Failed to find urcu lib");
+    // Tell bindgen/clang the target triple so it computes correct type
+    // layout (size, alignment) for the target architecture, not the host.
+    let target = std::env::var("TARGET").unwrap();
+
     let bindings = bindgen::builder()
         .formatter(bindgen::Formatter::Prettyplease)
         .header(
@@ -341,6 +345,7 @@ fn main() {
                 .display()
                 .to_string(),
         )
+        .clang_arg(format!("--target={}", target))
         .clang_args(
             urcu.include_paths
                 .iter()
@@ -550,6 +555,45 @@ fn packed_and_align_fix(bindings: std::string::String) -> std::string::String {
             "#[repr(C, packed(8))]\npub struct bch_sb {",
             "#[repr(C, align(8))]\npub struct bch_sb {",
         );
+
+    // On architectures where u64 has alignment 4 (i686, ppc32), Rust's repr(C)
+    // doesn't propagate the explicit __aligned(8) from struct bkey to types
+    // that contain it (bkey_i_*, btree_node/btree_node_entry anonymous unions,
+    // bch_ioctl_query_accounting). Fix by adding align(8) to all such types.
+    //
+    // These types all contain bkey (which is __packed __aligned(8) in C),
+    // so they inherit alignment 8 on all architectures. Rust's repr(C) doesn't
+    // propagate this — it computes alignment from the fields' natural alignment,
+    // which for u64 is 4 on 32-bit.
+    let target_ptr_width = std::env::var("CARGO_CFG_TARGET_POINTER_WIDTH")
+        .unwrap_or_default();
+    let bindings = if target_ptr_width == "32" {
+        let mut result = String::with_capacity(bindings.len());
+        let mut lines = bindings.lines().peekable();
+        while let Some(line) = lines.next() {
+            if line == "#[repr(C)]" {
+                if let Some(&next) = lines.peek() {
+                    let needs_align8 = next.contains("pub struct bkey_i_")
+                        || next.contains("pub struct btree_node__bindgen_ty_1")
+                        || next.contains("pub struct btree_node_entry__bindgen_ty_1")
+                        || next.contains("pub struct bch_ioctl_query_accounting");
+                    if needs_align8 {
+                        result.push_str("#[repr(C, align(8))]");
+                    } else {
+                        result.push_str(line);
+                    }
+                } else {
+                    result.push_str(line);
+                }
+            } else {
+                result.push_str(line);
+            }
+            result.push('\n');
+        }
+        result
+    } else {
+        bindings
+    };
 
     // On aarch64, AAPCS64 gives empty structs alignment 4, but Rust's repr(C)
     // gives them alignment 1. Fix the anonymous union member types in
