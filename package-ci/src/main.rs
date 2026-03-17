@@ -248,7 +248,13 @@ impl BuildState {
 
     fn log_path(&self, commit: &str, job_name: &str) -> PathBuf {
         let now = chrono::Utc::now().format("%Y%m%dT%H%M%S");
-        self.job_dir(commit, job_name).join(format!("log-{}", now))
+        let dir = self.job_dir(commit, job_name);
+        let timestamped = dir.join(format!("log-{}", now));
+        // Symlink "log" → timestamped file so ci.html links work
+        let stable = dir.join("log");
+        let _ = std::fs::remove_file(&stable);
+        let _ = std::os::unix::fs::symlink(format!("log-{}", now), &stable);
+        timestamped
     }
 
     fn pid_path(&self, commit: &str, job_name: &str) -> PathBuf {
