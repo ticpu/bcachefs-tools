@@ -391,8 +391,8 @@ pub fn bucket_bytes(ca: &c::bch_dev) -> u64 {
 }
 
 /// Build a hashed writepoint specifier (sets low bit to mark as hashed).
-pub fn writepoint_hashed(v: u64) -> c::write_point_specifier {
-    c::write_point_specifier { v: v | 1 }
+pub fn writepoint_hashed(v: usize) -> c::write_point_specifier {
+    c::write_point_specifier { v: (v | 1) as _ }
 }
 
 /// Convert a device index to a target (TARGET_DEV_START = 1).

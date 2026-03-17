@@ -248,12 +248,12 @@ int __must_check kstrtoint(const char *s, unsigned int base, int *res);
 
 static inline int __must_check kstrtou64(const char *s, unsigned int base, u64 *res)
 {
-	return kstrtoull(s, base, res);
+	return kstrtoull(s, base, (unsigned long long *)res);
 }
 
 static inline int __must_check kstrtos64(const char *s, unsigned int base, s64 *res)
 {
-	return kstrtoll(s, base, res);
+	return kstrtoll(s, base, (long long *)res);
 }
 
 static inline int __must_check kstrtou32(const char *s, unsigned int base, u32 *res)
