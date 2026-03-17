@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.37.2 - Mon Mar 16 2026
+
+Bugfix release - fix an oops in mount from incorrect zeroing of
+bch_btree_ptr_v2.mem_ptr, and a stripe repair assert.
+
 ## v1.37.1 - Sun Mar 15 2026
 
 Bugfix release - fix compatibility issues with bch_sb_field_ext options.
