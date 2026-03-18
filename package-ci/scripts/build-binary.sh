@@ -224,10 +224,12 @@ if [ "$ARCH" = "ppc64el" ]; then
     run 'printf "\n[target.powerpc64le-unknown-linux-gnu]\nlinker = \"powerpc64le-linux-gnu-gcc\"\n" >> /build/src/.cargo/config.toml'
 fi
 
-# Build
+# Cap parallelism — nproc can report 80+ on big machines, which
+# intermittently exhausts thread/fd limits in containers
+MAX_PARALLEL="${MAX_PARALLEL:-16}"
 run "
     cd /build/src
-    dpkg-buildpackage -us -uc -b ${CROSS_DPKG_ARCH}
+    DEB_BUILD_OPTIONS=\"parallel=$MAX_PARALLEL\" dpkg-buildpackage -us -uc -b ${CROSS_DPKG_ARCH}
 "
 
 # Copy results
