@@ -144,6 +144,58 @@ kill -USR1 $(cat /home/aptbcachefsorg/package-ci/orchestrator.pid)
 # https://apt.bcachefs.org/ci.html
 ```
 
+## Retriggering builds
+
+To rerun a specific commit (e.g. to test whether a regression is from
+a particular change):
+
+```bash
+# Option 1: force retry of a previous commit
+# Write the commit hash into the desired file, then wake the orchestrator
+echo "$COMMIT" > /home/aptbcachefsorg/package-ci/desired
+kill -USR1 $(cat /home/aptbcachefsorg/package-ci/orchestrator.pid)
+
+# Option 2: clear failed status for specific jobs on the current commit
+# The orchestrator will re-attempt them on the next reconcile
+rm /home/aptbcachefsorg/package-ci/builds/$COMMIT/$DISTRO-$ARCH/status
+rm /home/aptbcachefsorg/package-ci/builds/$COMMIT/source/status  # if source failed
+kill -USR1 $(cat /home/aptbcachefsorg/package-ci/orchestrator.pid)
+
+# Option 3: nuke an entire commit's build state to start fresh
+rm -rf /home/aptbcachefsorg/package-ci/builds/$COMMIT
+kill -USR1 $(cat /home/aptbcachefsorg/package-ci/orchestrator.pid)
+```
+
+Note: the orchestrator only builds the commit in the `desired` file.
+To test an older commit, you must update `desired`. Remember to set it
+back afterwards.
+
+## Deploying script changes
+
+**Scripts run from the deployed location**, not from the repo being
+built. Changes to `package-ci/scripts/*.sh` must be explicitly deployed:
+
+```bash
+scp scripts/*.sh aptbcachefsorg@apt.bcachefs.org:~/package-ci/scripts/
+```
+
+The orchestrator binary itself also needs explicit deployment (see
+Deployment section above). The orchestrator does NOT need a restart
+after deploying script changes — scripts are exec'd fresh each build.
+
+## .cargo/config.toml and vendored sources
+
+The repo's `.cargo/config.toml` (gitignored) contains vendored source
+config that only works when `vendor/` exists (tagged release tarballs).
+**Do not add `.cargo/config.toml` to git** — it will break non-vendor
+builds because cargo will try to use a vendor directory that doesn't
+exist.
+
+Cross-linker config for ppc64el/arm64 is handled by `build-binary.sh`,
+which creates `.cargo/config.toml` with the appropriate
+`[target.*.linker]` settings if it doesn't already exist. This runs
+after source extraction and before `dpkg-buildpackage`.
+
 ## Common failure modes
 
 **Publish not running**: Publish requires `!still_running` — all
