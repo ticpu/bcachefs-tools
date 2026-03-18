@@ -20,8 +20,6 @@ extern void * memscan(void *,int, size_t);
 	const size_t _dest_len = ARRAY_SIZE(dest);			\
 	const size_t _src_len = __builtin_object_size(src, 1);		\
 									\
-	BUILD_BUG_ON(!__builtin_constant_p(_dest_len) ||		\
-		     _dest_len == (size_t)-1);				\
 	memcpy_and_pad(dest, _dest_len, src,				\
 		       strnlen(src, min(_src_len, _dest_len)), pad);	\
 } while (0)

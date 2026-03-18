@@ -80,6 +80,11 @@ struct kernel_param {
 	};
 };
 
-extern int param_set_bool(const char *val, const struct kernel_param *kp);
+int kstrtobool(const char *, bool *);
+
+static inline int param_set_bool(const char *val, const struct kernel_param *kp)
+{
+	return kstrtobool(val, kp->arg);
+}
 
 #endif /* _LINUX_MODULE_H */
