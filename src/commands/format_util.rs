@@ -383,10 +383,6 @@ pub fn format(
         }
 
         crate::wrappers::super_io::bch2_super_write(fd, sb.sb);
-
-        // Invalidate the fd so Drop doesn't close it — format() transfers
-        // ownership of the fd to the superblock write path.
-        dev.fd = -1;
     }
 
     // udevadm trigger --settle <devices>
