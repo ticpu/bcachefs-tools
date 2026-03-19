@@ -107,9 +107,10 @@ fn parse_target(
     }
 
     let target_str = unsafe { CStr::from_ptr(s) };
+    let target_str_slice = target_str.to_bytes();
 
     for (idx, dev) in devs.iter().enumerate() {
-        if target_str == dev.path.as_c_str() {
+        if target_str_slice == dev.path.as_bytes() {
             return dev_to_target(idx);
         }
     }

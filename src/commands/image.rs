@@ -3,7 +3,7 @@
 // Uses a temporary second device for metadata, writes data sequentially to the
 // primary device, then migrates metadata to the primary and drops the temp device.
 
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CString, c_char, c_void};
 use std::fmt::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -558,7 +558,7 @@ fn image_create_inner(
     if ret != 0 {
         bail!(
             "error shutting down new filesystem: {}",
-            unsafe { CStr::from_ptr(c::bch2_err_str(ret)) }.to_string_lossy()
+            bch_bindgen::errcode::BchError::from_raw(ret).msg()
         );
     }
 
@@ -637,9 +637,8 @@ fn image_update_inner(
         &mut dev_opts, block_size, btree_node_size,
     );
     if ret != 0 {
-        bail!("formatting metadata device: {}", unsafe {
-            CStr::from_ptr(c::bch2_err_str(ret))
-        }.to_string_lossy());
+        bail!("formatting metadata device: {}",
+            bch_bindgen::errcode::BchError::from_raw(ret).msg());
     }
 
     fs.dev_add(&metadata_path)
@@ -695,7 +694,7 @@ fn image_update_inner(
     if exit_ret != 0 {
         bail!(
             "error shutting down filesystem: {}",
-            unsafe { CStr::from_ptr(c::bch2_err_str(exit_ret)) }.to_string_lossy()
+            bch_bindgen::errcode::BchError::from_raw(exit_ret).msg()
         );
     }
 
