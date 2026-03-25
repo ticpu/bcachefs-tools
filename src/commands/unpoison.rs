@@ -61,7 +61,7 @@ pub struct Cli {
     yes_i_understand: bool,
 }
 
-pub fn cmd_unpoison(cli: Cli) -> anyhow::Result<()> {
+fn cmd_unpoison(cli: Cli) -> anyhow::Result<()> {
 
     if !cli.yes_i_understand {
         eprintln!("WARNING: Unpoisoning makes corruption invisible.");
@@ -110,3 +110,5 @@ pub fn cmd_unpoison(cli: Cli) -> anyhow::Result<()> {
     println!("unpoisoned {} bytes at offset {}", len, cli.offset);
     Ok(())
 }
+
+pub const CMD: super::CmdDef = typed_cmd!("unpoison", "Clear poison flags on file extents", Cli, cmd_unpoison);

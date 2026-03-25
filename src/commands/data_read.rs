@@ -77,7 +77,7 @@ pub struct Cli {
     width: usize,
 }
 
-pub fn cmd_data_read(cli: Cli) -> anyhow::Result<()> {
+fn cmd_data_read(cli: Cli) -> anyhow::Result<()> {
     cmd_data_read_inner(&cli)
 }
 
@@ -179,3 +179,5 @@ fn cmd_data_read_inner(cli: &Cli) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+pub const CMD: super::CmdDef = typed_cmd!("data-read", "Read data with extended error info", Cli, cmd_data_read);

@@ -13,7 +13,7 @@ pub struct Cli {
     devices: Vec<PathBuf>,
 }
 
-pub fn cmd_strip_alloc(cli: Cli) -> anyhow::Result<()> {
+fn cmd_strip_alloc(cli: Cli) -> anyhow::Result<()> {
     let devs = cli.devices;
 
     loop {
@@ -49,3 +49,5 @@ pub fn cmd_strip_alloc(cli: Cli) -> anyhow::Result<()> {
         return Ok(());
     }
 }
+
+pub const CMD: super::CmdDef = typed_cmd!("strip-alloc", "Strip alloc info for read-only use", Cli, cmd_strip_alloc);

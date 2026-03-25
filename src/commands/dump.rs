@@ -89,7 +89,7 @@ pub struct UndumpCli {
     files: Vec<String>,
 }
 
-pub fn cmd_undump(cli: UndumpCli) -> Result<()> {
+fn cmd_undump(cli: UndumpCli) -> Result<()> {
     let suffix = ".qcow2";
 
     struct FileEntry {
@@ -626,7 +626,7 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
     Ok(())
 }
 
-pub fn cmd_dump(cli: DumpCli) -> Result<()> {
+fn cmd_dump(cli: DumpCli) -> Result<()> {
 
     let (sanitize, sanitize_filenames) = match cli.sanitize.as_deref() {
         None => (false, false),
@@ -656,3 +656,6 @@ pub fn cmd_dump(cli: DumpCli) -> Result<()> {
     let fs = crate::device_scan::open_scan(&devs, opts)?;
     dump_fs(&fs, &cli, sanitize, sanitize_filenames)
 }
+
+pub const CMD_DUMP: super::CmdDef = typed_cmd!("dump", "Dump filesystem metadata", DumpCli, cmd_dump);
+pub const CMD_UNDUMP: super::CmdDef = typed_cmd!("undump", "Restore dumped metadata", UndumpCli, cmd_undump);

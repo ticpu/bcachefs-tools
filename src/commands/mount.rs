@@ -239,7 +239,7 @@ fn check_bcachefs_module() -> bool {
     }
 }
 
-pub fn mount(cli: Cli) -> std::process::ExitCode {
+fn mount(cli: Cli) -> std::process::ExitCode {
     let module_loaded = check_bcachefs_module();
 
     if cli.fs_type == "bcachefs.fuse" {
@@ -274,3 +274,14 @@ pub fn mount(cli: Cli) -> std::process::ExitCode {
         }
     }
 }
+
+pub static CMD: super::CmdDef = {
+    fn __cmd() -> clap::Command { <Cli as clap::CommandFactory>::command() }
+    fn __run(argv: Vec<String>) -> std::process::ExitCode {
+        mount(Cli::parse_from(argv))
+    }
+    super::CmdDef {
+        name: "mount", about: "Mount a filesystem", aliases: &[],
+        kind: super::CmdKind::Typed { cmd: __cmd, run: __run },
+    }
+};

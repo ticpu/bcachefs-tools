@@ -1,25 +1,75 @@
-use clap::{Args, Command, CommandFactory, Parser, Subcommand};
+// commands/mod.rs — command table, dispatch, and help
+//
+// Single source of truth: COMMAND_GROUPS defines every command.
+// Each command module exports its CmdDef(s). This file groups them.
 
-/// Command groups for help output and documentation generation.
-/// Each entry: (group heading, list of top-level subcommand names).
-pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
-    ("Superblock commands", &[
-        "format", "show-super", "recover-super",
-        "set-fs-option", "reset-counters", "strip-alloc",
-    ]),
-    ("Images", &["image"]),
-    ("Mount", &["mount"]),
-    ("Repair", &["fsck", "recovery-pass"]),
-    ("Running filesystem", &["fs"]),
-    ("Devices", &["device"]),
-    ("Subvolumes and snapshots", &["subvolume"]),
-    ("Filesystem data", &["reconcile", "scrub"]),
-    ("Encryption", &["unlock", "set-passphrase", "remove-passphrase"]),
-    ("Migrate", &["migrate", "migrate-superblock"]),
-    ("File options", &["set-file-option", "reflink-option-propagate"]),
-    ("Debug", &["dump", "undump", "list", "list_journal", "kill_btree_node", "data-read", "unpoison"]),
-    ("Miscellaneous", &["completions", "version"]),
-];
+use std::process::ExitCode;
+
+// ── Command table types (must precede mod declarations for macro access) ──
+
+pub struct CmdDef {
+    pub name:    &'static str,
+    pub about:   &'static str,
+    pub aliases: &'static [&'static str],
+    pub kind:    CmdKind,
+}
+
+pub enum CmdKind {
+    Typed {
+        cmd: fn() -> clap::Command,
+        run: fn(Vec<String>) -> ExitCode,
+    },
+    Raw {
+        run: fn(Vec<String>) -> ExitCode,
+    },
+    Group {
+        children: &'static [&'static CmdDef],
+    },
+}
+
+pub struct GroupDef {
+    pub heading:  &'static str,
+    pub commands: &'static [&'static CmdDef],
+}
+
+/// Define a typed command (clap-parsed args).
+#[macro_export]
+macro_rules! typed_cmd {
+    ($name:literal, $about:literal, $cli:ty, $handler:expr) => {
+        typed_cmd!($name, $about, aliases: [], $cli, $handler)
+    };
+    ($name:literal, $about:literal, aliases: [$($alias:literal),*], $cli:ty, $handler:expr) => {{
+        fn __cmd() -> clap::Command { <$cli as clap::CommandFactory>::command() }
+        fn __run(argv: Vec<String>) -> std::process::ExitCode {
+            use std::process::Termination;
+            $handler(<$cli as clap::Parser>::parse_from(argv)).report()
+        }
+        $crate::commands::CmdDef {
+            name: $name, about: $about, aliases: &[$($alias),*],
+            kind: $crate::commands::CmdKind::Typed { cmd: __cmd, run: __run },
+        }
+    }};
+}
+
+/// Define a raw command (manual arg parsing).
+#[macro_export]
+macro_rules! raw_cmd {
+    ($name:literal, $about:literal, $handler:expr) => {
+        raw_cmd!($name, $about, aliases: [], $handler)
+    };
+    ($name:literal, $about:literal, aliases: [$($alias:literal),*], $handler:expr) => {{
+        fn __run(argv: Vec<String>) -> std::process::ExitCode {
+            use std::process::Termination;
+            $handler(argv).report()
+        }
+        $crate::commands::CmdDef {
+            name: $name, about: $about, aliases: &[$($alias),*],
+            kind: $crate::commands::CmdKind::Raw { run: __run },
+        }
+    }};
+}
+
+// ── Subcommand modules ───────────────────────────────────────────────
 
 pub mod attr;
 pub mod completions;
@@ -52,177 +102,119 @@ pub mod timestats;
 pub mod top;
 pub mod fusemount;
 
-/// Passthrough for commands that do their own argument parsing.
-#[derive(Args, Debug)]
-#[command(disable_help_flag = true)]
-pub struct RawArgs {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-    pub args: Vec<String>,
-}
+// ── Dispatch and help ────────────────────────────────────────────────
 
-impl RawArgs {
-    /// Reconstruct argv with command name prepended, as parse_from expects.
-    pub fn argv(self, cmd_name: &str) -> Vec<String> {
-        let mut v = vec![cmd_name.to_string()];
-        v.extend(self.args);
-        v
+impl CmdDef {
+    pub fn dispatch(&self, argv: Vec<String>) -> ExitCode {
+        match &self.kind {
+            CmdKind::Typed { run, .. } | CmdKind::Raw { run } => run(argv),
+            CmdKind::Group { children } => {
+                let subcmd = argv.first().map(|s| s.as_str());
+                for child in *children {
+                    if subcmd == Some(child.name) ||
+                       child.aliases.iter().any(|a| subcmd == Some(*a)) {
+                        return child.dispatch(argv[1..].to_vec());
+                    }
+                }
+                println!("bcachefs {} - {}", self.name, self.about);
+                println!("Usage: bcachefs {} <COMMAND>\n", self.name);
+                println!("Commands:");
+                for child in *children {
+                    println!("  {:<26}{}", child.name, child.about);
+                }
+                if matches!(subcmd, Some("--help" | "-h" | "help") | None) {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                }
+            }
+        }
+    }
+
+    pub fn clap_command(&self) -> clap::Command {
+        match &self.kind {
+            CmdKind::Typed { cmd, .. } => cmd(),
+            CmdKind::Raw { .. } => clap::Command::new(self.name).about(self.about),
+            CmdKind::Group { children } => {
+                let mut cmd = clap::Command::new(self.name).about(self.about);
+                for child in *children {
+                    cmd = cmd.subcommand(child.clap_command());
+                }
+                cmd
+            }
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        self.name == name || self.aliases.iter().any(|a| *a == name)
     }
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "bcachefs", disable_help_subcommand = true)]
-pub struct Cli {
-    #[command(subcommand)]
-    pub cmd: Subcommands,
+pub fn dispatch(name: &str, argv: Vec<String>) -> Option<ExitCode> {
+    for group in COMMAND_GROUPS {
+        for cmd in group.commands {
+            if cmd.matches(name) {
+                return Some(cmd.dispatch(argv));
+            }
+        }
+    }
+    None
 }
 
-#[derive(Subcommand, Debug)]
-pub enum Subcommands {
-    // RawArgs: commands with manual arg parsing (dynamic C opts, etc.)
-    #[command(name = "format", visible_alias = "mkfs",
-              about = "Format a new filesystem")]
-    Format(RawArgs),
-    #[command(name = "set-fs-option", about = "Set filesystem options")]
-    SetFsOption(RawArgs),
-    #[command(name = "strip-alloc", about = "Strip alloc info for read-only use")]
-    StripAlloc(strip_alloc::Cli),
-    #[command(name = "mount", about = "Mount a filesystem")]
-    Mount(mount::Cli),
-    #[command(name = "migrate", about = "Migrate existing filesystem to bcachefs")]
-    Migrate(RawArgs),
-    #[command(name = "set-file-option", about = "Set file-level options")]
-    SetFileOption(RawArgs),
-    #[command(name = "reflink-option-propagate",
-              about = "Propagate options to reflinked files")]
-    ReflinkOptionPropagate(RawArgs),
-    #[command(name = "fusemount", hide = true)]
-    Fusemount(fusemount::Cli),
-
-    // Typed Cli structs: clap parses args directly
-    #[command(name = "show-super", about = "Print superblock information")]
-    ShowSuper(super_cmd::ShowSuperCli),
-    #[command(name = "recover-super", about = "Recover damaged superblock")]
-    RecoverSuper(recover_super::RecoverSuperCli),
-    #[command(name = "reset-counters", about = "Reset filesystem counters")]
-    ResetCounters(counters::Cli),
-    #[command(name = "fsck", about = "Check filesystem consistency")]
-    Fsck(fsck::FsckCli),
-    #[command(name = "recovery-pass", about = "Manage recovery passes")]
-    RecoveryPass(recovery_pass::RecoveryPassCli),
-    #[command(name = "subvolume", visible_alias = "subvol",
-              about = "Manage subvolumes and snapshots")]
-    Subvolume(subvolume::Cli),
-    #[command(name = "scrub", about = "Verify data checksums")]
-    Scrub(scrub::Cli),
-    #[command(name = "unlock", about = "Unlock an encrypted filesystem")]
-    Unlock(key::UnlockCli),
-    #[command(name = "set-passphrase", about = "Set or change passphrase")]
-    SetPassphrase(key::SetPassphraseCli),
-    #[command(name = "remove-passphrase", about = "Remove passphrase")]
-    RemovePassphrase(key::RemovePassphraseCli),
-    #[command(name = "migrate-superblock",
-              about = "Move superblock to standard location")]
-    MigrateSuperblock(migrate::MigrateSuperblockCli),
-    #[command(name = "dump", about = "Dump filesystem metadata")]
-    Dump(dump::DumpCli),
-    #[command(name = "undump", about = "Restore dumped metadata")]
-    Undump(dump::UndumpCli),
-    #[command(name = "list", about = "List filesystem metadata")]
-    List(list::Cli),
-    #[command(name = "list_journal", about = "List journal entries")]
-    ListJournal(list_journal::Cli),
-    #[command(name = "kill_btree_node", about = "Remove a btree node")]
-    KillBtreeNode(kill_btree_node::KillBtreeNodeCli),
-    #[command(name = "data-read", about = "Read data with extended error info")]
-    DataRead(data_read::Cli),
-    #[command(name = "unpoison", about = "Clear poison flags on file extents")]
-    Unpoison(unpoison::Cli),
-    #[command(name = "completions", about = "Generate shell completions")]
-    Completions(completions::Cli),
-    #[command(name = "version", about = "Display version")]
-    Version,
-
-    // Group commands with nested subcommands
-    #[command(name = "image", about = "Filesystem image commands")]
-    Image {
-        #[command(subcommand)]
-        cmd: ImageCmd,
-    },
-    #[command(name = "fs", about = "Manage a running filesystem")]
-    Fs {
-        #[command(subcommand)]
-        cmd: FsCmd,
-    },
-    #[command(name = "device", about = "Manage devices within a filesystem")]
-    Device {
-        #[command(subcommand)]
-        cmd: DeviceCmd,
-    },
-    #[command(name = "reconcile", about = "Reconcile filesystem data")]
-    Reconcile {
-        #[command(subcommand)]
-        cmd: ReconcileCmd,
-    },
-    #[command(name = "data", about = "Manage filesystem data")]
-    Data {
-        #[command(subcommand)]
-        cmd: DataCmd,
-    },
+pub fn build_cli() -> clap::Command {
+    let mut cmd = clap::Command::new("bcachefs");
+    for group in COMMAND_GROUPS {
+        for def in group.commands {
+            cmd = cmd.subcommand(def.clap_command());
+        }
+    }
+    cmd
 }
 
-#[derive(Subcommand, Debug)]
-pub enum DeviceCmd {
-    #[command(name = "add", about = "Add a device to a filesystem")]
-    Add(RawArgs),
-    #[command(name = "online", about = "Bring a device online")]
-    Online(device::OnlineCli),
-    #[command(name = "offline", about = "Take a device offline")]
-    Offline(device::OfflineCli),
-    #[command(name = "remove", about = "Remove a device")]
-    Remove(device::RemoveCli),
-    #[command(name = "evacuate", about = "Evacuate data from a device")]
-    Evacuate(device::EvacuateCli),
-    #[command(name = "set-state", about = "Set device state")]
-    SetState(device::SetStateCli),
-    #[command(name = "resize", about = "Resize filesystem on a device")]
-    Resize(device::ResizeCli),
-    #[command(name = "resize-journal", about = "Resize journal on a device")]
-    ResizeJournal(device::ResizeJournalCli),
+pub fn defers_shrinkers(name: &str) -> bool {
+    name == "mount" || name == "fusemount"
 }
 
-#[derive(Subcommand, Debug)]
-pub enum FsCmd {
-    #[command(name = "usage", about = "Show filesystem disk usage")]
-    Usage(fs_usage::Cli),
-    #[command(name = "top", about = "Show live performance counters")]
-    Top(top::Cli),
-    #[command(name = "timestats", about = "Show operation latency statistics")]
-    Timestats(timestats::Cli),
-}
+// ── Cross-module groups (assembled here) ─────────────────────────────
 
-#[derive(Subcommand, Debug)]
-pub enum ImageCmd {
-    #[command(name = "create", about = "Create a filesystem image")]
-    Create(RawArgs),
-    #[command(name = "update", about = "Update a filesystem image")]
-    Update(image::ImageUpdateCli),
-}
+static FS_CMD: CmdDef = CmdDef {
+    name: "fs", about: "Manage a running filesystem", aliases: &[],
+    kind: CmdKind::Group { children: &[&fs_usage::CMD, &top::CMD, &timestats::CMD] },
+};
 
-#[derive(Subcommand, Debug)]
-pub enum ReconcileCmd {
-    #[command(name = "status", about = "Show reconcile status")]
-    Status(reconcile::StatusCli),
-    #[command(name = "wait", about = "Wait for reconcile to complete")]
-    Wait(reconcile::WaitCli),
-}
+// ── Version (no module, trivial) ─────────────────────────────────────
 
-#[derive(Subcommand, Debug)]
-pub enum DataCmd {
-    #[command(name = "scrub", about = "Verify data checksums")]
-    Scrub(scrub::Cli),
-}
+static VERSION_CMD: CmdDef = {
+    fn __run(_argv: Vec<String>) -> ExitCode {
+        let vh = include_str!("../../version.h");
+        println!("{}", vh.split('"').nth(1).unwrap_or("unknown"));
+        ExitCode::SUCCESS
+    }
+    CmdDef { name: "version", about: "Display version", aliases: &[],
+             kind: CmdKind::Raw { run: __run } }
+};
 
-/// Build the full command tree for completions and help.
-pub fn build_cli() -> Command {
-    Cli::command()
-}
+// ── Command groups ───────────────────────────────────────────────────
+
+pub const COMMAND_GROUPS: &[GroupDef] = &[
+    GroupDef { heading: "Superblock commands", commands: &[
+        &format::CMD, &super_cmd::CMD, &recover_super::CMD,
+        &set_option::CMD, &counters::CMD, &strip_alloc::CMD,
+    ]},
+    GroupDef { heading: "Images",                   commands: &[&image::CMD] },
+    GroupDef { heading: "Mount",                    commands: &[&mount::CMD, &fusemount::CMD] },
+    GroupDef { heading: "Repair",                   commands: &[&fsck::CMD, &recovery_pass::CMD] },
+    GroupDef { heading: "Running filesystem",       commands: &[&FS_CMD] },
+    GroupDef { heading: "Devices",                  commands: &[&device::CMD] },
+    GroupDef { heading: "Subvolumes and snapshots", commands: &[&subvolume::CMD] },
+    GroupDef { heading: "Filesystem data",          commands: &[&reconcile::CMD, &scrub::CMD] },
+    GroupDef { heading: "Encryption",               commands: &[&key::CMD_UNLOCK, &key::CMD_SET_PASSPHRASE, &key::CMD_REMOVE_PASSPHRASE] },
+    GroupDef { heading: "Migrate",                  commands: &[&migrate::CMD_MIGRATE, &migrate::CMD_MIGRATE_SUPERBLOCK] },
+    GroupDef { heading: "File options",             commands: &[&attr::CMD_SETATTR, &attr::CMD_REFLINK_PROPAGATE] },
+    GroupDef { heading: "Debug", commands: &[
+        &dump::CMD_DUMP, &dump::CMD_UNDUMP, &list::CMD, &list_journal::CMD,
+        &kill_btree_node::CMD, &data_read::CMD, &unpoison::CMD,
+    ]},
+    GroupDef { heading: "Miscellaneous",            commands: &[&completions::CMD, &VERSION_CMD] },
+];
+

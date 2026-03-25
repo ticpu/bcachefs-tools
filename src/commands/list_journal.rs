@@ -613,7 +613,7 @@ pub struct Cli {
     devices: Vec<String>,
 }
 
-pub fn cmd_list_journal(cli: Cli) -> Result<()> {
+fn cmd_list_journal(cli: Cli) -> Result<()> {
 
     let mut opts: c::bch_opts = Default::default();
     opt_set!(opts, noexcl, 1);
@@ -834,3 +834,5 @@ pub fn cmd_list_journal(cli: Cli) -> Result<()> {
 
     Ok(())
 }
+
+pub const CMD: super::CmdDef = typed_cmd!("list_journal", "List journal entries", Cli, cmd_list_journal);

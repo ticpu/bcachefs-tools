@@ -27,7 +27,7 @@ pub struct RecoveryPassCli {
     devices: Vec<String>,
 }
 
-pub fn cmd_recovery_pass(cli: RecoveryPassCli) -> Result<()> {
+fn cmd_recovery_pass(cli: RecoveryPassCli) -> Result<()> {
 
     let mut passes_to_set: u64 = 0;
     let mut passes_to_unset: u64 = 0;
@@ -91,3 +91,5 @@ pub fn cmd_recovery_pass(cli: RecoveryPassCli) -> Result<()> {
 
     Ok(())
 }
+
+pub const CMD: super::CmdDef = typed_cmd!("recovery-pass", "Manage recovery passes", RecoveryPassCli, cmd_recovery_pass);

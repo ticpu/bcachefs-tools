@@ -108,7 +108,7 @@ pub struct Cli {
     filesystem: String,
 }
 
-pub fn scrub(cli: Cli) -> Result<()> {
+fn scrub(cli: Cli) -> Result<()> {
 
     unsafe { libc::signal(libc::SIGINT, sigint_handler as libc::sighandler_t); }
 
@@ -253,3 +253,5 @@ pub fn scrub(cli: Cli) -> Result<()> {
 
     Ok(())
 }
+
+pub const CMD: super::CmdDef = typed_cmd!("scrub", "Verify data checksums", Cli, scrub);

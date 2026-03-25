@@ -532,7 +532,7 @@ fn run_interactive(cli: Cli, sysfs_paths: Vec<PathBuf>) -> Result<()> {
 
 // Entry point
 
-pub fn timestats(cli: Cli) -> Result<()> {
+fn timestats(cli: Cli) -> Result<()> {
 
     let sysfs_paths: Vec<PathBuf> = if let Some(ref fs_arg) = cli.filesystem {
         let handle = BcachefsHandle::open(fs_arg)
@@ -550,3 +550,5 @@ pub fn timestats(cli: Cli) -> Result<()> {
         run_interactive(cli, sysfs_paths)
     }
 }
+
+pub const CMD: super::CmdDef = typed_cmd!("timestats", "Show operation latency statistics", Cli, timestats);

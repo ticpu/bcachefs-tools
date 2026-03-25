@@ -146,7 +146,7 @@ fn reconcile_status_to_text(
     Ok(have_pending)
 }
 
-pub fn cmd_reconcile_status(cli: StatusCli) -> Result<()> {
+fn cmd_reconcile_status(cli: StatusCli) -> Result<()> {
 
     let types = if cli.types.is_empty() {
         ReconcileType::all()
@@ -174,7 +174,7 @@ pub fn cmd_reconcile_status(cli: StatusCli) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_reconcile_wait(cli: WaitCli) -> Result<()> {
+fn cmd_reconcile_wait(cli: WaitCli) -> Result<()> {
 
     let types = if cli.types.is_empty() {
         ReconcileType::all_except_pending()
@@ -248,3 +248,10 @@ fn reconcile_wait_headless(
         thread::sleep(Duration::from_secs(1));
     }
 }
+
+pub const CMD_STATUS: super::CmdDef = typed_cmd!("status", "Show reconcile status", StatusCli, cmd_reconcile_status);
+pub const CMD_WAIT: super::CmdDef = typed_cmd!("wait", "Wait for reconcile to complete", WaitCli, cmd_reconcile_wait);
+pub const CMD: super::CmdDef = super::CmdDef {
+    name: "reconcile", about: "Reconcile filesystem data", aliases: &[],
+    kind: super::CmdKind::Group { children: &[&CMD_STATUS, &CMD_WAIT] },
+};

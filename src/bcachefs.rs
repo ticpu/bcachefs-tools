@@ -10,8 +10,7 @@ mod util;
 mod wrappers;
 mod http;
 
-use std::process::{ExitCode, Termination};
-
+use std::process::ExitCode;
 use bch_bindgen::c;
 
 #[derive(Debug)]
@@ -64,29 +63,23 @@ fn check_kernel_warnings() {
 }
 
 /// Print main bcachefs usage, with commands grouped by category.
-/// Descriptions are pulled from the clap command tree (build_cli).
 fn bcachefs_usage() {
-    let cmd = commands::build_cli();
+    use commands::{CmdKind, COMMAND_GROUPS};
 
     println!("bcachefs - tool for managing bcachefs filesystems");
     println!("usage: bcachefs <command> [<args>]\n");
 
-    for (heading, names) in commands::COMMAND_GROUPS {
-        println!("{heading}:");
-        for name in *names {
-            let Some(sub) = cmd.find_subcommand(name) else { continue };
-            let children: Vec<_> = sub.get_subcommands()
-                .filter(|c| c.get_name() != "help")
-                .collect();
-            if !children.is_empty() {
-                for child in children {
-                    let about = child.get_about().map(|s| s.to_string()).unwrap_or_default();
-                    let full = format!("{name} {}", child.get_name());
-                    println!("  {full:<26}{about}");
+    for group in COMMAND_GROUPS {
+        println!("{}:", group.heading);
+        for cmd in group.commands {
+            match &cmd.kind {
+                CmdKind::Group { children } => {
+                    for child in *children {
+                        let full = format!("{} {}", cmd.name, child.name);
+                        println!("  {full:<26}{}", child.about);
+                    }
                 }
-            } else {
-                let about = sub.get_about().map(|s| s.to_string()).unwrap_or_default();
-                println!("  {:<26}{about}", name);
+                _ => println!("  {:<26}{}", cmd.name, cmd.about),
             }
         }
         println!();
@@ -168,32 +161,32 @@ fn generate_cli_doc() -> ExitCode {
     let cmd = commands::build_cli();
     let mut out = String::new();
 
-    for (heading, names) in commands::COMMAND_GROUPS {
-        writeln!(out, "\\subsection{{{heading}}}").unwrap();
+    for group in commands::COMMAND_GROUPS {
+        writeln!(out, "\\subsection{{{}}}", group.heading).unwrap();
 
-        // Emit group-level long_about as intro text before the command list
-        for name in *names {
-            let Some(sub) = cmd.find_subcommand(name) else { continue };
-            if sub.get_subcommands().count() > 0 {
-                if let Some(long_about) = sub.get_long_about() {
-                    writeln!(out).unwrap();
-                    write!(out, "{}", about_to_latex(&long_about.to_string())).unwrap();
+        // Emit group-level long_about as intro text
+        for def in group.commands {
+            if let Some(sub) = cmd.find_subcommand(def.name) {
+                if sub.get_subcommands().count() > 0 {
+                    if let Some(long_about) = sub.get_long_about() {
+                        writeln!(out).unwrap();
+                        write!(out, "{}", about_to_latex(&long_about.to_string())).unwrap();
+                    }
                 }
             }
         }
 
         writeln!(out, "\\begin{{description}}").unwrap();
 
-        for name in *names {
-            let Some(sub) = cmd.find_subcommand(name) else { continue };
+        for def in group.commands {
+            let Some(sub) = cmd.find_subcommand(def.name) else { continue };
             let children: Vec<_> = sub.get_subcommands()
                 .filter(|c| c.get_name() != "help")
                 .collect();
 
             if !children.is_empty() {
-                // Group command (device, fs, image, etc.) — list children
                 for child in children {
-                    let full = format!("bcachefs {name} {}", child.get_name());
+                    let full = format!("bcachefs {} {}", def.name, child.get_name());
                     write!(out, "\\item[{{\\tt {}}}]", escape_latex(&full)).unwrap();
 
                     let aliases: Vec<_> = child.get_visible_aliases().collect();
@@ -219,13 +212,11 @@ fn generate_cli_doc() -> ExitCode {
                     }
                 }
             } else {
-                // Leaf command
-                let full = format!("bcachefs {name}");
+                let full = format!("bcachefs {}", def.name);
                 write!(out, "\\item[{{\\tt {}}}]", escape_latex(&full)).unwrap();
 
-                let aliases: Vec<_> = sub.get_visible_aliases().collect();
-                if !aliases.is_empty() {
-                    let alias_str = aliases.into_iter()
+                if !def.aliases.is_empty() {
+                    let alias_str = def.aliases.iter()
                         .map(|a| format!("{{\\tt {}}}", escape_latex(a)))
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -268,8 +259,6 @@ fn generate_cli_doc() -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    use commands::{Subcommands as S, DeviceCmd, FsCmd, ImageCmd, ReconcileCmd, DataCmd};
-
     // glibc and Rust stdlib buffer stdout independently; when piped, both
     // switch to block buffering which can reorder or lose output.
     // Set both to line-buffered.
@@ -293,7 +282,7 @@ fn main() -> ExitCode {
         None
     };
 
-    // Handle top-level help and missing command before clap parsing
+    // Handle top-level help and missing command
     if symlink_cmd.is_none() {
         match args.get(1).map(|s| s.as_str()) {
             None => {
@@ -312,97 +301,28 @@ fn main() -> ExitCode {
 
     unsafe { c::raid_init() };
 
-    // Build effective argv for clap: insert subcommand name for symlink invocations
-    let effective_args: Vec<String> = if let Some(cmd) = symlink_cmd {
-        let mut v = vec!["bcachefs".to_string(), cmd.to_string()];
+    let (cmd_name, argv) = if let Some(cmd) = symlink_cmd {
+        let mut v = vec![cmd.to_string()];
         v.extend_from_slice(&args[1..]);
-        v
+        (cmd, v)
     } else {
-        args
+        (args[1].as_str(), args[1..].to_vec())
     };
-
-    use clap::Parser;
-
-    let cli = commands::Cli::parse_from(&effective_args);
 
     // fuse will call this after daemonizing, we can't create threads before
     // note that mount may invoke fusemount, via -t bcachefs.fuse
-    if !matches!(cli.cmd, S::Mount(_) | S::Fusemount(_)) {
+    if !commands::defers_shrinkers(cmd_name) {
         unsafe { c::linux_shrinkers_init() };
     }
 
     check_kernel_warnings();
 
-    match cli.cmd {
-        // RawArgs commands — manual parsing, pass argv through
-        S::Format(raw)                  => commands::format::cmd_format(raw.argv("format")).report(),
-        S::SetFsOption(raw)             => commands::set_option::cmd_set_option(raw.argv("set-fs-option")).report(),
-        S::StripAlloc(cli)              => commands::strip_alloc::cmd_strip_alloc(cli).report(),
-        S::Mount(cli)                   => commands::mount::mount(cli),
-        S::Migrate(raw)                 => commands::migrate::cmd_migrate(raw.argv("migrate")).report(),
-        S::SetFileOption(raw)           => commands::attr::cmd_setattr(raw.argv("set-file-option")).report(),
-        S::ReflinkOptionPropagate(raw)  => commands::attr::cmd_reflink_option_propagate(raw.argv("reflink-option-propagate")).report(),
-        S::Fusemount(cli)               => commands::fusemount::cmd_fusemount(cli).report(),
-
-        // Typed commands — clap already parsed, just dispatch
-        S::ShowSuper(cli)               => commands::super_cmd::cmd_show_super(cli).report(),
-        S::RecoverSuper(cli)            => commands::recover_super::cmd_recover_super(cli).report(),
-        S::ResetCounters(cli)           => commands::counters::cmd_reset_counters(cli).report(),
-        S::Fsck(cli)                    => commands::fsck::cmd_fsck(cli).report(),
-        S::RecoveryPass(cli)            => commands::recovery_pass::cmd_recovery_pass(cli).report(),
-        S::Subvolume(cli)               => commands::subvolume::subvolume(cli).report(),
-        S::Scrub(cli)                   => commands::scrub::scrub(cli).report(),
-        S::Unlock(cli)                  => commands::key::cmd_unlock(cli).report(),
-        S::SetPassphrase(cli)           => commands::key::cmd_set_passphrase(cli).report(),
-        S::RemovePassphrase(cli)        => commands::key::cmd_remove_passphrase(cli).report(),
-        S::MigrateSuperblock(cli)       => commands::migrate::cmd_migrate_superblock(cli).report(),
-        S::Dump(cli)                    => commands::dump::cmd_dump(cli).report(),
-        S::Undump(cli)                  => commands::dump::cmd_undump(cli).report(),
-        S::List(cli)                    => commands::list::list(cli).report(),
-        S::ListJournal(cli)             => commands::list_journal::cmd_list_journal(cli).report(),
-        S::KillBtreeNode(cli)           => commands::kill_btree_node::cmd_kill_btree_node(cli).report(),
-        S::DataRead(cli)                => commands::data_read::cmd_data_read(cli).report(),
-        S::Unpoison(cli)                => commands::unpoison::cmd_unpoison(cli).report(),
-        S::Completions(cli)             => { commands::completions::completions(cli); ExitCode::SUCCESS },
-
-        // Group commands
-        S::Image { cmd }               => match cmd {
-            ImageCmd::Create(raw)       => commands::image::cmd_image_create(raw.argv("create")).report(),
-            ImageCmd::Update(cli)       => commands::image::cmd_image_update(cli).report(),
-        },
-        S::Fs { cmd }                   => match cmd {
-            FsCmd::Usage(cli)           => commands::fs_usage::fs_usage(cli).report(),
-            FsCmd::Top(cli)             => commands::top::top(cli).report(),
-            FsCmd::Timestats(cli)       => commands::timestats::timestats(cli).report(),
-        },
-        S::Device { cmd }              => match cmd {
-            DeviceCmd::Add(raw)         => commands::device::cmd_device_add(raw.argv("add")).report(),
-            DeviceCmd::Online(cli)      => commands::device::cmd_device_online(cli).report(),
-            DeviceCmd::Offline(cli)     => commands::device::cmd_device_offline(cli).report(),
-            DeviceCmd::Remove(cli)      => commands::device::cmd_device_remove(cli).report(),
-            DeviceCmd::Evacuate(cli)    => commands::device::cmd_device_evacuate(cli).report(),
-            DeviceCmd::SetState(cli)    => commands::device::cmd_device_set_state(cli).report(),
-            DeviceCmd::Resize(cli)      => commands::device::cmd_device_resize(cli).report(),
-            DeviceCmd::ResizeJournal(cli) => commands::device::cmd_device_resize_journal(cli).report(),
-        },
-        S::Reconcile { cmd }            => match cmd {
-            ReconcileCmd::Status(cli)   => commands::reconcile::cmd_reconcile_status(cli).report(),
-            ReconcileCmd::Wait(cli)     => commands::reconcile::cmd_reconcile_wait(cli).report(),
-        },
-        S::Data { cmd }                 => match cmd {
-            DataCmd::Scrub(cli)         => commands::scrub::scrub(cli).report(),
-        },
-        S::Version                      => {
-            let vh = include_str!("../version.h");
-            println!("{}", vh.split('"').nth(1).unwrap_or("unknown"));
-            let config = read_kernel_config();
-            let rust_status = match config.as_deref().map(|c| kernel_config_has(c, "CONFIG_RUST")) {
-                Some(true)  => "CONFIG_RUST=y",
-                Some(false) => "CONFIG_RUST is not enabled",
-                None        => "unable to read kernel config",
-            };
-            println!("kernel: {rust_status}");
-            ExitCode::SUCCESS
+    match commands::dispatch(cmd_name, argv) {
+        Some(code) => code,
+        None => {
+            println!("Unknown command {cmd_name}");
+            bcachefs_usage();
+            ExitCode::from(1)
         }
     }
 }

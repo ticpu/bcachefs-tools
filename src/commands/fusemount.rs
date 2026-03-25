@@ -950,3 +950,5 @@ pub fn cmd_fusemount(cli: Cli) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+pub const CMD: super::CmdDef = typed_cmd!("fusemount", "FUSE mount", Cli, cmd_fusemount);
