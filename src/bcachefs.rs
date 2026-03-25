@@ -93,21 +93,6 @@ fn bcachefs_usage() {
     }
 }
 
-/// Print usage for a subcommand group (device, fs, data, reconcile, etc.)
-/// by pulling subcommand names and descriptions from the clap tree.
-fn group_usage(group: &str) {
-    let cmd = commands::build_cli();
-    let Some(sub) = cmd.find_subcommand(group) else { return };
-    let about = sub.get_about().map(|s| s.to_string()).unwrap_or_default();
-    println!("bcachefs {group} - {about}");
-    println!("Usage: bcachefs {group} <command> [OPTION]...\n");
-    println!("Commands:");
-    for child in sub.get_subcommands() {
-        if child.get_name() == "help" { continue }
-        let child_about = child.get_about().map(|s| s.to_string()).unwrap_or_default();
-        println!("  {:<26}{child_about}", child.get_name());
-    }
-}
 
 fn escape_latex(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -283,6 +268,8 @@ fn generate_cli_doc() -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    use commands::{Subcommands as S, DeviceCmd, FsCmd, ImageCmd, ReconcileCmd, DataCmd};
+
     // glibc and Rust stdlib buffer stdout independently; when piped, both
     // switch to block buffering which can reorder or lose output.
     // Set both to line-buffered.
@@ -293,8 +280,9 @@ fn main() -> ExitCode {
 
     let args: Vec<String> = std::env::args().collect();
 
+    // Handle symlink invocations (mkfs.bcachefs, fsck.bcachefs, mount.bcachefs, etc.)
     let symlink_cmd: Option<&str> = if args[0].contains("mkfs") {
-        Some("mkfs")
+        Some("format")
     } else if args[0].contains("fsck") {
         Some("fsck")
     } else if args[0].contains("mount.fuse") {
@@ -305,33 +293,111 @@ fn main() -> ExitCode {
         None
     };
 
-    if symlink_cmd.is_none() && args.len() < 2 {
-        println!("missing command");
-        bcachefs_usage();
-        return ExitCode::from(1);
+    // Handle top-level help and missing command before clap parsing
+    if symlink_cmd.is_none() {
+        match args.get(1).map(|s| s.as_str()) {
+            None => {
+                println!("missing command");
+                bcachefs_usage();
+                return ExitCode::from(1);
+            }
+            Some("--help" | "-h" | "help") => {
+                bcachefs_usage();
+                return ExitCode::SUCCESS;
+            }
+            Some("_doc_gen") => return generate_cli_doc(),
+            _ => {}
+        }
     }
 
     unsafe { c::raid_init() };
 
-    let cmd = match symlink_cmd {
-        Some(s) => s,
-        None => args[1].as_str(),
+    // Build effective argv for clap: insert subcommand name for symlink invocations
+    let effective_args: Vec<String> = if let Some(cmd) = symlink_cmd {
+        let mut v = vec!["bcachefs".to_string(), cmd.to_string()];
+        v.extend_from_slice(&args[1..]);
+        v
+    } else {
+        args
     };
 
-    // fuse will call this after daemonizing, we can't create threads before - note that mount
-    // may invoke fusemount, via -t bcachefs.fuse
-    if cmd != "mount" && cmd != "fusemount" {
+    use clap::Parser;
+
+    let cli = commands::Cli::parse_from(&effective_args);
+
+    // fuse will call this after daemonizing, we can't create threads before
+    // note that mount may invoke fusemount, via -t bcachefs.fuse
+    if !matches!(cli.cmd, S::Mount(_) | S::Fusemount(_)) {
         unsafe { c::linux_shrinkers_init() };
     }
 
     check_kernel_warnings();
 
-    match cmd {
-        "--help" | "help" => {
-            bcachefs_usage();
-            ExitCode::SUCCESS
-        }
-        "version" => {
+    match cli.cmd {
+        S::Format(raw)                  => commands::format::cmd_format(raw.argv("format")).report(),
+        S::ShowSuper(raw)               => commands::super_cmd::cmd_show_super(raw.argv("show-super")).report(),
+        S::RecoverSuper(raw)            => commands::recover_super::cmd_recover_super(raw.argv("recover-super")).report(),
+        S::SetFsOption(raw)             => commands::set_option::cmd_set_option(raw.argv("set-fs-option")).report(),
+        S::ResetCounters(raw)           => commands::counters::cmd_reset_counters(raw.argv("reset-counters")).report(),
+        S::StripAlloc(raw)              => commands::strip_alloc::cmd_strip_alloc(raw.argv("strip-alloc")).report(),
+
+        S::Image { cmd }               => match cmd {
+            ImageCmd::Create(raw)       => commands::image::cmd_image_create(raw.argv("create")).report(),
+            ImageCmd::Update(raw)       => commands::image::cmd_image_update(raw.argv("update")).report(),
+        },
+
+        S::Mount(raw)                   => commands::mount::mount(raw.argv("mount"), symlink_cmd),
+        S::Fsck(raw)                    => commands::fsck::cmd_fsck(raw.argv("fsck")).report(),
+        S::RecoveryPass(raw)            => commands::recovery_pass::cmd_recovery_pass(raw.argv("recovery-pass")).report(),
+
+        S::Fs { cmd }                   => match cmd {
+            FsCmd::Usage(raw)           => commands::fs_usage::fs_usage(raw.argv("usage")).report(),
+            FsCmd::Top(raw)             => commands::top::top(raw.argv("top")).report(),
+            FsCmd::Timestats(raw)       => commands::timestats::timestats(raw.argv("timestats")).report(),
+        },
+
+        S::Device { cmd }              => match cmd {
+            DeviceCmd::Add(raw)         => commands::device::cmd_device_add(raw.argv("add")).report(),
+            DeviceCmd::Online(raw)      => commands::device::cmd_device_online(raw.argv("online")).report(),
+            DeviceCmd::Offline(raw)     => commands::device::cmd_device_offline(raw.argv("offline")).report(),
+            DeviceCmd::Remove(raw)      => commands::device::cmd_device_remove(raw.argv("remove")).report(),
+            DeviceCmd::Evacuate(raw)    => commands::device::cmd_device_evacuate(raw.argv("evacuate")).report(),
+            DeviceCmd::SetState(raw)    => commands::device::cmd_device_set_state(raw.argv("set-state")).report(),
+            DeviceCmd::Resize(raw)      => commands::device::cmd_device_resize(raw.argv("resize")).report(),
+            DeviceCmd::ResizeJournal(raw) => commands::device::cmd_device_resize_journal(raw.argv("resize-journal")).report(),
+        },
+
+        S::Subvolume(raw)               => commands::subvolume::subvolume(raw.argv("subvolume")).report(),
+
+        S::Reconcile { cmd }            => match cmd {
+            ReconcileCmd::Status(raw)   => commands::reconcile::cmd_reconcile_status(raw.argv("status")).report(),
+            ReconcileCmd::Wait(raw)     => commands::reconcile::cmd_reconcile_wait(raw.argv("wait")).report(),
+        },
+        S::Scrub(raw)                   => commands::scrub::scrub(raw.argv("scrub")).report(),
+        S::Data { cmd }                 => match cmd {
+            DataCmd::Scrub(raw)         => commands::scrub::scrub(raw.argv("scrub")).report(),
+        },
+
+        S::Unlock(raw)                  => commands::key::cmd_unlock(raw.argv("unlock")).report(),
+        S::SetPassphrase(raw)           => commands::key::cmd_set_passphrase(raw.argv("set-passphrase")).report(),
+        S::RemovePassphrase(raw)        => commands::key::cmd_remove_passphrase(raw.argv("remove-passphrase")).report(),
+
+        S::Migrate(raw)                 => commands::migrate::cmd_migrate(raw.argv("migrate")).report(),
+        S::MigrateSuperblock(raw)       => commands::migrate::cmd_migrate_superblock(raw.argv("migrate-superblock")).report(),
+
+        S::SetFileOption(raw)           => commands::attr::cmd_setattr(raw.argv("set-file-option")).report(),
+        S::ReflinkOptionPropagate(raw)  => commands::attr::cmd_reflink_option_propagate(raw.argv("reflink-option-propagate")).report(),
+
+        S::Dump(raw)                    => commands::dump::cmd_dump(raw.argv("dump")).report(),
+        S::Undump(raw)                  => commands::dump::cmd_undump(raw.argv("undump")).report(),
+        S::List(raw)                    => commands::list::list(raw.argv("list")).report(),
+        S::ListJournal(raw)             => commands::list_journal::cmd_list_journal(raw.argv("list_journal")).report(),
+        S::KillBtreeNode(raw)           => commands::kill_btree_node::cmd_kill_btree_node(raw.argv("kill_btree_node")).report(),
+        S::DataRead(raw)                => commands::data_read::cmd_data_read(raw.argv("data-read")).report(),
+        S::Unpoison(raw)                => commands::unpoison::cmd_unpoison(raw.argv("unpoison")).report(),
+
+        S::Completions(raw)             => { commands::completions::completions(raw.argv("completions")); ExitCode::SUCCESS },
+        S::Version                      => {
             let vh = include_str!("../version.h");
             println!("{}", vh.split('"').nth(1).unwrap_or("unknown"));
             let config = read_kernel_config();
@@ -343,81 +409,6 @@ fn main() -> ExitCode {
             println!("kernel: {rust_status}");
             ExitCode::SUCCESS
         }
-        "_doc_gen" => generate_cli_doc(),
-        "completions" => {
-            commands::completions(args[1..].to_vec());
-            ExitCode::SUCCESS
-        }
-        "list" => commands::list(args[1..].to_vec()).report(),
-        "list_journal" => commands::cmd_list_journal(args[1..].to_vec()).report(),
-        "mount" => commands::mount(args, symlink_cmd),
-        "scrub" => commands::scrub(args[1..].to_vec()).report(),
-        "subvolume" => commands::subvolume(args[1..].to_vec()).report(),
-        "data" => match args.get(2).map(|s| s.as_str()) {
-            Some("scrub") => commands::scrub(args[2..].to_vec()).report(),
-            _ => { group_usage("data"); ExitCode::from(1) }
-        },
-        "device" => match args.get(2).map(|s| s.as_str()) {
-            Some("add") => commands::cmd_device_add(args[2..].to_vec()).report(),
-            Some("online") => commands::cmd_device_online(args[2..].to_vec()).report(),
-            Some("offline") => commands::cmd_device_offline(args[2..].to_vec()).report(),
-            Some("remove") => commands::cmd_device_remove(args[2..].to_vec()).report(),
-            Some("evacuate") => commands::cmd_device_evacuate(args[2..].to_vec()).report(),
-            Some("set-state") => commands::cmd_device_set_state(args[2..].to_vec()).report(),
-            Some("resize") => commands::cmd_device_resize(args[2..].to_vec()).report(),
-            Some("resize-journal") => commands::cmd_device_resize_journal(args[2..].to_vec()).report(),
-            _ => { group_usage("device"); ExitCode::SUCCESS }
-        },
-        "format" | "mkfs" => {
-            let argv = if symlink_cmd.is_some() { args.clone() } else { args[1..].to_vec() };
-            commands::cmd_format(argv).report()
-        }
-        "fsck" => {
-            let argv = if symlink_cmd.is_some() { args.clone() } else { args[1..].to_vec() };
-            commands::cmd_fsck(argv).report()
-        }
-        "image" => match args.get(2).map(|s| s.as_str()) {
-            Some("create") => commands::cmd_image_create(args[2..].to_vec()).report(),
-            Some("update") => commands::cmd_image_update(args[2..].to_vec()).report(),
-            _ => { group_usage("image"); ExitCode::from(1) }
-        },
-        "fs" => match args.get(2).map(|s| s.as_str()) {
-            Some("timestats") => commands::timestats(args[2..].to_vec()).report(),
-            Some("top") => commands::top(args[2..].to_vec()).report(),
-            Some("usage") => commands::fs_usage::fs_usage(args[2..].to_vec()).report(),
-            _ => { group_usage("fs"); ExitCode::from(1) }
-        },
-        "remove-passphrase" => commands::cmd_remove_passphrase(args[1..].to_vec()).report(),
-        "reset-counters" => commands::cmd_reset_counters(args[1..].to_vec()).report(),
-        "recovery-pass" => commands::cmd_recovery_pass(args[1..].to_vec()).report(),
-        "reconcile" => match args.get(2).map(|s| s.as_str()) {
-            Some("status") => commands::cmd_reconcile_status(args[2..].to_vec()).report(),
-            Some("wait") => commands::cmd_reconcile_wait(args[2..].to_vec()).report(),
-            _ => { group_usage("reconcile"); ExitCode::from(1) }
-        },
-        "migrate" => commands::cmd_migrate(args[1..].to_vec()).report(),
-        "migrate-superblock" => commands::cmd_migrate_superblock(args[1..].to_vec()).report(),
-        "kill_btree_node" => commands::cmd_kill_btree_node(args[1..].to_vec()).report(),
-        "data-read" => commands::data_read::cmd_data_read(args[1..].to_vec()).report(),
-        "unpoison" => commands::unpoison::cmd_unpoison(args[1..].to_vec()).report(),
-        "dump" => commands::cmd_dump(args[1..].to_vec()).report(),
-        "undump" => commands::cmd_undump(args[1..].to_vec()).report(),
-        "recover-super" => commands::cmd_recover_super(args[1..].to_vec()).report(),
-        "show-super" => commands::super_cmd::cmd_show_super(args[1..].to_vec()).report(),
-        "strip-alloc" => commands::cmd_strip_alloc(args[1..].to_vec()).report(),
-        "set-file-option" => commands::cmd_setattr(args[1..].to_vec()).report(),
-        "set-fs-option" => commands::cmd_set_option(args[1..].to_vec()).report(),
-        "set-passphrase" => commands::cmd_set_passphrase(args[1..].to_vec()).report(),
-        "reflink-option-propagate" => commands::cmd_reflink_option_propagate(args[1..].to_vec()).report(),
-        "unlock" => commands::cmd_unlock(args[1..].to_vec()).report(),
-        "fusemount" => {
-            let argv = if symlink_cmd.is_some() { args.clone() } else { args[1..].to_vec() };
-            commands::fusemount::cmd_fusemount(argv).report()
-        }
-        _ => {
-            println!("Unknown command {cmd}");
-            bcachefs_usage();
-            ExitCode::from(1)
-        }
+        S::Fusemount(raw)              => commands::fusemount::cmd_fusemount(raw.args).report(),
     }
 }

@@ -31,7 +31,7 @@ struct BchIoctlUnpoison {
     pad:        u32,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "unpoison")]
 /// Clear poison flags on file extents
 ///

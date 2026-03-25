@@ -37,7 +37,7 @@ struct BchIoctlPreadRaw {
     err:        BchIoctlErrMsg,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "data-read")]
 /// Read file data with extended error reporting
 ///
