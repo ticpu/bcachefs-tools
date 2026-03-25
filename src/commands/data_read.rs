@@ -77,8 +77,7 @@ pub struct Cli {
     width: usize,
 }
 
-pub fn cmd_data_read(argv: Vec<String>) -> anyhow::Result<()> {
-    let cli = Cli::parse_from(argv);
+pub fn cmd_data_read(cli: Cli) -> anyhow::Result<()> {
     cmd_data_read_inner(&cli)
 }
 

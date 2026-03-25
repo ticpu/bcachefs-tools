@@ -174,8 +174,7 @@ pub struct OnlineCli {
     device: String,
 }
 
-pub fn cmd_device_online(argv: Vec<String>) -> Result<()> {
-    let cli = OnlineCli::parse_from(argv);
+pub fn cmd_device_online(cli: OnlineCli) -> Result<()> {
 
     let handle = BcachefsHandle::open(&cli.device)
         .with_context(|| format!("opening filesystem for '{}'", cli.device))?;
@@ -196,8 +195,7 @@ pub struct OfflineCli {
     device: String,
 }
 
-pub fn cmd_device_offline(argv: Vec<String>) -> Result<()> {
-    let cli = OfflineCli::parse_from(argv);
+pub fn cmd_device_offline(cli: OfflineCli) -> Result<()> {
     let (handle, dev_idx) = open_dev(&cli.device)?;
 
     let flags = if cli.force { BCH_FORCE_IF_DEGRADED } else { 0 };
@@ -223,8 +221,7 @@ pub struct RemoveCli {
     path: Option<String>,
 }
 
-pub fn cmd_device_remove(argv: Vec<String>) -> Result<()> {
-    let cli = RemoveCli::parse_from(argv);
+pub fn cmd_device_remove(cli: RemoveCli) -> Result<()> {
 
     let mut flags = BCH_FORCE_IF_DEGRADED;
     if cli.force {
@@ -293,8 +290,7 @@ pub struct SetStateCli {
     path: Option<String>,
 }
 
-pub fn cmd_device_set_state(argv: Vec<String>) -> Result<()> {
-    let cli = SetStateCli::parse_from(argv);
+pub fn cmd_device_set_state(cli: SetStateCli) -> Result<()> {
 
     let new_state = cli.new_state.as_u32();
 
@@ -355,8 +351,7 @@ pub struct ResizeCli {
     size: Option<String>,
 }
 
-pub fn cmd_device_resize(argv: Vec<String>) -> Result<()> {
-    let cli = ResizeCli::parse_from(argv);
+pub fn cmd_device_resize(cli: ResizeCli) -> Result<()> {
 
     let size_bytes = match cli.size {
         Some(ref s) => parse_human_size(s)?,
@@ -452,8 +447,7 @@ pub struct ResizeJournalCli {
     size: String,
 }
 
-pub fn cmd_device_resize_journal(argv: Vec<String>) -> Result<()> {
-    let cli = ResizeJournalCli::parse_from(argv);
+pub fn cmd_device_resize_journal(cli: ResizeJournalCli) -> Result<()> {
 
     let size_bytes = parse_human_size(&cli.size)?;
     let size_sectors = size_bytes >> 9;
@@ -504,8 +498,7 @@ pub struct EvacuateCli {
     device: String,
 }
 
-pub fn cmd_device_evacuate(argv: Vec<String>) -> Result<()> {
-    let cli = EvacuateCli::parse_from(argv);
+pub fn cmd_device_evacuate(cli: EvacuateCli) -> Result<()> {
 
     if bcachefs_kernel_version() < bcachefs_metadata_version_reconcile as u64 {
         return Err(anyhow!(

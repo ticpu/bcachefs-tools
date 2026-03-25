@@ -613,8 +613,7 @@ pub struct Cli {
     devices: Vec<String>,
 }
 
-pub fn cmd_list_journal(argv: Vec<String>) -> Result<()> {
-    let cli = Cli::parse_from(argv);
+pub fn cmd_list_journal(cli: Cli) -> Result<()> {
 
     let mut opts: c::bch_opts = Default::default();
     opt_set!(opts, noexcl, 1);

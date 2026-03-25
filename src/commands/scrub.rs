@@ -108,8 +108,7 @@ pub struct Cli {
     filesystem: String,
 }
 
-pub fn scrub(argv: Vec<String>) -> Result<()> {
-    let cli = Cli::parse_from(argv);
+pub fn scrub(cli: Cli) -> Result<()> {
 
     unsafe { libc::signal(libc::SIGINT, sigint_handler as libc::sighandler_t); }
 

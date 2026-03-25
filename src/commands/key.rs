@@ -31,8 +31,7 @@ pub struct UnlockCli {
     device: String,
 }
 
-pub fn cmd_unlock(argv: Vec<String>) -> Result<()> {
-    let cli = UnlockCli::parse_from(argv);
+pub fn cmd_unlock(cli: UnlockCli) -> Result<()> {
 
     let sb = sb_io::read_super(Path::new(&cli.device))
         .with_context(|| format!("Error opening {}", cli.device))?;
@@ -135,8 +134,7 @@ pub struct SetPassphraseCli {
     devices: Vec<String>,
 }
 
-pub fn cmd_set_passphrase(argv: Vec<String>) -> Result<()> {
-    let cli = SetPassphraseCli::parse_from(argv);
+pub fn cmd_set_passphrase(cli: SetPassphraseCli) -> Result<()> {
     let (fs, raw_key) = open_and_verify(&parse_device_list(&cli.devices))?;
 
     let new_passphrase = Passphrase::new_from_prompt_twice()
@@ -163,8 +161,7 @@ pub struct RemovePassphraseCli {
     devices: Vec<String>,
 }
 
-pub fn cmd_remove_passphrase(argv: Vec<String>) -> Result<()> {
-    let cli = RemovePassphraseCli::parse_from(argv);
+pub fn cmd_remove_passphrase(cli: RemovePassphraseCli) -> Result<()> {
     let (fs, raw_key) = open_and_verify(&parse_device_list(&cli.devices))?;
 
     unsafe { set_crypt_key(&fs, unencrypted_key(&raw_key)); }

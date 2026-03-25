@@ -61,8 +61,7 @@ pub struct Cli {
     yes_i_understand: bool,
 }
 
-pub fn cmd_unpoison(argv: Vec<String>) -> anyhow::Result<()> {
-    let cli = Cli::parse_from(argv);
+pub fn cmd_unpoison(cli: Cli) -> anyhow::Result<()> {
 
     if !cli.yes_i_understand {
         eprintln!("WARNING: Unpoisoning makes corruption invisible.");

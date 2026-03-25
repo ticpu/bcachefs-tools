@@ -334,69 +334,64 @@ fn main() -> ExitCode {
     check_kernel_warnings();
 
     match cli.cmd {
+        // RawArgs commands — manual parsing, pass argv through
         S::Format(raw)                  => commands::format::cmd_format(raw.argv("format")).report(),
-        S::ShowSuper(raw)               => commands::super_cmd::cmd_show_super(raw.argv("show-super")).report(),
-        S::RecoverSuper(raw)            => commands::recover_super::cmd_recover_super(raw.argv("recover-super")).report(),
         S::SetFsOption(raw)             => commands::set_option::cmd_set_option(raw.argv("set-fs-option")).report(),
-        S::ResetCounters(raw)           => commands::counters::cmd_reset_counters(raw.argv("reset-counters")).report(),
         S::StripAlloc(raw)              => commands::strip_alloc::cmd_strip_alloc(raw.argv("strip-alloc")).report(),
-
-        S::Image { cmd }               => match cmd {
-            ImageCmd::Create(raw)       => commands::image::cmd_image_create(raw.argv("create")).report(),
-            ImageCmd::Update(raw)       => commands::image::cmd_image_update(raw.argv("update")).report(),
-        },
-
         S::Mount(raw)                   => commands::mount::mount(raw.argv("mount"), symlink_cmd),
-        S::Fsck(raw)                    => commands::fsck::cmd_fsck(raw.argv("fsck")).report(),
-        S::RecoveryPass(raw)            => commands::recovery_pass::cmd_recovery_pass(raw.argv("recovery-pass")).report(),
-
-        S::Fs { cmd }                   => match cmd {
-            FsCmd::Usage(raw)           => commands::fs_usage::fs_usage(raw.argv("usage")).report(),
-            FsCmd::Top(raw)             => commands::top::top(raw.argv("top")).report(),
-            FsCmd::Timestats(raw)       => commands::timestats::timestats(raw.argv("timestats")).report(),
-        },
-
-        S::Device { cmd }              => match cmd {
-            DeviceCmd::Add(raw)         => commands::device::cmd_device_add(raw.argv("add")).report(),
-            DeviceCmd::Online(raw)      => commands::device::cmd_device_online(raw.argv("online")).report(),
-            DeviceCmd::Offline(raw)     => commands::device::cmd_device_offline(raw.argv("offline")).report(),
-            DeviceCmd::Remove(raw)      => commands::device::cmd_device_remove(raw.argv("remove")).report(),
-            DeviceCmd::Evacuate(raw)    => commands::device::cmd_device_evacuate(raw.argv("evacuate")).report(),
-            DeviceCmd::SetState(raw)    => commands::device::cmd_device_set_state(raw.argv("set-state")).report(),
-            DeviceCmd::Resize(raw)      => commands::device::cmd_device_resize(raw.argv("resize")).report(),
-            DeviceCmd::ResizeJournal(raw) => commands::device::cmd_device_resize_journal(raw.argv("resize-journal")).report(),
-        },
-
-        S::Subvolume(raw)               => commands::subvolume::subvolume(raw.argv("subvolume")).report(),
-
-        S::Reconcile { cmd }            => match cmd {
-            ReconcileCmd::Status(raw)   => commands::reconcile::cmd_reconcile_status(raw.argv("status")).report(),
-            ReconcileCmd::Wait(raw)     => commands::reconcile::cmd_reconcile_wait(raw.argv("wait")).report(),
-        },
-        S::Scrub(raw)                   => commands::scrub::scrub(raw.argv("scrub")).report(),
-        S::Data { cmd }                 => match cmd {
-            DataCmd::Scrub(raw)         => commands::scrub::scrub(raw.argv("scrub")).report(),
-        },
-
-        S::Unlock(raw)                  => commands::key::cmd_unlock(raw.argv("unlock")).report(),
-        S::SetPassphrase(raw)           => commands::key::cmd_set_passphrase(raw.argv("set-passphrase")).report(),
-        S::RemovePassphrase(raw)        => commands::key::cmd_remove_passphrase(raw.argv("remove-passphrase")).report(),
-
         S::Migrate(raw)                 => commands::migrate::cmd_migrate(raw.argv("migrate")).report(),
-        S::MigrateSuperblock(raw)       => commands::migrate::cmd_migrate_superblock(raw.argv("migrate-superblock")).report(),
-
         S::SetFileOption(raw)           => commands::attr::cmd_setattr(raw.argv("set-file-option")).report(),
         S::ReflinkOptionPropagate(raw)  => commands::attr::cmd_reflink_option_propagate(raw.argv("reflink-option-propagate")).report(),
+        S::Fusemount(raw)               => commands::fusemount::cmd_fusemount(raw.argv("fusemount")).report(),
 
-        S::Dump(raw)                    => commands::dump::cmd_dump(raw.argv("dump")).report(),
-        S::Undump(raw)                  => commands::dump::cmd_undump(raw.argv("undump")).report(),
-        S::List(raw)                    => commands::list::list(raw.argv("list")).report(),
-        S::ListJournal(raw)             => commands::list_journal::cmd_list_journal(raw.argv("list_journal")).report(),
-        S::KillBtreeNode(raw)           => commands::kill_btree_node::cmd_kill_btree_node(raw.argv("kill_btree_node")).report(),
-        S::DataRead(raw)                => commands::data_read::cmd_data_read(raw.argv("data-read")).report(),
-        S::Unpoison(raw)                => commands::unpoison::cmd_unpoison(raw.argv("unpoison")).report(),
+        // Typed commands — clap already parsed, just dispatch
+        S::ShowSuper(cli)               => commands::super_cmd::cmd_show_super(cli).report(),
+        S::RecoverSuper(cli)            => commands::recover_super::cmd_recover_super(cli).report(),
+        S::ResetCounters(cli)           => commands::counters::cmd_reset_counters(cli).report(),
+        S::Fsck(cli)                    => commands::fsck::cmd_fsck(cli).report(),
+        S::RecoveryPass(cli)            => commands::recovery_pass::cmd_recovery_pass(cli).report(),
+        S::Subvolume(cli)               => commands::subvolume::subvolume(cli).report(),
+        S::Scrub(cli)                   => commands::scrub::scrub(cli).report(),
+        S::Unlock(cli)                  => commands::key::cmd_unlock(cli).report(),
+        S::SetPassphrase(cli)           => commands::key::cmd_set_passphrase(cli).report(),
+        S::RemovePassphrase(cli)        => commands::key::cmd_remove_passphrase(cli).report(),
+        S::MigrateSuperblock(cli)       => commands::migrate::cmd_migrate_superblock(cli).report(),
+        S::Dump(cli)                    => commands::dump::cmd_dump(cli).report(),
+        S::Undump(cli)                  => commands::dump::cmd_undump(cli).report(),
+        S::List(cli)                    => commands::list::list(cli).report(),
+        S::ListJournal(cli)             => commands::list_journal::cmd_list_journal(cli).report(),
+        S::KillBtreeNode(cli)           => commands::kill_btree_node::cmd_kill_btree_node(cli).report(),
+        S::DataRead(cli)                => commands::data_read::cmd_data_read(cli).report(),
+        S::Unpoison(cli)                => commands::unpoison::cmd_unpoison(cli).report(),
+        S::Completions(cli)             => { commands::completions::completions(cli); ExitCode::SUCCESS },
 
-        S::Completions(raw)             => { commands::completions::completions(raw.argv("completions")); ExitCode::SUCCESS },
+        // Group commands
+        S::Image { cmd }               => match cmd {
+            ImageCmd::Create(raw)       => commands::image::cmd_image_create(raw.argv("create")).report(),
+            ImageCmd::Update(cli)       => commands::image::cmd_image_update(cli).report(),
+        },
+        S::Fs { cmd }                   => match cmd {
+            FsCmd::Usage(cli)           => commands::fs_usage::fs_usage(cli).report(),
+            FsCmd::Top(cli)             => commands::top::top(cli).report(),
+            FsCmd::Timestats(cli)       => commands::timestats::timestats(cli).report(),
+        },
+        S::Device { cmd }              => match cmd {
+            DeviceCmd::Add(raw)         => commands::device::cmd_device_add(raw.argv("add")).report(),
+            DeviceCmd::Online(cli)      => commands::device::cmd_device_online(cli).report(),
+            DeviceCmd::Offline(cli)     => commands::device::cmd_device_offline(cli).report(),
+            DeviceCmd::Remove(cli)      => commands::device::cmd_device_remove(cli).report(),
+            DeviceCmd::Evacuate(cli)    => commands::device::cmd_device_evacuate(cli).report(),
+            DeviceCmd::SetState(cli)    => commands::device::cmd_device_set_state(cli).report(),
+            DeviceCmd::Resize(cli)      => commands::device::cmd_device_resize(cli).report(),
+            DeviceCmd::ResizeJournal(cli) => commands::device::cmd_device_resize_journal(cli).report(),
+        },
+        S::Reconcile { cmd }            => match cmd {
+            ReconcileCmd::Status(cli)   => commands::reconcile::cmd_reconcile_status(cli).report(),
+            ReconcileCmd::Wait(cli)     => commands::reconcile::cmd_reconcile_wait(cli).report(),
+        },
+        S::Data { cmd }                 => match cmd {
+            DataCmd::Scrub(cli)         => commands::scrub::scrub(cli).report(),
+        },
         S::Version                      => {
             let vh = include_str!("../version.h");
             println!("{}", vh.split('"').nth(1).unwrap_or("unknown"));
@@ -409,6 +404,5 @@ fn main() -> ExitCode {
             println!("kernel: {rust_status}");
             ExitCode::SUCCESS
         }
-        S::Fusemount(raw)              => commands::fusemount::cmd_fusemount(raw.args).report(),
     }
 }

@@ -25,8 +25,7 @@ pub struct Cli {
     device: String,
 }
 
-pub fn cmd_reset_counters(argv: Vec<String>) -> Result<()> {
-    let cli = Cli::parse_from(argv);
+pub fn cmd_reset_counters(cli: Cli) -> Result<()> {
 
     let to_reset: Vec<usize> = if let Some(ref names) = cli.counters {
         names.split(',')

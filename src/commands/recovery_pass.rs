@@ -27,8 +27,7 @@ pub struct RecoveryPassCli {
     devices: Vec<String>,
 }
 
-pub fn cmd_recovery_pass(argv: Vec<String>) -> Result<()> {
-    let cli = RecoveryPassCli::parse_from(argv);
+pub fn cmd_recovery_pass(cli: RecoveryPassCli) -> Result<()> {
 
     let mut passes_to_set: u64 = 0;
     let mut passes_to_unset: u64 = 0;

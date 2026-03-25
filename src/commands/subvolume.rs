@@ -754,8 +754,7 @@ fn print_snapshot_json(dir: &Path) -> Result<()> {
 
 // ---- Command handlers ----
 
-pub fn subvolume(argv: Vec<String>) -> Result<()> {
-    let cli = Cli::parse_from(argv);
+pub fn subvolume(cli: Cli) -> Result<()> {
 
     match cli.subcommands {
         Subcommands::Create { targets }                                         => cmd_create(targets),

@@ -223,8 +223,7 @@ fn loopdev_free(path: &str) {
         .status();
 }
 
-pub fn cmd_fsck(argv: Vec<String>) -> Result<()> {
-    let cli = FsckCli::parse_from(argv);
+pub fn cmd_fsck(cli: FsckCli) -> Result<()> {
 
     if cli.auto_repair {
         // Automatic run, called by the system — we don't need checks here

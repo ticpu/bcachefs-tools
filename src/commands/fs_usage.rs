@@ -52,8 +52,7 @@ pub struct Cli {
     mountpoints: Vec<String>,
 }
 
-pub fn fs_usage(argv: Vec<String>) -> Result<()> {
-    let cli = Cli::try_parse_from(argv)?;
+pub fn fs_usage(cli: Cli) -> Result<()> {
 
     let fields: Vec<Field> = if cli.all {
         vec![Field::Replicas, Field::Btree, Field::Compression,

@@ -89,8 +89,7 @@ pub struct UndumpCli {
     files: Vec<String>,
 }
 
-pub fn cmd_undump(argv: Vec<String>) -> Result<()> {
-    let cli = UndumpCli::parse_from(argv);
+pub fn cmd_undump(cli: UndumpCli) -> Result<()> {
     let suffix = ".qcow2";
 
     struct FileEntry {
@@ -627,8 +626,7 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
     Ok(())
 }
 
-pub fn cmd_dump(argv: Vec<String>) -> Result<()> {
-    let cli = DumpCli::parse_from(argv);
+pub fn cmd_dump(cli: DumpCli) -> Result<()> {
 
     let (sanitize, sanitize_filenames) = match cli.sanitize.as_deref() {
         None => (false, false),

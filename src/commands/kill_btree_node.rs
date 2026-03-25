@@ -75,8 +75,7 @@ fn parse_kill_node(s: &str) -> Result<KillNode> {
     Ok(KillNode { btree, level, idx })
 }
 
-pub fn cmd_kill_btree_node(argv: Vec<String>) -> Result<()> {
-    let cli = KillBtreeNodeCli::parse_from(argv);
+pub fn cmd_kill_btree_node(cli: KillBtreeNodeCli) -> Result<()> {
 
     if cli.nodes.is_empty() {
         bail!("no nodes specified (use -n btree:level:idx)");

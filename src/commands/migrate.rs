@@ -727,7 +727,6 @@ pub struct MigrateSuperblockCli {
     offset: u64,
 }
 
-pub fn cmd_migrate_superblock(argv: Vec<String>) -> Result<()> {
-    let cli = MigrateSuperblockCli::parse_from(argv);
+pub fn cmd_migrate_superblock(cli: MigrateSuperblockCli) -> Result<()> {
     migrate_superblock(&cli.device, cli.offset)
 }

@@ -532,8 +532,7 @@ fn run_interactive(cli: Cli, sysfs_paths: Vec<PathBuf>) -> Result<()> {
 
 // Entry point
 
-pub fn timestats(argv: Vec<String>) -> Result<()> {
-    let cli = Cli::parse_from(argv);
+pub fn timestats(cli: Cli) -> Result<()> {
 
     let sysfs_paths: Vec<PathBuf> = if let Some(ref fs_arg) = cli.filesystem {
         let handle = BcachefsHandle::open(fs_arg)

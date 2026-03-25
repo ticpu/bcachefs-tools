@@ -1064,8 +1064,7 @@ pub struct ImageUpdateCli {
     image: String,
 }
 
-pub fn cmd_image_update(argv: Vec<String>) -> Result<()> {
-    let cli = ImageUpdateCli::parse_from(argv);
+pub fn cmd_image_update(cli: ImageUpdateCli) -> Result<()> {
 
     let verbosity: u32 = if cli.quiet {
         0
