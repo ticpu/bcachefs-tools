@@ -85,9 +85,9 @@ pub enum Subcommands {
     #[command(name = "set-fs-option", about = "Set filesystem options")]
     SetFsOption(RawArgs),
     #[command(name = "strip-alloc", about = "Strip alloc info for read-only use")]
-    StripAlloc(RawArgs),
+    StripAlloc(strip_alloc::Cli),
     #[command(name = "mount", about = "Mount a filesystem")]
-    Mount(RawArgs),
+    Mount(mount::Cli),
     #[command(name = "migrate", about = "Migrate existing filesystem to bcachefs")]
     Migrate(RawArgs),
     #[command(name = "set-file-option", about = "Set file-level options")]
@@ -96,7 +96,7 @@ pub enum Subcommands {
               about = "Propagate options to reflinked files")]
     ReflinkOptionPropagate(RawArgs),
     #[command(name = "fusemount", hide = true)]
-    Fusemount(RawArgs),
+    Fusemount(fusemount::Cli),
 
     // Typed Cli structs: clap parses args directly
     #[command(name = "show-super", about = "Print superblock information")]

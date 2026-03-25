@@ -337,12 +337,12 @@ fn main() -> ExitCode {
         // RawArgs commands — manual parsing, pass argv through
         S::Format(raw)                  => commands::format::cmd_format(raw.argv("format")).report(),
         S::SetFsOption(raw)             => commands::set_option::cmd_set_option(raw.argv("set-fs-option")).report(),
-        S::StripAlloc(raw)              => commands::strip_alloc::cmd_strip_alloc(raw.argv("strip-alloc")).report(),
-        S::Mount(raw)                   => commands::mount::mount(raw.argv("mount"), symlink_cmd),
+        S::StripAlloc(cli)              => commands::strip_alloc::cmd_strip_alloc(cli).report(),
+        S::Mount(cli)                   => commands::mount::mount(cli),
         S::Migrate(raw)                 => commands::migrate::cmd_migrate(raw.argv("migrate")).report(),
         S::SetFileOption(raw)           => commands::attr::cmd_setattr(raw.argv("set-file-option")).report(),
         S::ReflinkOptionPropagate(raw)  => commands::attr::cmd_reflink_option_propagate(raw.argv("reflink-option-propagate")).report(),
-        S::Fusemount(raw)               => commands::fusemount::cmd_fusemount(raw.argv("fusemount")).report(),
+        S::Fusemount(cli)               => commands::fusemount::cmd_fusemount(cli).report(),
 
         // Typed commands — clap already parsed, just dispatch
         S::ShowSuper(cli)               => commands::super_cmd::cmd_show_super(cli).report(),
