@@ -109,7 +109,8 @@ impl CmdDef {
         match &self.kind {
             CmdKind::Typed { run, .. } | CmdKind::Raw { run } => run(argv),
             CmdKind::Group { children } => {
-                let subcmd = argv.first().map(|s| s.as_str());
+                // argv[0] is the group name, argv[1] is the subcommand
+                let subcmd = argv.get(1).map(|s| s.as_str());
                 for child in *children {
                     if subcmd == Some(child.name) ||
                        child.aliases.iter().any(|a| subcmd == Some(*a)) {
