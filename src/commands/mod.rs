@@ -134,7 +134,7 @@ impl CmdDef {
 
     pub fn clap_command(&self) -> clap::Command {
         match &self.kind {
-            CmdKind::Typed { cmd, .. } => cmd(),
+            CmdKind::Typed { cmd, .. } => cmd().name(self.name).about(self.about),
             CmdKind::Raw { .. } => clap::Command::new(self.name).about(self.about),
             CmdKind::Group { children } => {
                 let mut cmd = clap::Command::new(self.name).about(self.about);
