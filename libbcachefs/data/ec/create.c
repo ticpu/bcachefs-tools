@@ -1664,8 +1664,10 @@ int bch2_stripe_repair(struct moving_context *ctxt,
 	CLASS(closure_stack, cl)();
 	while (bch2_err_matches(ret = bch2_ec_stripe_buf_init(c, &new_s->old_stripe, 0,
 							 le16_to_cpu(new_s->old_stripe.key.v.sectors), &cl),
-					     BCH_ERR_operation_blocked))
+					     BCH_ERR_operation_blocked)) {
+		bch2_trans_unlock_long(trans);
 		closure_sync(&cl);
+	}
 
 	ret =   ret ?:
 		bch2_ec_stripe_buf_init(c, &new_s->new_stripe, 0, le16_to_cpu(new_s->new_stripe.key.v.sectors), NULL) ?:

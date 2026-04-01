@@ -132,8 +132,8 @@ int bch2_ec_stripe_buf_init(struct bch_fs *c,
 
 	scoped_guard(spinlock, &c->ec.stripe_buf_lock) {
 		if (cl &&
-		    ((c->ec.stripe_buf_bytes && !get_random_u32_below(8)) ||
-		     c->ec.stripe_buf_bytes + buf_bytes > limit)) {
+		    c->ec.stripe_buf_bytes &&
+		    c->ec.stripe_buf_bytes + buf_bytes > limit) {
 			closure_wait(&c->ec.stripe_buf_wait, cl);
 			return bch_err_throw(c, stripe_buf_mem_blocked);
 		}
