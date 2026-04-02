@@ -82,8 +82,8 @@ fn cmd_device_add_online(
             .context("reading btree_node_size from sysfs")?,
     ).context("parsing btree_node_size")?;
 
-    let _dev_opts = device_add_format(dev_path, label, force, matches,
-        block_size as u32, btree_node_size as u32)?;
+    drop(device_add_format(dev_path, label, force, matches,
+        block_size as u32, btree_node_size as u32)?);
     let c_dev_path = path_to_cstr(dev_path);
     handle.disk_add(&c_dev_path)
         .map_err(|e| anyhow!("adding device '{}': {}", dev_path, e))?;
