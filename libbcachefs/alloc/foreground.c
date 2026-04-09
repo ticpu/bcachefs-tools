@@ -527,6 +527,9 @@ again:
 		bch2_dev_do_invalidates(ca);
 
 	if (!avail) {
+		if (!freespace)
+			goto alloc;
+
 		if (req->watermark > BCH_WATERMARK_normal &&
 		    c->recovery.pass_done < BCH_RECOVERY_PASS_check_allocations)
 			goto alloc;
