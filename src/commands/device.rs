@@ -480,8 +480,9 @@ fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
         idx
     };
 
-    // Phase 1: Update superblock with nostart (no journal replay, no btrees)
-    let old_nbuckets;
+    // Phase 1: Mark resize_on_mount with nostart (no journal replay)
+    // Don't update nbuckets — let bch2_fs_resize_on_mount do it
+    // during Phase 2 recovery, which also handles crash resume.
     let new_nbuckets;
     {
         let mut opts: c::bch_opts = Default::default();
@@ -495,7 +496,8 @@ fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
             .ok_or_else(|| anyhow!("device {} (idx {}) not online", device, dev_idx))?;
 
         new_nbuckets = size_sectors / ca.mi.bucket_size as u64;
-        old_nbuckets = ca.mi.nbuckets;
+        let old_nbuckets = ca.mi.nbuckets;
+        let resuming = ca.mi.resize_on_mount != 0 && new_nbuckets > old_nbuckets;
 
         if new_nbuckets < old_nbuckets {
             bail!("shrinking not supported ({} -> {} buckets)",
@@ -506,25 +508,29 @@ fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
                 new_nbuckets, BCH_MEMBER_NBUCKETS_MAX);
         }
 
-        if new_nbuckets == old_nbuckets {
+        if new_nbuckets == old_nbuckets && !resuming {
             println!("already at {} buckets", old_nbuckets);
             return Ok(());
         }
 
-        println!("updating superblock: {} -> {} buckets", old_nbuckets, new_nbuckets);
+        if resuming {
+            println!("resuming grow: {} -> {} buckets", old_nbuckets, new_nbuckets);
+        } else {
+            println!("marking resize_on_mount: {} -> {} buckets",
+                old_nbuckets, new_nbuckets);
 
-        let _lock = fs.sb_lock();
-        let m = unsafe { fs.member_mut(dev_idx) };
-        m.nbuckets = new_nbuckets.to_le();
-        m.set_member_freespace_initialized(0);
-        fs.write_super();
+            let _lock = fs.sb_lock();
+            let m = unsafe { fs.member_mut(dev_idx) };
+            m.set_member_resize_on_mount(1);
+            m.set_member_freespace_initialized(0);
+            fs.write_super();
+        }
     }
 
-    // Phase 2: Full recovery with background threads disabled
-    // Recovery sees the new nbuckets and rebuilds freespace via
-    // fs_freespace_init (PASS_ALWAYS recovery pass).
-    // check_allocations recalculates disk accounting from scratch
-    // so the free bucket count reflects the grown device.
+    // Phase 2: Full recovery — bch2_fs_resize_on_mount updates
+    // nbuckets and clears resize_on_mount/freespace_initialized.
+    // fs_freespace_init (PASS_ALWAYS) rebuilds the freespace btree.
+    // check_allocations recalculates disk accounting from scratch.
     println!("running recovery");
     {
         let mut opts: c::bch_opts = Default::default();
@@ -544,7 +550,7 @@ fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
                 new_nbuckets, ca.mi.nbuckets);
         }
 
-        println!("resize complete: {} -> {} buckets", old_nbuckets, new_nbuckets);
+        println!("resize complete: {} buckets", new_nbuckets);
     }
 
     Ok(())
