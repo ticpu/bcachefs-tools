@@ -456,31 +456,97 @@ fn find_single_online_dev(fs: &Fs) -> Result<bch_bindgen::fs::DevRef> {
         .ok_or_else(|| anyhow!("could not get reference to device {}", found_idx))
 }
 
+const BCH_MEMBER_NBUCKETS_MAX: u64 = i32::MAX as u64 - 64;
+
 fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
-    use bch_bindgen::printbuf::Printbuf;
+    use crate::wrappers::bch_err_str;
 
-    let opts: c::bch_opts = Default::default();
-    let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
-        .map_err(|e| anyhow!("error opening {}: {}", device, e))?;
+    let c_path = CString::new(device)?;
 
-    let ca = find_single_online_dev(&fs)?;
-
-    let nbuckets = size_sectors / ca.mi.bucket_size as u64;
-
-    if nbuckets < ca.mi.nbuckets {
-        bail!("shrinking not supported (requested {} buckets, have {})",
-            nbuckets, ca.mi.nbuckets);
-    }
-
-    println!("resizing to {} buckets", nbuckets);
-
-    let mut err = Printbuf::new();
-    let ret = unsafe {
-        c::bch2_dev_resize(fs.raw, ca.as_mut_ptr(), nbuckets, err.as_raw())
+    // Read the device's own superblock to learn its dev_idx
+    let dev_idx = {
+        let mut opts: c::bch_opts = Default::default();
+        opt_set!(opts, nostart, 1u8);
+        opt_set!(opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
+        let mut sb_handle: c::bch_sb_handle = Default::default();
+        let ret = unsafe {
+            c::bch2_read_super(c_path.as_ptr(), &mut opts, &mut sb_handle)
+        };
+        if ret != 0 {
+            bail!("error reading superblock from {}: {}", device, bch_err_str(ret));
+        }
+        let idx = sb_handle.sb().dev_idx as u32;
+        drop(sb_handle);
+        idx
     };
-    if ret != 0 {
-        bail!("resize error: {}\n{}", crate::wrappers::bch_err_str(ret), err);
+
+    // Phase 1: Update superblock with nostart (no journal replay, no btrees)
+    let old_nbuckets;
+    let new_nbuckets;
+    {
+        let mut opts: c::bch_opts = Default::default();
+        opt_set!(opts, nostart, 1u8);
+        opt_set!(opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
+        let fs = crate::device_scan::open_scan(
+            &[PathBuf::from(device)], opts)
+            .map_err(|e| anyhow!("error opening {}: {}", device, e))?;
+
+        let ca = fs.dev_get(dev_idx)
+            .ok_or_else(|| anyhow!("device {} (idx {}) not online", device, dev_idx))?;
+
+        new_nbuckets = size_sectors / ca.mi.bucket_size as u64;
+        old_nbuckets = ca.mi.nbuckets;
+
+        if new_nbuckets < old_nbuckets {
+            bail!("shrinking not supported ({} -> {} buckets)",
+                old_nbuckets, new_nbuckets);
+        }
+        if new_nbuckets > BCH_MEMBER_NBUCKETS_MAX {
+            bail!("new size {} exceeds max {} buckets",
+                new_nbuckets, BCH_MEMBER_NBUCKETS_MAX);
+        }
+
+        if new_nbuckets == old_nbuckets {
+            println!("already at {} buckets", old_nbuckets);
+            return Ok(());
+        }
+
+        println!("updating superblock: {} -> {} buckets", old_nbuckets, new_nbuckets);
+
+        let _lock = fs.sb_lock();
+        let m = unsafe { fs.member_mut(dev_idx) };
+        m.nbuckets = new_nbuckets.to_le();
+        m.set_member_freespace_initialized(0);
+        fs.write_super();
     }
+
+    // Phase 2: Full recovery with background threads disabled
+    // Recovery sees the new nbuckets and rebuilds freespace via
+    // fs_freespace_init (PASS_ALWAYS recovery pass).
+    // check_allocations recalculates disk accounting from scratch
+    // so the free bucket count reflects the grown device.
+    println!("running recovery");
+    {
+        let mut opts: c::bch_opts = Default::default();
+        opt_set!(opts, copygc_enabled, 0u8);
+        opt_set!(opts, reconcile_enabled, 0u8);
+        opt_set!(opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
+        opt_set!(opts, recovery_passes,
+            1u64 << c::bch_recovery_pass::BCH_RECOVERY_PASS_check_allocations as u64);
+        let fs = crate::device_scan::open_scan(
+            &[PathBuf::from(device)], opts)
+            .map_err(|e| anyhow!("recovery failed: {}", e))?;
+
+        let ca = fs.dev_get(dev_idx)
+            .ok_or_else(|| anyhow!("device not found after recovery"))?;
+        if ca.mi.nbuckets != new_nbuckets {
+            bail!("resize verification failed: expected {} got {}",
+                new_nbuckets, ca.mi.nbuckets);
+        }
+
+        println!("resize complete: {} -> {} buckets", old_nbuckets, new_nbuckets);
+    }
+
     Ok(())
 }
 
