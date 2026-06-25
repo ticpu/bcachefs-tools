@@ -1,5 +1,5 @@
 use std::ops::ControlFlow;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -135,6 +135,28 @@ pub struct UndumpCli {
 }
 
 fn cmd_undump(cli: UndumpCli) -> Result<()> {
+    // Handle stdin case: undump - <output>
+    if cli.files.first().map(|s| s.as_str()) == Some("-") {
+        if cli.files.len() != 2 {
+            return Err(anyhow!("stdin form requires exactly two arguments: undump [-f] - <output>"));
+        }
+
+        let output = &cli.files[1];
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts.write(true).create(true);
+        if !cli.force {
+            open_opts.create_new(true);
+        } else {
+            open_opts.truncate(false);
+        }
+
+        let outfile = open_opts.open(output)
+            .map_err(|err| anyhow!("{}: {}", output, err))?;
+
+        qcow2::qcow2_stream_to_raw(std::io::stdin().as_fd(), outfile.as_fd())?;
+        return Ok(());
+    }
+
     let suffix = ".qcow2";
 
     struct FileEntry {
@@ -738,7 +760,7 @@ fn collect_data_buckets(fs: &Fs, devs: &mut [DumpDev], bucket_bytes: &[u64],
     Ok(())
 }
 
-fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> Result<()> {
+fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool, stream_out: Option<BorrowedFd>) -> Result<()> {
     if sanitize_filenames {
         println!("Sanitizing filenames and inline data extents");
     } else if sanitize {
@@ -811,6 +833,32 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
         collect_data_buckets(fs, &mut devs, &bucket_bytes, cli.verbose)?;
     }
 
+    // Special case: single-device streaming to stdout
+    if cli.output == "-" {
+        if nr_online != 1 {
+            return Err(anyhow!("streaming to stdout requires a single-device filesystem; use -o <prefix> for multi-device"));
+        }
+
+        let mut streaming_infd: Option<i32> = None;
+        let mut streaming_dev_idx: usize = 0;
+        let _ = fs.for_each_online_member(|ca| {
+            streaming_infd = Some(unsafe { (*ca.disk_sb.bdev).bd_fd });
+            streaming_dev_idx = ca.dev_idx as usize;
+            ControlFlow::Break(())
+        });
+
+        let infd = unsafe { BorrowedFd::borrow_raw(streaming_infd.unwrap()) };
+        let d = &mut devs[streaming_dev_idx];
+        let mut ranges = Vec::new();
+        ranges.append(&mut d.sb);
+        ranges.append(&mut d.journal);
+        ranges.append(&mut d.btree);
+        ranges.append(&mut d.data);
+
+        qcow2::write_qcow2_stream(infd, stream_out.expect("stream fd"), block_size, &mut ranges)?;
+        return Ok(());
+    }
+
     // Write qcow2 image(s)
     let mut write_err: Option<anyhow::Error> = None;
     let _ = fs.for_each_online_member(|ca| {
@@ -854,6 +902,30 @@ fn cmd_dump(cli: DumpCli) -> Result<()> {
         return Err(anyhow!("--single-replica only applies with --metadata-only"));
     }
 
+    // Handle stdout streaming: capture real stdout before fs open pollutes it
+    let stream_out = if cli.output == "-" {
+        if sanitize {
+            return Err(anyhow!("--sanitize is not supported with stdout output"));
+        }
+        if cli.single_replica {
+            return Err(anyhow!("--single-replica is not supported with stdout output"));
+        }
+        if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
+            return Err(anyhow!("refusing to write a qcow2 image to a terminal; redirect or pipe stdout"));
+        }
+
+        let real = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        if real < 0 {
+            return Err(anyhow!("dup stdout: {}", std::io::Error::last_os_error()));
+        }
+        if unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
+            return Err(anyhow!("redirect stdout: {}", std::io::Error::last_os_error()));
+        }
+        Some(unsafe { OwnedFd::from_raw_fd(real) })
+    } else {
+        None
+    };
+
     // Open filesystem in read-only, no-recovery mode
     let devs: Vec<PathBuf> = cli.devices.iter().map(PathBuf::from).collect();
     let mut opts: c::bch_opts = Default::default();
@@ -873,7 +945,7 @@ fn cmd_dump(cli: DumpCli) -> Result<()> {
     }
 
     let fs = crate::device_scan::open_scan(&devs, opts)?;
-    dump_fs(&fs, &cli, sanitize, sanitize_filenames)
+    dump_fs(&fs, &cli, sanitize, sanitize_filenames, stream_out.as_ref().map(|f| f.as_fd()))
 }
 
 pub const CMD_DUMP: super::CmdDef = typed_cmd!("dump", "Dump filesystem metadata and data", DumpCli, cmd_dump);
