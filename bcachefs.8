@@ -103,7 +103,9 @@ Set various per file attributes
 .Ss Commands for debugging
 .Bl -tag -width 18n -compact
 .It Ic dump
-Dump filesystem metadata to a qcow2 image
+Dump filesystem data and metadata to a qcow2 image
+.It Ic undump
+Restore qcow2 dump images back to raw device images
 .It Ic list
 List filesystem metadata in textual form
 .It Ic list_journal
@@ -773,15 +775,49 @@ is only needed once per affected file.
 .Sh Commands for debugging
 These commands work on offline, unmounted filesystems.
 .Bl -tag -width Ds
-.It Nm Ic dump Oo Ar options Oc Ar device
-Dump filesystem metadata
+.It Nm Ic dump Oo Ar options Oc Ar devices\ ...
+Dump a filesystem to sparse qcow2 image(s), one per device, copying every
+in-use bucket verbatim while skipping free space. The result preserves all
+on-disk state (snapshots, subvolumes, reflinks, compression, per-file IO
+options) and can be restored with
+.Ic undump ,
+a faithful way to relocate a filesystem between machines. With
+.Fl m
+only metadata is dumped, producing a small image for offline analysis or bug
+reports.
 .Bl -tag -width Ds
 .It Fl o Ar output
-Required flag: Output qcow2 image(s)
+Required flag: output qcow2 image(s). Multi-device filesystems produce one
+.Pa output.N.qcow2
+per device.
 .It Fl f , Fl -force
 Force; overwrite when needed
+.It Fl m , Fl -metadata-only
+Dump only metadata (superblock, journal, btree), not user data
+.It Fl s , Fl -sanitize Op Cm data Ns | Ns Cm filenames
+Sanitize inline data, and with
+.Cm filenames
+also scramble directory entry names. Requires
+.Fl m .
+.It Fl -single-replica
+Dump only the lowest-device-index replica of each btree node, rewriting the
+other replica pointers to an invalid device. Produces a much smaller metadata
+image that still reads back cleanly off the surviving replica. Requires
+.Fl m .
 .It Fl -nojournal
 Don't dump entire journal, just dirty entries
+.El
+.It Nm Ic undump Oo Fl f Oc Ar image\ ...
+Restore qcow2 dump image(s) back to raw device images, reversing
+.Ic dump .
+Each
+.Pa image.qcow2
+is written to a raw file with the suffix stripped; pass every
+.Pa N.qcow2
+of a multi-device dump to reconstruct all devices.
+.Bl -tag -width Ds
+.It Fl f , Fl -force
+Overwrite existing output files
 .El
 .It Nm Ic list Oo Ar options Oc Ar devices\ ...
 List filesystem metadata to stdout
