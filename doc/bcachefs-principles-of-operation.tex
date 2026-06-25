@@ -1646,16 +1646,12 @@ snapshots, subvolumes, reflink sharing, compression, and per-file IO options are
 all preserved exactly. This makes it possible to relocate a filesystem between
 machines and restore it with \texttt{bcachefs undump}, which reverses the
 mapping and writes the populated regions back to raw device images.
-Single-device filesystems can stream to stdout (\texttt{dump -o - dev | ... undump - dev}),
-enabling artifact-free transfer over a pipe.
+Filesystems can stream to stdout; multi-device filesystems stream one device
+at a time, each a standalone qcow2.
 
-The \texttt{-m} flag restricts the dump to metadata: superblocks, the journal,
-and btree nodes. The resulting image is small enough to attach to a bug report,
-so when \texttt{fsck} hits an issue it cannot recover from, a metadata dump
-gives the developers the structure they need without any user data. \texttt{-s}
-additionally sanitizes inline data (and, with \texttt{filenames}, directory
-entry names) and requires \texttt{-m}. Encrypted filesystems must first be
-unlocked with \texttt{bcachefs remove-passphrase}.
+Dumps can be restricted to metadata (superblocks, journal, btree nodes)
+for offline analysis or bug reports. Inline data can be sanitized when privacy
+is required.
 
 \section{Subsystem details}
 
