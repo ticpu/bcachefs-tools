@@ -1,0 +1,107 @@
+#!/bin/sh
+
+set +e
+set -x
+
+echo "kernel smoke test, multi-device dump/undump full round-trip integrity"
+
+# Loop-backed images live under the harness-provided TMPDIR (cleaned by it);
+# loop devices and mounts are torn down in our own trap.
+SRC0="$TMPDIR/src0.img"
+SRC1="$TMPDIR/src1.img"
+DUMP="$TMPDIR/dump"
+SRC_MNT="$TMPDIR/src.mnt"
+DST_MNT="$TMPDIR/dst.mnt"
+LO_SRC0="" ; LO_SRC1="" ; LO_DST0="" ; LO_DST1=""
+
+cleanup() {
+	umount "$SRC_MNT" 2>/dev/null
+	umount "$DST_MNT" 2>/dev/null
+	for lo in "$LO_SRC0" "$LO_SRC1" "$LO_DST0" "$LO_DST1"; do
+		[ -n "$lo" ] && losetup -d "$lo" 2>/dev/null
+	done
+}
+trap cleanup EXIT
+
+mkdir -p "$SRC_MNT" "$DST_MNT"
+truncate -s 512M "$SRC0" && truncate -s 512M "$SRC1"
+if [ $? -ne 0 ]; then echo "FAILED: truncate images"; exit 1; fi
+
+LO_SRC0="$(losetup --find --show "$SRC0")"
+LO_SRC1="$(losetup --find --show "$SRC1")"
+if [ -z "$LO_SRC0" ] || [ -z "$LO_SRC1" ]; then echo "FAILED: losetup source"; exit 1; fi
+
+bcachefs format --compression=lz4 "$LO_SRC0" "$LO_SRC1"
+if [ $? -ne 0 ]; then echo "FAILED: format"; exit 1; fi
+
+mount -t bcachefs "$LO_SRC0:$LO_SRC1" "$SRC_MNT"
+if [ $? -ne 0 ]; then echo "FAILED: mount source"; exit 1; fi
+
+# Features a logical copy cannot preserve: data, xattr, reflink, snapshot.
+head -c 4000000 /dev/urandom > "$SRC_MNT/rand.bin"
+setfattr -n user.testattr -v "round-trip" "$SRC_MNT/rand.bin"
+cp --reflink=always "$SRC_MNT/rand.bin" "$SRC_MNT/rand.reflink"
+bcachefs subvolume create "$SRC_MNT/subvol"
+head -c 1000000 /dev/urandom > "$SRC_MNT/subvol/data.bin"
+bcachefs subvolume snapshot "$SRC_MNT/subvol" "$SRC_MNT/snap"
+if [ $? -ne 0 ]; then echo "FAILED: populate (xattr/reflink/snapshot)"; exit 1; fi
+
+sync
+( cd "$SRC_MNT" && find . -type f | sort | while read -r f; do
+	printf '%s  %s\n' "$f" "$(sha256sum "$f" | awk '{print $1}')"
+done ) > "$TMPDIR/src.sha"
+( cd "$SRC_MNT" && getfattr -R -h -m '^user\.' -d . 2>/dev/null | sort ) > "$TMPDIR/src.xattr"
+
+umount "$SRC_MNT"
+if [ $? -ne 0 ]; then echo "FAILED: umount source"; exit 1; fi
+
+bcachefs dump -o "$DUMP" "$LO_SRC0" "$LO_SRC1"
+if [ $? -ne 0 ]; then echo "FAILED: dump"; exit 1; fi
+if [ ! -f "$DUMP.0.qcow2" ] || [ ! -f "$DUMP.1.qcow2" ]; then
+	echo "FAILED: per-device qcow2 images not produced"; exit 1
+fi
+
+# Detach source loops before restoring: the restored fs shares the source
+# UUID, so leaving them attached could alias source data into the comparison.
+losetup -d "$LO_SRC0" ; losetup -d "$LO_SRC1"
+LO_SRC0="" ; LO_SRC1=""
+
+bcachefs undump -f "$DUMP.0.qcow2" "$DUMP.1.qcow2"
+if [ $? -ne 0 ]; then echo "FAILED: undump"; exit 1; fi
+
+# Device-level comparison: source vs restored (before mounting replays journal)
+bad0=$(cmp -l "$SRC0" "$DUMP.0" | awk '$3 != "0" { n++ } END { print n+0 }')
+total0=$(cmp -l "$SRC0" "$DUMP.0" | wc -l)
+echo "device compare $SRC0 vs $DUMP.0: $total0 differing bytes, $bad0 non-zero-in-restored"
+if [ "$bad0" -ne 0 ]; then echo "FAILED: restored device diverges from source in captured region"; exit 1; fi
+
+bad1=$(cmp -l "$SRC1" "$DUMP.1" | awk '$3 != "0" { n++ } END { print n+0 }')
+total1=$(cmp -l "$SRC1" "$DUMP.1" | wc -l)
+echo "device compare $SRC1 vs $DUMP.1: $total1 differing bytes, $bad1 non-zero-in-restored"
+if [ "$bad1" -ne 0 ]; then echo "FAILED: restored device diverges from source in captured region"; exit 1; fi
+
+LO_DST0="$(losetup --find --show "$DUMP.0")"
+LO_DST1="$(losetup --find --show "$DUMP.1")"
+if [ -z "$LO_DST0" ] || [ -z "$LO_DST1" ]; then echo "FAILED: losetup restored"; exit 1; fi
+
+mount -t bcachefs "$LO_DST0:$LO_DST1" "$DST_MNT"
+if [ $? -ne 0 ]; then echo "FAILED: mount restored"; exit 1; fi
+
+sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+
+( cd "$DST_MNT" && find . -type f | sort | while read -r f; do
+	printf '%s  %s\n' "$f" "$(sha256sum "$f" | awk '{print $1}')"
+done ) > "$TMPDIR/dst.sha"
+( cd "$DST_MNT" && getfattr -R -h -m '^user\.' -d . 2>/dev/null | sort ) > "$TMPDIR/dst.xattr"
+
+umount "$DST_MNT"
+
+diff -u "$TMPDIR/src.sha" "$TMPDIR/dst.sha"
+if [ $? -ne 0 ]; then echo "FAILED: file content differs after round-trip"; exit 1; fi
+diff -u "$TMPDIR/src.xattr" "$TMPDIR/dst.xattr"
+if [ $? -ne 0 ]; then echo "FAILED: xattrs differ after round-trip"; exit 1; fi
+grep -q '^\./snap/' "$TMPDIR/dst.sha"
+if [ $? -ne 0 ]; then echo "FAILED: snapshot missing after round-trip"; exit 1; fi
+
+echo "PASSED"
+exit 0
