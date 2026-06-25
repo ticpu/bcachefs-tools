@@ -1,0 +1,91 @@
+#!/bin/sh
+
+set +e
+set -x
+
+echo "kernel smoke test, single-device dump/undump streaming round-trip integrity"
+
+# Loop-backed images live under the harness-provided TMPDIR (cleaned by it);
+# loop devices and mounts are torn down in our own trap.
+SRC="$TMPDIR/src.img"
+DST="$TMPDIR/restored.img"
+STREAM="$TMPDIR/stream.qcow2"
+SRC_MNT="$TMPDIR/src.mnt"
+DST_MNT="$TMPDIR/dst.mnt"
+LO_SRC="" ; LO_DST=""
+
+cleanup() {
+	umount "$SRC_MNT" 2>/dev/null
+	umount "$DST_MNT" 2>/dev/null
+	for lo in "$LO_SRC" "$LO_DST"; do
+		[ -n "$lo" ] && losetup -d "$lo" 2>/dev/null
+	done
+}
+trap cleanup EXIT
+
+mkdir -p "$SRC_MNT" "$DST_MNT"
+truncate -s 512M "$SRC"
+if [ $? -ne 0 ]; then echo "FAILED: truncate image"; exit 1; fi
+
+LO_SRC="$(losetup --find --show "$SRC")"
+if [ -z "$LO_SRC" ]; then echo "FAILED: losetup source"; exit 1; fi
+
+bcachefs format --compression=lz4 "$LO_SRC"
+if [ $? -ne 0 ]; then echo "FAILED: format"; exit 1; fi
+
+mount -t bcachefs "$LO_SRC" "$SRC_MNT"
+if [ $? -ne 0 ]; then echo "FAILED: mount source"; exit 1; fi
+
+# Features a logical copy cannot preserve: data >256KiB, xattr, reflink
+head -c 300000 /dev/urandom > "$SRC_MNT/rand.bin"
+head -c 100000 /dev/urandom > "$SRC_MNT/second.bin"
+setfattr -n user.testattr -v "round-trip" "$SRC_MNT/rand.bin"
+cp --reflink=always "$SRC_MNT/rand.bin" "$SRC_MNT/rand.reflink"
+if [ $? -ne 0 ]; then echo "FAILED: populate (xattr/reflink)"; exit 1; fi
+
+sync
+( cd "$SRC_MNT" && find . -type f | sort | while read -r f; do
+	printf '%s  %s\n' "$f" "$(sha256sum "$f" | awk '{print $1}')"
+done ) > "$TMPDIR/src.sha"
+( cd "$SRC_MNT" && getfattr -R -h -m '^user\.' -d . 2>/dev/null | sort ) > "$TMPDIR/src.xattr"
+
+umount "$SRC_MNT"
+if [ $? -ne 0 ]; then echo "FAILED: umount source"; exit 1; fi
+
+bcachefs dump -o - "$LO_SRC" > "$STREAM"
+if [ $? -ne 0 ]; then echo "FAILED: dump streaming"; exit 1; fi
+if [ ! -f "$STREAM" ]; then echo "FAILED: stream file not created"; exit 1; fi
+
+# Verify magic
+head -c 4 "$STREAM" | od -An -tx1 | grep -q '51 46 49 fb'
+if [ $? -ne 0 ]; then echo "FAILED: qcow2 magic not found"; exit 1; fi
+
+# Detach source loop: the restored fs shares the source UUID
+losetup -d "$LO_SRC"
+LO_SRC=""
+
+bcachefs undump -f - "$DST" < "$STREAM"
+if [ $? -ne 0 ]; then echo "FAILED: undump streaming"; exit 1; fi
+
+LO_DST="$(losetup --find --show "$DST")"
+if [ -z "$LO_DST" ]; then echo "FAILED: losetup restored"; exit 1; fi
+
+mount -t bcachefs "$LO_DST" "$DST_MNT"
+if [ $? -ne 0 ]; then echo "FAILED: mount restored"; exit 1; fi
+
+sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+
+( cd "$DST_MNT" && find . -type f | sort | while read -r f; do
+	printf '%s  %s\n' "$f" "$(sha256sum "$f" | awk '{print $1}')"
+done ) > "$TMPDIR/dst.sha"
+( cd "$DST_MNT" && getfattr -R -h -m '^user\.' -d . 2>/dev/null | sort ) > "$TMPDIR/dst.xattr"
+
+umount "$DST_MNT"
+
+diff -u "$TMPDIR/src.sha" "$TMPDIR/dst.sha"
+if [ $? -ne 0 ]; then echo "FAILED: file content differs after round-trip"; exit 1; fi
+diff -u "$TMPDIR/src.xattr" "$TMPDIR/dst.xattr"
+if [ $? -ne 0 ]; then echo "FAILED: xattrs differ after round-trip"; exit 1; fi
+
+echo "PASSED"
+exit 0
