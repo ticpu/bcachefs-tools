@@ -75,9 +75,9 @@ fn bset_magic(sb: &c::bch_sb) -> u64 {
 
 // ---- Dump CLI ----
 
-/// Dump filesystem metadata to a qcow2 image
+/// Dump filesystem metadata and data to a qcow2 image (use --metadata-only for metadata-only debugging images)
 #[derive(Parser, Debug)]
-#[command(about = "Dump filesystem metadata to a qcow2 image")]
+#[command(about = "Dump filesystem metadata and data to a qcow2 image")]
 pub struct DumpCli {
     /// Output filename (without .qcow2 extension)
     #[arg(short = 'o')]
@@ -86,6 +86,10 @@ pub struct DumpCli {
     /// Force; overwrite existing files
     #[arg(short = 'f', long)]
     force: bool,
+
+    /// Dump only metadata (superblock, journal, btree), not user data
+    #[arg(short = 'm', long = "metadata-only")]
+    metadata_only: bool,
 
     /// Sanitize inline data and optionally filenames (data or filenames)
     #[arg(short = 's', long, num_args = 0..=1, default_missing_value = "data")]
@@ -550,6 +554,7 @@ struct DumpDev {
     sb:      Ranges,
     journal: Ranges,
     btree:   Ranges,
+    data:    Ranges,
 }
 
 impl DumpDev {
@@ -558,6 +563,7 @@ impl DumpDev {
             sb:      Vec::new(),
             journal: Vec::new(),
             btree:   Vec::new(),
+            data:    Vec::new(),
         }
     }
 }
@@ -688,7 +694,48 @@ fn write_dev_image(
         img.write_ranges(&mut d.btree)?;
     }
 
+    // Data buckets are copied verbatim -- never sanitized or de-replicated.
+    img.write_ranges(&mut d.data)?;
+
     img.finish()
+}
+
+fn collect_data_buckets(fs: &Fs, devs: &mut [DumpDev], bucket_bytes: &[u64],
+                        verbose: bool) -> Result<()> {
+    let trans = btree::BtreeTrans::new(fs);
+    let mut iter = btree::BtreeIter::new(
+        &trans,
+        c::btree_id::alloc,
+        POS_MIN,
+        btree::BtreeIterFlags::PREFETCH,
+    );
+
+    iter.for_each(&trans, |k: btree::BkeySC| {
+        let dev = k.pos().inode as usize;
+        if dev >= devs.len() || !fs.dev_exists(dev as u32) {
+            return ControlFlow::Continue(());
+        }
+
+        let mut v4: c::bch_alloc_v4 = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
+        unsafe {
+            c::__bch2_alloc_to_v4(c::bkey_s_c { k: k.k, v: k.v }, &mut v4);
+        }
+
+        if v4.data_type != c::bch_data_type::free.0 as u8 {
+            range_add(&mut devs[dev].data, k.pos().offset * bucket_bytes[dev], bucket_bytes[dev]);
+        }
+
+        ControlFlow::Continue(())
+    }).map_err(|e| anyhow!("error walking alloc btree: {}", e))?;
+
+    if verbose {
+        for (i, d) in devs.iter().enumerate() {
+            let bytes: u64 = d.data.iter().map(|r| r.end - r.start).sum();
+            eprintln!("dev {}: {} data buckets, {} MiB", i, d.data.len(), bytes >> 20);
+        }
+    }
+
+    Ok(())
 }
 
 fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> Result<()> {
@@ -706,6 +753,7 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
     let block_size = unsafe { (*fs.raw).opts.block_size as u32 };
 
     let mut nr_online = 0u32;
+    let mut bucket_bytes: Vec<u64> = vec![0; nr_devices];
     let mut bucket_err: Option<String> = None;
     let _ = fs.for_each_online_member(|ca| {
         if (sanitize || cli.single_replica) && (ca.mi.bucket_size as u32) % (block_size >> 9) != 0 {
@@ -721,7 +769,9 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
             return ControlFlow::Break(());
         }
 
-        get_sb_journal(fs, ca, entire_journal, &mut devs[ca.dev_idx as usize]);
+        let dev_idx = ca.dev_idx as usize;
+        bucket_bytes[dev_idx] = (ca.mi.bucket_size as u64) << 9;
+        get_sb_journal(fs, ca, entire_journal, &mut devs[dev_idx]);
         nr_online += 1;
         ControlFlow::Continue(())
     });
@@ -755,6 +805,10 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
             }).map_err(|e| anyhow!("error walking btree {}: {}",
                 btree::types::btree_id_str(id), e))?;
         }
+    }
+
+    if !cli.metadata_only {
+        collect_data_buckets(fs, &mut devs, &bucket_bytes, cli.verbose)?;
     }
 
     // Write qcow2 image(s)
@@ -792,6 +846,14 @@ fn cmd_dump(cli: DumpCli) -> Result<()> {
         Some(other) => return Err(anyhow!("Bad sanitize option: {}", other)),
     };
 
+    if sanitize && !cli.metadata_only {
+        return Err(anyhow!("--sanitize only applies with --metadata-only"));
+    }
+
+    if cli.single_replica && !cli.metadata_only {
+        return Err(anyhow!("--single-replica only applies with --metadata-only"));
+    }
+
     // Open filesystem in read-only, no-recovery mode
     let devs: Vec<PathBuf> = cli.devices.iter().map(PathBuf::from).collect();
     let mut opts: c::bch_opts = Default::default();
@@ -814,5 +876,5 @@ fn cmd_dump(cli: DumpCli) -> Result<()> {
     dump_fs(&fs, &cli, sanitize, sanitize_filenames)
 }
 
-pub const CMD_DUMP: super::CmdDef = typed_cmd!("dump", "Dump filesystem metadata", DumpCli, cmd_dump);
+pub const CMD_DUMP: super::CmdDef = typed_cmd!("dump", "Dump filesystem metadata and data", DumpCli, cmd_dump);
 pub const CMD_UNDUMP: super::CmdDef = typed_cmd!("undump", "Restore dumped metadata", UndumpCli, cmd_undump);
