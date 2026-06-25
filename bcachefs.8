@@ -789,7 +789,8 @@ reports.
 .It Fl o Ar output
 Required flag: output qcow2 image(s). Multi-device filesystems produce one
 .Pa output.N.qcow2
-per device.
+per device. Single-device filesystems can stream to stdout with
+.Fl o Ar - .
 .It Fl f , Fl -force
 Force; overwrite when needed
 .It Fl m , Fl -metadata-only
@@ -814,7 +815,10 @@ Each
 .Pa image.qcow2
 is written to a raw file with the suffix stripped; pass every
 .Pa N.qcow2
-of a multi-device dump to reconstruct all devices.
+of a multi-device dump to reconstruct all devices. Accepts
+.Fl -
+as the first argument to read a single-device stream from stdin:
+.Ic undump Fl - Ar output .
 .Bl -tag -width Ds
 .It Fl f , Fl -force
 Overwrite existing output files
