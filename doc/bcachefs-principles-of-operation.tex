@@ -1359,9 +1359,13 @@ When investigating damage before attempting repair:
   numbers, transaction names, and per-btree filtering. Essential for
   understanding what happened before a crash and for identifying journal
   rewind targets.
-\item[\texttt{bcachefs dump}] Exports all metadata as qcow2 images for
-  offline analysis, without including user data. For encrypted filesystems,
-  the passphrase must first be removed with \texttt{bcachefs remove-passphrase}.
+\item[\texttt{bcachefs dump}] Writes each device to a sparse qcow2 image,
+  copying in-use buckets and skipping free space. The default full dump is a
+  faithful physical copy (preserving snapshots, subvolumes, reflinks,
+  compression, and per-file IO options) that relocates a filesystem via
+  \texttt{bcachefs undump}; \texttt{-m} restricts it to metadata for offline
+  analysis and bug reports. Encrypted filesystems must first have the
+  passphrase removed with \texttt{bcachefs remove-passphrase}.
 \end{description}
 
 \subsubsection{Extent poisoning and data recovery}
@@ -1691,11 +1695,22 @@ journal rewind.
 
 \subsubsection{bcachefs dump}
 
-This subcommand can dump all metadata in a filesystem (including multi device
-filesystems) as qcow2 images: when encountering issues that \texttt{fsck} can
-not recover from and need attention from the developers, this makes it possible
-to send the developers only the required metadata. Encrypted filesystems must
-first be unlocked with \texttt{bcachefs remove-passphrase}.
+\texttt{dump} writes a sparse qcow2 image of each device in a filesystem,
+including multi-device filesystems (one image per device). It walks the alloc
+btree and copies every in-use bucket verbatim while skipping free space, so the
+image is a faithful physical copy rather than a logical file-by-file copy:
+snapshots, subvolumes, reflink sharing, compression, and per-file IO options are
+all preserved exactly. This makes it possible to relocate a filesystem between
+machines and restore it with \texttt{bcachefs undump}, which reverses the
+mapping and writes the populated regions back to raw device images.
+
+The \texttt{-m} flag restricts the dump to metadata: superblocks, the journal,
+and btree nodes. The resulting image is small enough to attach to a bug report,
+so when \texttt{fsck} hits an issue it cannot recover from, a metadata dump
+gives the developers the structure they need without any user data. \texttt{-s}
+additionally sanitizes inline data (and, with \texttt{filenames}, directory
+entry names) and requires \texttt{-m}. Encrypted filesystems must first be
+unlocked with \texttt{bcachefs remove-passphrase}.
 
 \subsection{kvdb: the btree REPL}
 \label{sec:kvdb}
