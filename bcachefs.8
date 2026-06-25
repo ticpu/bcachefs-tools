@@ -807,7 +807,17 @@ image that still reads back cleanly off the surviving replica. Requires
 .Fl m .
 .It Fl -nojournal
 Don't dump entire journal, just dirty entries
+.It Fl -device Ar N
+When streaming to stdout
+.Pf ( Fl o Ar - ) ,
+select which device of a multi-device filesystem to stream (run once per device
+to transfer all devices).
 .El
+.Pp
+Example: stream a two-device filesystem over ssh (run once per device):
+.Dl bcachefs dump -o - --device 0 dev0 dev1 | ssh host bcachefs undump - /dev/sda
+.Dl bcachefs dump -o - --device 1 dev0 dev1 | ssh host bcachefs undump - /dev/sdb
+.Pp
 .It Nm Ic undump Oo Fl f Oc Ar image\ ...
 Restore qcow2 dump image(s) back to raw device images, reversing
 .Ic dump .
@@ -819,6 +829,7 @@ of a multi-device dump to reconstruct all devices. Accepts
 .Fl -
 as the first argument to read a single-device stream from stdin:
 .Ic undump Fl - Ar output .
+When restoring to a block device, only mapped clusters are written; regions outside the image are left unchanged.
 .Bl -tag -width Ds
 .It Fl f , Fl -force
 Overwrite existing output files
