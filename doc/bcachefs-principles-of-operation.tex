@@ -1703,6 +1703,8 @@ snapshots, subvolumes, reflink sharing, compression, and per-file IO options are
 all preserved exactly. This makes it possible to relocate a filesystem between
 machines and restore it with \texttt{bcachefs undump}, which reverses the
 mapping and writes the populated regions back to raw device images.
+Single-device filesystems can stream to stdout (\texttt{dump -o - dev | ... undump - dev}),
+enabling artifact-free transfer over a pipe.
 
 The \texttt{-m} flag restricts the dump to metadata: superblocks, the journal,
 and btree nodes. The resulting image is small enough to attach to a bug report,
