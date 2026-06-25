@@ -90,6 +90,11 @@ pub struct DumpCli {
     #[arg(short = 'v', long)]
     verbose: bool,
 
+    /// When streaming to stdout (-o -), select which device of a multi-device
+    /// filesystem to stream (run once per device)
+    #[arg(long = "device")]
+    device: Option<u32>,
+
     /// Devices to dump
     #[arg(required = true)]
     devices: Vec<String>,
@@ -455,6 +460,15 @@ impl DumpDev {
             data:    Vec::new(),
         }
     }
+
+    fn all_ranges(&mut self) -> Ranges {
+        let mut ranges = Vec::new();
+        ranges.append(&mut self.sb);
+        ranges.append(&mut self.journal);
+        ranges.append(&mut self.btree);
+        ranges.append(&mut self.data);
+        ranges
+    }
 }
 
 fn dump_node(fs: &Fs, devs: &mut [DumpDev], k: btree::BkeySC<'_>, btree_node_size: u64,
@@ -687,21 +701,31 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool, str
         collect_data_buckets(fs, &mut devs, &bucket_bytes, cli.verbose)?;
     }
 
-    // Special case: single-device streaming to stdout
+    // Special case: streaming to stdout
     if cli.output == "-" {
-        if nr_online != 1 {
-            return Err(anyhow!("streaming to stdout requires a single-device filesystem; use -o <prefix> for multi-device"));
+        if cli.device.is_none() && nr_online != 1 {
+            return Err(anyhow!("streaming a multi-device filesystem to stdout requires --device <N>; or use -o <prefix> for file output"));
         }
 
-        let ca = fs.online_members().next()
-            .ok_or_else(|| anyhow!("no online device to stream"))?;
+        if let Some(n) = cli.device {
+            if !fs.dev_exists(n) {
+                return Err(anyhow!("--device {}: no such device in filesystem", n));
+            }
+        }
+
+        let ca = fs.online_members()
+            .find(|ca| cli.device.is_none_or(|n| ca.dev_idx as u32 == n))
+            .ok_or_else(|| {
+                if let Some(n) = cli.device {
+                    anyhow!("--device {}: device is not online", n)
+                } else {
+                    anyhow!("no online device to stream")
+                }
+            })?;
+
         let infd = ca.bdev().fd();
         let d = &mut devs[ca.dev_idx as usize];
-        let mut ranges = Vec::new();
-        ranges.append(&mut d.sb);
-        ranges.append(&mut d.journal);
-        ranges.append(&mut d.btree);
-        ranges.append(&mut d.data);
+        let mut ranges = d.all_ranges();
 
         qcow2::write_qcow2_stream(infd, stream_out.expect("stream fd"), block_size, &mut ranges)?;
         return Ok(());
@@ -738,6 +762,10 @@ fn cmd_dump(cli: DumpCli) -> Result<()> {
 
     if cli.single_replica && !cli.metadata_only {
         return Err(anyhow!("--single-replica only applies with --metadata-only"));
+    }
+
+    if cli.device.is_some() && cli.output != "-" {
+        return Err(anyhow!("--device only applies when streaming to stdout (-o -)"));
     }
 
     // Handle stdout streaming: capture real stdout before fs open pollutes it
