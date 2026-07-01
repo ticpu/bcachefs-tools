@@ -75,6 +75,65 @@
 #define BCH_IOCTL_SNAPSHOT_TREE		_IOWR(0xbc,	33, struct bch_ioctl_snapshot_tree_query)
 #define BCH_IOCTL_QUERY_BTREE_KEYS	_IOWR(0xbc,	34, struct bch_ioctl_query_btree_keys)
 #define BCH_IOCTL_SNAPSHOT_TREE_v2	_IOWR(0xbc,	35, struct bch_ioctl_snapshot_tree_query_v2)
+#define BCH_IOCTL_REV_MAP		_IOWR(0xbc,	38, struct bch_ioctl_rev_map)
+
+/*
+ * BCH_IOCTL_REV_MAP: reverse-map a physical device offset to its owning
+ * object, for statistical disk-usage sampling ('bcachefs fs du').
+ *
+ * Given a device index and a physical sector on that device, looks up the
+ * backpointer covering that sector and reports what owns it. Because every
+ * replica has its own backpointer, summing @sectors over many sampled offsets
+ * accounts physical space per device directly, with no replica math: each
+ * physical copy is counted once.
+ *
+ * @dev		- in: device index
+ * @flags	- in: BCH_REV_MAP_RESOLVE_PATH to also resolve inode -> path and
+ *		  read the inode's background_target (BTREE_ID_extents only)
+ * @offset	- in: physical sector on @dev
+ * @buf		- in: userspace buffer for a NUL-terminated path (optional)
+ * @buf_size	- in: size of @buf in bytes
+ *
+ * @found	- out: 0 if @offset is free space (no backpointer covers it)
+ * @data_type	- out: enum bch_data_type of the owning data
+ * @btree_id	- out: btree that owns the data; @inode, @snapshot and path
+ *		  resolution are only meaningful when this is BTREE_ID_extents
+ * @ec		- out: 1 if the data is erasure coded
+ * @snapshot	- out: owning key's snapshot ID
+ * @inode	- out: owning inode number (BTREE_ID_extents only)
+ * @sectors	- out: length of the covering backpointer, in sectors
+ * @background_target - out: inode's background_target (extents + RESOLVE_PATH)
+ *
+ * If the owning inode no longer exists (raced with deletion), the sample is
+ * still returned with an empty path and background_target 0.
+ *
+ * Limitations: erasure-coded data whose backpointer lives in
+ * BTREE_ID_stripe_backpointers is not yet scanned and reports as free;
+ * backpointers still pending in the btree write buffer may be missed.
+ *
+ * Returns -ERANGE if the resolved path did not fit in @buf.
+ */
+#define BCH_REV_MAP_RESOLVE_PATH	(1U << 0)
+
+struct bch_ioctl_rev_map {
+	__u32			dev;
+	__u32			flags;
+	__u64			offset;
+
+	__u64			buf;
+	__u32			buf_size;
+	__u32			pad;
+
+	__u8			found;
+	__u8			data_type;
+	__u8			btree_id;
+	__u8			ec;
+	__u32			snapshot;
+	__u64			inode;
+	__u64			sectors;
+	__u16			background_target;
+	__u16			pad2[3];
+};
 
 /* ioctl below act on a particular file, not the filesystem as a whole: */
 

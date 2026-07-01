@@ -5,6 +5,7 @@
 #include "bcachefs_ioctl.h"
 
 #include "alloc/accounting.h"
+#include "alloc/backpointers.h"
 #include "alloc/buckets.h"
 #include "alloc/replicas.h"
 
@@ -14,6 +15,8 @@
 #include "data/move.h"
 
 #include "fs/check.h"
+#include "fs/inode.h"
+#include "fs/namei.h"
 
 #include "journal/init.h"
 #include "journal/journal.h"
@@ -796,6 +799,130 @@ do {									\
 	return bch2_ioctl_##_name(c, i);				\
 } while (0)
 
+/* one lockrestart_do body: resets outputs so restarts don't accumulate */
+static int bch2_resolve_inum_path(struct btree_trans *trans, u64 inum, u32 snapshot,
+				  struct printbuf *out, __u16 *background_target)
+{
+	printbuf_reset(out);
+	*background_target = 0;
+
+	struct bch_inode_unpacked inode;
+	int ret = bch2_inode_find_by_inum_snapshot(trans, inum, snapshot, &inode, 0);
+	if (!ret) {
+		struct bch_inode_opts opts;
+		bch2_inode_opts_get_inode(trans->c, &inode, &opts);
+		*background_target = opts.background_target;
+	}
+	return ret ?: bch2_inum_snapshot_to_path(trans, inum, snapshot, NULL, out);
+}
+
+static long printbuf_copy_nul_to_user(struct printbuf *out, u64 buf, u32 buf_size)
+{
+	if (out->allocation_failure)
+		return -ENOMEM;
+	if (buf_size < out->pos + 1)
+		return -ERANGE;
+
+	/* out->buf is NULL when the string is empty (never allocated) */
+	char nul = 0;
+	return copy_to_user_errcode((void __user *)(unsigned long) buf,
+				    out->pos ? out->buf : &nul, out->pos + 1);
+}
+
+static long bch2_ioctl_rev_map(struct bch_fs *c,
+			       struct bch_ioctl_rev_map __user *user_arg)
+{
+	struct bch_ioctl_rev_map arg;
+	try(copy_from_user_errcode(&arg, user_arg, sizeof(arg)));
+
+	/*
+	 * The fs du ioctls expose paths, names and physical layout for the
+	 * whole filesystem, like query_btree_keys above - admin only:
+	 */
+	if (!capable(CAP_SYS_ADMIN))
+		return bch_err_throw(c, EPERM_non_admin);
+
+	if ((arg.flags & ~BCH_REV_MAP_RESOLVE_PATH) ||
+	    arg.pad || arg.pad2[0] || arg.pad2[1] || arg.pad2[2])
+		return -EINVAL;
+
+	CLASS(bch2_dev_tryget_noerror, ca)(c, arg.dev);
+	if (!ca)
+		return -EINVAL;
+
+	/* zero outputs so unfound/unresolved fields don't echo user data */
+	arg.found		= 0;
+	arg.data_type		= 0;
+	arg.btree_id		= 0;
+	arg.ec			= 0;
+	arg.snapshot		= 0;
+	arg.inode		= 0;
+	arg.sectors		= 0;
+	arg.background_target	= 0;
+
+	struct bpos bucket = POS(arg.dev, sector_to_bucket(ca, arg.offset));
+	struct bpos bp_start = bucket_pos_to_bp_start(ca, bucket);
+	struct bpos bp_end   = bucket_pos_to_bp_end(ca, bucket);
+
+	CLASS(btree_trans, trans)(c);
+	struct bch_backpointer bp = {};
+	bool found = false;
+
+	int ret = for_each_btree_key_max(trans, iter, BTREE_ID_backpointers,
+					 bp_start, bp_end, 0, k, ({
+		int r = 0;
+		if (k.k->type == KEY_TYPE_backpointer) {
+			struct bkey_s_c_backpointer b = bkey_s_c_to_backpointer(k);
+			u64 start = k.k->p.offset >> c->sb.extent_bp_shift;
+
+			if (arg.offset >= start &&
+			    arg.offset < start + b.v->bucket_len) {
+				bp = *b.v;
+				found = true;
+				r = 1;
+			}
+		}
+		r;
+	}));
+	if (ret < 0)
+		return bch2_err_class(ret);
+
+	arg.found = found;
+	if (found) {
+		arg.data_type	= bp.data_type;
+		arg.btree_id	= bp.btree_id;
+		arg.ec		= BACKPOINTER_ERASURE_CODED(&bp);
+		arg.sectors	= bp.bucket_len;
+		arg.inode	= bp.pos.inode;
+		arg.snapshot	= bp.pos.snapshot;
+	}
+
+	if (found &&
+	    (arg.flags & BCH_REV_MAP_RESOLVE_PATH) &&
+	    bp.btree_id == BTREE_ID_extents) {
+		CLASS(printbuf, path)();
+
+		ret = lockrestart_do(trans,
+			bch2_resolve_inum_path(trans, bp.pos.inode, bp.pos.snapshot,
+					       &path, &arg.background_target));
+		/*
+		 * The extent's inode may be racing with deletion: still a valid
+		 * sample, just unattributable - return it with an empty path.
+		 */
+		if (bch2_err_matches(ret, ENOENT)) {
+			printbuf_reset(&path);
+			arg.background_target = 0;
+			ret = 0;
+		}
+		if (ret)
+			return bch2_err_class(ret);
+
+		try(printbuf_copy_nul_to_user(&path, arg.buf, arg.buf_size));
+	}
+
+	return copy_to_user_errcode(user_arg, &arg, sizeof(arg));
+}
+
 static long __bch2_fs_ioctl(struct bch_fs *c, unsigned cmd, void __user *arg)
 {
 	switch (cmd) {
@@ -855,6 +982,8 @@ static long __bch2_fs_ioctl(struct bch_fs *c, unsigned cmd, void __user *arg)
 		return bch2_ioctl_query_counters(c, arg);
 	case BCH_IOCTL_QUERY_BTREE_KEYS:
 		return bch2_ioctl_query_btree_keys(c, arg);
+	case BCH_IOCTL_REV_MAP:
+		return bch2_ioctl_rev_map(c, arg);
 	default:
 		return -ENOTTY;
 	}
