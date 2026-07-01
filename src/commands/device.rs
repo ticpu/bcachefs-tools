@@ -174,7 +174,7 @@ fn open_dev(path: &str) -> Result<(BcachefsHandle, u32)> {
 
 /// Resolve a device identifier (path or numeric index) to a dev_idx
 /// on a given filesystem handle.
-fn resolve_dev(handle: &BcachefsHandle, dev_str: &str) -> Result<u32> {
+pub(crate) fn resolve_dev(handle: &BcachefsHandle, dev_str: &str) -> Result<u32> {
     if let Ok(idx) = dev_str.parse::<u32>() {
         return Ok(idx);
     }

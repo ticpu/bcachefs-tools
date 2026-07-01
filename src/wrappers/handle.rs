@@ -13,6 +13,7 @@ use bch_bindgen::c::{
     bch_ioctl_disk_resize_journal, bch_ioctl_disk_resize_journal_v2,
     bch_ioctl_subvolume, bch_ioctl_subvolume_v2,
     bch_ioctl_query_btree_keys,
+    bch_ioctl_rev_map,
     BCH_BY_INDEX, BCH_SUBVOL_SNAPSHOT_CREATE,
 };
 use bch_bindgen::accounting::data_type;
@@ -317,10 +318,28 @@ impl BcachefsHandle {
             rustix::fs::Mode::empty(),
         ).map_err(|e| Errno(e.raw_os_error()))?;
 
+        // `name` is only a UUID for multi-device filesystems; single-device
+        // filesystems register their sysfs dir under the device name instead
+        // (see bch2_fs_online()), so `uuid` may be unset here. Query the
+        // authoritative UUID from the ctl fd rather than trust the name.
+        let mut query_uuid = BchIoctlQueryUuid::default();
+        let ret = unsafe {
+            libc::ioctl(ioctl_fd.as_raw_fd(), BCH_IOCTL_QUERY_UUID, &mut query_uuid)
+        };
+        let uuid = if ret == 0 {
+            query_uuid.uuid
+        } else {
+            eprintln!(
+                "BCH_IOCTL_QUERY_UUID failed ({}), falling back to sysfs dir name for the filesystem UUID",
+                io::Error::last_os_error()
+            );
+            uuid.unwrap_or([0; 16])
+        };
+
         Ok(BcachefsHandle {
             ioctl_fd,
             sysfs_fd,
-            uuid: uuid.unwrap_or([0; 16]),
+            uuid,
             dev_idx: -1,
         })
     }
@@ -540,6 +559,19 @@ impl BcachefsHandle {
     /// a single key.
     pub(crate) fn query_btree_keys(&self, arg: &mut bch_ioctl_query_btree_keys) -> Result<(), Errno> {
         let request = bch_ioc_wr::<bch_ioctl_query_btree_keys>(34);
+        let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, arg as *mut _) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(Errno(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)))
+        }
+    }
+
+    /// BCH_IOCTL_REV_MAP: reverse-map one physical device offset to its
+    /// owning object. Caller fills the input fields of `arg` (see
+    /// fs/bcachefs_ioctl.h); results come back in place.
+    pub(crate) fn rev_map(&self, arg: &mut bch_ioctl_rev_map) -> Result<(), Errno> {
+        let request = bch_ioc_wr::<bch_ioctl_rev_map>(38);
         let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, arg as *mut _) };
         if ret == 0 {
             Ok(())
