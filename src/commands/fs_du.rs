@@ -19,8 +19,26 @@
 // physically belong to the same file), BTREE_ID_reflink is indirect
 // (fanned out, can't be attributed to one file), and any other btree_id is
 // metadata addressed by its data_type name.
+//
+// Path resolution is deferred: sampling only records (inode, snapshot) for
+// extents samples and (key_offset, key_size) for reflink samples, with no
+// BCH_REV_MAP_RESOLVE_PATH path buffer round-trip per sample. After
+// sampling, extents samples are aggregated by distinct (inode, snapshot)
+// and reflink samples are resolved to their referencing (inode, snapshot)
+// set via the reflink map; both then share one BCH_IOCTL_INUM_TO_PATH
+// resolution pass and cache, since a filesystem tends to reuse the same
+// small set of inodes across many samples. This turns an O(samples) path
+// walk into O(distinct inodes), which dominates at scale (millions of
+// samples touching thousands of files).
+//
+// Sampling and resolution are each random-IO-bound (backpointer/reflink
+// btree reads, dirent/inode chain walks) and embarrassingly parallel across
+// independent ioctls, so both phases fan out across `--threads` handles,
+// each opened separately per thread rather than shared behind a lock —
+// serializing IO on one fd would defeat the purpose.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bch_bindgen::accounting::data_type_from_u8;
@@ -32,7 +50,6 @@ use bcachefs_kernel::btree;
 use bcachefs_kernel::opts::prt_data_type;
 use bcachefs_kernel::util::printbuf::Printbuf;
 use clap::Parser;
-use errno::Errno;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -73,6 +90,17 @@ pub struct Cli {
     /// Restrict/aggregate the report to usage under this path prefix
     #[arg(long)]
     path: Option<String>,
+
+    /// Sampling/resolution threads (default: min(8, available parallelism)).
+    /// Each thread opens its own filesystem handle and seeds its RNG from
+    /// seed+thread_index, so a run is reproducible only for a fixed
+    /// --threads value.
+    #[arg(long)]
+    threads: Option<usize>,
+}
+
+fn default_threads() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8)
 }
 
 fn fs_du(cli: Cli) -> Result<()> {
@@ -86,7 +114,8 @@ fn fs_du(cli: Cli) -> Result<()> {
 
         probe_offset(&handle, dev, offset)?;
     } else {
-        run_sampler(&handle, cli.samples, cli.seed, cli.path.as_deref())?;
+        let n_threads = cli.threads.unwrap_or_else(default_threads).max(1);
+        run_sampler(&handle, &cli.filesystem, cli.samples, cli.seed, cli.path.as_deref(), n_threads)?;
     }
 
     Ok(())
@@ -193,6 +222,17 @@ fn sampling_setup(handle: &BcachefsHandle, seed: Option<u64>) -> Result<Sampling
     Ok(SamplingSetup { devs, geoms, total_sectors, dev_dist, seed })
 }
 
+/// Open `n` independent filesystem handles, one per worker thread (see
+/// module notes on why handles aren't shared behind a lock).
+fn open_handles(fs_path: &str, n: usize, role: &str) -> Result<Vec<BcachefsHandle>> {
+    (0..n)
+        .map(|_| {
+            BcachefsHandle::open(fs_path)
+                .with_context(|| format!("opening filesystem '{}' for {} thread", fs_path, role))
+        })
+        .collect()
+}
+
 /// Per-device sample accounting, keyed on the ioctl's `data_type` output
 /// so it lines up 1:1 with `bcachefs fs usage -f devices`.
 #[derive(Default)]
@@ -200,6 +240,18 @@ struct PerDeviceCounters {
     total: f64,
     free: f64,
     by_data_type: HashMap<u8, f64>,
+}
+
+impl PerDeviceCounters {
+    /// Merge another (per-thread) counter set into this one, summing
+    /// weights — sibling of `DirNode::merge`.
+    fn merge(&mut self, other: PerDeviceCounters) {
+        self.total += other.total;
+        self.free += other.free;
+        for (dt, weight) in other.by_data_type {
+            *self.by_data_type.entry(dt).or_insert(0.0) += weight;
+        }
+    }
 }
 
 /// A node in the du-style path tree. Real files/directories are nested by
@@ -225,6 +277,14 @@ impl DirNode {
         self.total += weight;
         let child = self.children.entry(name.to_string()).or_default();
         child.total += weight;
+    }
+
+    /// Merge another (per-thread) tree into this one, summing weights.
+    fn merge(&mut self, other: DirNode) {
+        self.total += other.total;
+        for (name, child) in other.children {
+            self.children.entry(name).or_default().merge(child);
+        }
     }
 
     fn find(&self, path: &str) -> Option<&DirNode> {
@@ -299,22 +359,37 @@ struct ReflinkSample {
     weight: f64,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn classify_sample(
-    arg: &bch_ioctl_rev_map,
-    path_buf: &[u8],
-    weight: f64,
-    tree: &mut DirNode,
-    dev: &mut PerDeviceCounters,
-    target_totals: &mut HashMap<String, f64>,
-    devs: &[DevInfo],
-    reflink_samples: &mut Vec<ReflinkSample>,
-) {
+/// One sampling thread's accumulated results, merged into the run-wide
+/// totals once all threads join. Extents samples are pre-aggregated by
+/// distinct (inode, snapshot) here rather than kept one-per-sample, since
+/// path resolution only needs the distinct set.
+#[derive(Default)]
+struct ThreadAccum {
+    per_dev: Vec<PerDeviceCounters>,
+    tree: DirNode,
+    extent_totals: HashMap<(u64, u32), f64>,
+    reflink_samples: Vec<ReflinkSample>,
+}
+
+impl ThreadAccum {
+    fn new(n_devs: usize) -> Self {
+        ThreadAccum {
+            per_dev: (0..n_devs).map(|_| PerDeviceCounters::default()).collect(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Classify one raw rev_map result into a thread's local accumulators.
+/// No path resolution happens here — extents samples are aggregated by
+/// (inode, snapshot) and resolved once, later, by the caller.
+fn classify_sample(arg: &bch_ioctl_rev_map, weight: f64, dev_pos: usize, accum: &mut ThreadAccum) {
+    let dev = &mut accum.per_dev[dev_pos];
     dev.total += weight;
 
     if arg.found == 0 {
         dev.free += weight;
-        tree.insert_pseudo("<free>", weight);
+        accum.tree.insert_pseudo("<free>", weight);
         return;
     }
 
@@ -322,25 +397,15 @@ fn classify_sample(
 
     let bid = arg.btree_id as u32;
     if bid == u32::from(btree_id::extents) {
-        *target_totals.entry(describe_target(arg.background_target, devs)).or_insert(0.0) += weight;
-
-        match extract_path(path_buf) {
-            // Disconnected inodes resolve successfully but yield diagnostic
-            // text (e.g. "(ENOENT_inode_no_backpointer: disconnected at
-            // ...)") instead of a real path. Real paths always start with
-            // '/'; fold anything else into <unresolved> instead of letting
-            // it clutter the top-level tree with one node per string.
-            Some(path) if path.starts_with('/') => tree.insert_path(&path, weight),
-            _ => tree.insert_pseudo("<unresolved>", weight),
-        }
+        *accum.extent_totals.entry((arg.inode, arg.snapshot)).or_insert(0.0) += weight;
     } else if bid == u32::from(btree_id::reflink) {
-        reflink_samples.push(ReflinkSample {
+        accum.reflink_samples.push(ReflinkSample {
             key_offset: arg.key_offset,
             key_size: arg.key_size,
             weight,
         });
     } else {
-        tree.insert_pseudo(&format!("<{}>", data_type_name(arg.data_type)), weight);
+        accum.tree.insert_pseudo(&format!("<{}>", data_type_name(arg.data_type)), weight);
     }
 }
 
@@ -495,38 +560,84 @@ fn resolve_inum_to_path(
     Ok(Some((extract_path(&path_buf).unwrap_or_default(), arg.background_target)))
 }
 
-/// Attribute deferred reflink samples to their referencing files, merging
-/// the fractional weights into `tree` and `target_totals` in place.
-fn attribute_reflink_samples(
-    handle: &BcachefsHandle,
-    samples: &[ReflinkSample],
+/// (inode, snapshot) -> resolved (path, background_target), or `None` for
+/// an inode that no longer exists (ENOENT).
+type PathCache = HashMap<(u64, u32), Option<(String, u16)>>;
+type PathCacheEntry = ((u64, u32), Option<(String, u16)>);
+
+/// Resolve a batch of distinct (inum, snapshot) keys via BCH_IOCTL_INUM_TO_PATH,
+/// fanned out across `n_threads` handles. Same random-IO-bound shape as
+/// sampling, so the same per-thread-handle pattern applies.
+fn resolve_inums_parallel(fs_path: &str, keys: &[(u64, u32)], n_threads: usize) -> Result<PathCache> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let n_threads = n_threads.max(1).min(keys.len());
+    let chunk_size = keys.len().div_ceil(n_threads).max(1);
+    let chunks: Vec<&[(u64, u32)]> = keys.chunks(chunk_size).collect();
+
+    let handles = open_handles(fs_path, chunks.len(), "resolve")?;
+
+    std::thread::scope(|s| -> Result<PathCache> {
+        let mut joins = Vec::with_capacity(chunks.len());
+        for (handle, chunk) in handles.into_iter().zip(chunks) {
+            joins.push(s.spawn(move || -> Result<Vec<PathCacheEntry>> {
+                let mut out = Vec::with_capacity(chunk.len());
+                for &(inum, snapshot) in chunk {
+                    out.push(((inum, snapshot), resolve_inum_to_path(&handle, inum, snapshot)?));
+                }
+                Ok(out)
+            }));
+        }
+
+        let mut merged = HashMap::with_capacity(keys.len());
+        for join in joins {
+            let part = join.join().map_err(|_| anyhow::anyhow!("resolve thread panicked"))??;
+            merged.extend(part);
+        }
+        Ok(merged)
+    })
+}
+
+/// Attribute deferred extents and reflink samples using a shared inode ->
+/// (path, background_target) cache, merging fractional weights into `tree`
+/// and `target_totals` in place. `reflink_referencers` pairs each reflink
+/// sample's resolved referencer set with its weight.
+fn attribute_samples(
+    path_cache: &PathCache,
+    extent_totals: &HashMap<(u64, u32), f64>,
+    reflink_referencers: &[(Vec<(u64, u32)>, f64)],
     tree: &mut DirNode,
     target_totals: &mut HashMap<String, f64>,
     devs: &[DevInfo],
-) -> Result<()> {
-    let map = build_reflink_map(handle).context("building reflink attribution map (BCH_IOCTL_REFLINK_MAP)")?;
-    let mut path_cache: HashMap<(u64, u32), Option<(String, u16)>> = HashMap::new();
+) {
+    for (key, weight) in extent_totals {
+        match path_cache.get(key) {
+            Some(Some((path, background_target))) => {
+                *target_totals.entry(describe_target(*background_target, devs)).or_insert(0.0) += weight;
+                if path.starts_with('/') {
+                    tree.insert_path(path, *weight);
+                } else {
+                    tree.insert_pseudo("<unresolved>", *weight);
+                }
+            }
+            // ENOENT (raced with deletion) or never queried: no path to
+            // attribute to.
+            _ => tree.insert_pseudo("<unresolved>", *weight),
+        }
+    }
 
-    for s in samples {
-        let referencers = map.sample_referencers(s);
-
+    for (referencers, weight) in reflink_referencers {
         if referencers.is_empty() {
-            tree.insert_pseudo("<reflink unreferenced>", s.weight);
+            tree.insert_pseudo("<reflink unreferenced>", *weight);
             continue;
         }
 
-        let share = s.weight / referencers.len() as f64;
-        for (inum, snapshot) in referencers {
-            let key = (inum, snapshot);
-            let resolved = match path_cache.entry(key) {
-                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(resolve_inum_to_path(handle, inum, snapshot)?)
-                }
-            };
-
-            match resolved {
-                Some((path, background_target)) => {
+        let share = weight / referencers.len() as f64;
+        for key in referencers {
+            match path_cache.get(key) {
+                Some(Some((path, background_target))) => {
                     *target_totals.entry(describe_target(*background_target, devs)).or_insert(0.0) += share;
                     if path.starts_with('/') {
                         tree.insert_path(path, share);
@@ -534,19 +645,71 @@ fn attribute_reflink_samples(
                         tree.insert_pseudo("<unresolved>", share);
                     }
                 }
-                None => tree.insert_pseudo("<reflink unreferenced>", share),
+                _ => tree.insert_pseudo("<reflink unreferenced>", share),
             }
         }
     }
+}
 
-    Ok(())
+fn sample_one(
+    handle: &BcachefsHandle,
+    rng: &mut StdRng,
+    dev_dist: &WeightedIndex<u64>,
+    geoms: &[DeviceGeom],
+) -> Result<(bch_ioctl_rev_map, usize)> {
+    let dev_pos = dev_dist.sample(rng);
+    let dev_idx = geoms[dev_pos].idx;
+    let dev_total = geoms[dev_pos].total_sectors;
+    let offset = rng.gen_range(0..dev_total);
+
+    // No BCH_REV_MAP_RESOLVE_PATH: path resolution is deferred to a
+    // separate pass over distinct (inode, snapshot) pairs, so no path
+    // buffer round-trip (and no possible -ERANGE) here.
+    let mut arg = bch_ioctl_rev_map {
+        dev: dev_idx,
+        flags: 0,
+        offset,
+        buf: 0,
+        buf_size: 0,
+        ..Default::default()
+    };
+
+    handle.rev_map(&mut arg).map_err(|e| {
+        anyhow::anyhow!("rev_map ioctl failed for dev {} offset {}: {}", dev_idx, offset, e)
+    })?;
+
+    Ok((arg, dev_pos))
+}
+
+/// Sample `n_samples` uniformly random physical offsets on its own handle,
+/// returning locally-accumulated results for the caller to merge.
+fn sample_thread(
+    handle: &BcachefsHandle,
+    n_samples: u64,
+    seed: u64,
+    weight_per_sample: f64,
+    devs: &[DevInfo],
+    geoms: &[DeviceGeom],
+    dev_dist: &WeightedIndex<u64>,
+) -> Result<ThreadAccum> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut accum = ThreadAccum::new(devs.len());
+
+    for _ in 0..n_samples {
+        let (arg, dev_pos) = sample_one(handle, &mut rng, dev_dist, geoms)?;
+        classify_sample(&arg, weight_per_sample, dev_pos, &mut accum);
+    }
+
+    Ok(accum)
 }
 
 fn run_sampler(
     handle: &BcachefsHandle,
+    fs_path: &str,
     n_samples: u64,
     seed: Option<u64>,
     path_prefix: Option<&str>,
+    n_threads: usize,
 ) -> Result<()> {
     if n_samples == 0 {
         anyhow::bail!("--samples must be greater than zero");
@@ -554,65 +717,97 @@ fn run_sampler(
 
     let SamplingSetup { devs, geoms, total_sectors, dev_dist, seed } =
         sampling_setup(handle, seed)?;
-    let mut rng = StdRng::seed_from_u64(seed);
-
     let weight_per_sample = total_sectors as f64 / n_samples as f64;
 
-    let mut path_buf = vec![0u8; PATH_BUF_SIZE];
-    let mut tree = DirNode::default();
-    let mut per_dev: Vec<PerDeviceCounters> = devs.iter().map(|_| PerDeviceCounters::default()).collect();
-    let mut target_totals: HashMap<String, f64> = HashMap::new();
-    let mut reflink_samples: Vec<ReflinkSample> = Vec::new();
+    // ──────────── Phase 1: parallel sampling ────────────
 
-    for _ in 0..n_samples {
-        let dev_pos = dev_dist.sample(&mut rng);
-        let dev_idx = geoms[dev_pos].idx;
-        let dev_total = geoms[dev_pos].total_sectors;
-        let offset = rng.gen_range(0..dev_total);
+    let sampling_start = Instant::now();
+    let n_sample_threads = n_threads.min(n_samples as usize).max(1);
+    let base = n_samples / n_sample_threads as u64;
+    let rem = n_samples % n_sample_threads as u64;
 
-        // Clear only the leading byte: the kernel writes a NUL-terminated
-        // path on success, but leaves the buffer untouched when no path is
-        // resolved, so a stale byte here would be misread as a leftover
-        // path from a previous sample.
-        path_buf[0] = 0;
+    let sample_handles = open_handles(fs_path, n_sample_threads, "sampling")?;
 
-        let mut arg = bch_ioctl_rev_map {
-            dev: dev_idx,
-            flags: BCH_REV_MAP_RESOLVE_PATH,
-            offset,
-            buf: path_buf.as_mut_ptr() as u64,
-            buf_size: path_buf.len() as u32,
-            ..Default::default()
-        };
-
-        if let Err(Errno(raw)) = handle.rev_map(&mut arg) {
-            // -ERANGE means the path didn't fit `buf`; found/data_type/
-            // btree_id are still valid, we just can't attribute a path.
-            if raw != libc::ERANGE {
-                return Err(std::io::Error::from_raw_os_error(raw)).with_context(|| {
-                    format!("rev_map ioctl failed for dev {} offset {}", dev_idx, offset)
-                });
-            }
-            path_buf[0] = 0;
+    let thread_results = std::thread::scope(|s| -> Result<Vec<ThreadAccum>> {
+        let mut joins = Vec::with_capacity(n_sample_threads);
+        for (i, sample_handle) in sample_handles.into_iter().enumerate() {
+            let count = base + if (i as u64) < rem { 1 } else { 0 };
+            let thread_seed = seed.wrapping_add(i as u64);
+            let devs = &devs;
+            let geoms = &geoms;
+            let dev_dist = &dev_dist;
+            joins.push(s.spawn(move || {
+                sample_thread(&sample_handle, count, thread_seed, weight_per_sample, devs, geoms, dev_dist)
+            }));
         }
 
-        classify_sample(
-            &arg,
-            &path_buf,
-            weight_per_sample,
-            &mut tree,
-            &mut per_dev[dev_pos],
-            &mut target_totals,
-            &devs,
-            &mut reflink_samples,
-        );
+        let mut out = Vec::with_capacity(joins.len());
+        for join in joins {
+            out.push(join.join().map_err(|_| anyhow::anyhow!("sampling thread panicked"))??);
+        }
+        Ok(out)
+    })?;
+
+    let sampling_secs = sampling_start.elapsed().as_secs_f64();
+
+    let mut tree = DirNode::default();
+    let mut per_dev: Vec<PerDeviceCounters> = devs.iter().map(|_| PerDeviceCounters::default()).collect();
+    let mut extent_totals: HashMap<(u64, u32), f64> = HashMap::new();
+    let mut reflink_samples: Vec<ReflinkSample> = Vec::new();
+
+    for accum in thread_results {
+        for (pd, thread_pd) in per_dev.iter_mut().zip(accum.per_dev) {
+            pd.merge(thread_pd);
+        }
+        tree.merge(accum.tree);
+        for (key, weight) in accum.extent_totals {
+            *extent_totals.entry(key).or_insert(0.0) += weight;
+        }
+        reflink_samples.extend(accum.reflink_samples);
     }
 
+    // ──────────── Phase 2: reflink map ────────────
+
+    let reflink_start = Instant::now();
     let reflink_attributed = !reflink_samples.is_empty();
-    if reflink_attributed {
-        attribute_reflink_samples(handle, &reflink_samples, &mut tree, &mut target_totals, &devs)
-            .context("attributing reflink samples to referencing files")?;
-    }
+    let map = if reflink_attributed {
+        Some(build_reflink_map(handle).context("building reflink attribution map (BCH_IOCTL_REFLINK_MAP)")?)
+    } else {
+        None
+    };
+    let reflink_secs = reflink_start.elapsed().as_secs_f64();
+
+    // Resolve each reflink sample's referencing (inode, snapshot) set now
+    // (in-memory interval query, no ioctl) so the distinct key set below
+    // includes them alongside the extents samples.
+    let mut resolve_keys: HashSet<(u64, u32)> = extent_totals.keys().copied().collect();
+    let reflink_referencers: Vec<(Vec<(u64, u32)>, f64)> = reflink_samples
+        .iter()
+        .map(|s| {
+            let referencers =
+                map.as_ref().expect("reflink map built when samples present").sample_referencers(s);
+            resolve_keys.extend(referencers.iter().copied());
+            (referencers, s.weight)
+        })
+        .collect();
+
+    // ──────────── Phase 3: parallel resolution ────────────
+
+    let resolve_start = Instant::now();
+    let resolve_keys: Vec<(u64, u32)> = resolve_keys.into_iter().collect();
+    let n_resolved = resolve_keys.len();
+    let path_cache = resolve_inums_parallel(fs_path, &resolve_keys, n_threads)?;
+    let resolve_secs = resolve_start.elapsed().as_secs_f64();
+
+    let mut target_totals: HashMap<String, f64> = HashMap::new();
+    attribute_samples(
+        &path_cache,
+        &extent_totals,
+        &reflink_referencers,
+        &mut tree,
+        &mut target_totals,
+        &devs,
+    );
 
     print_report(
         total_sectors,
@@ -625,6 +820,12 @@ fn run_sampler(
         path_prefix,
         reflink_attributed,
     );
+
+    println!(
+        "phases: sampling {:.1}s, reflink map {:.1}s, resolve {:.1}s ({} inodes)",
+        sampling_secs, reflink_secs, resolve_secs, n_resolved
+    );
+
     Ok(())
 }
 
