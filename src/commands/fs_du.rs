@@ -24,7 +24,10 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use bch_bindgen::accounting::data_type_from_u8;
-use bch_bindgen::c::{bch_ioctl_rev_map, btree_id, BCH_REV_MAP_RESOLVE_PATH};
+use bch_bindgen::c::{
+    bch_ioctl_inum_to_path, bch_ioctl_reflink_map, bch_ioctl_reflink_map_entry, bch_ioctl_rev_map,
+    btree_id, BCH_REV_MAP_RESOLVE_PATH,
+};
 use bcachefs_kernel::btree;
 use bcachefs_kernel::opts::prt_data_type;
 use bcachefs_kernel::util::printbuf::Printbuf;
@@ -36,12 +39,15 @@ use rand::{Rng, SeedableRng};
 
 use crate::commands::device;
 use crate::wrappers::handle::BcachefsHandle;
+use crate::wrappers::ioctl::bch_ioc_wr;
 use crate::wrappers::sysfs::{self, DevInfo};
 
+const BCH_IOCTL_INUM_TO_PATH_NR: u32 = 36;
 const DEFAULT_SAMPLES: u64 = 100_000;
 const PATH_BUF_SIZE: usize = 4096;
 const TREE_DEPTH: usize = 4;
 const TREE_TOP_K: usize = 15;
+const REFLINK_MAP_BATCH: usize = 4096;
 
 #[derive(Parser, Debug)]
 #[command(name = "du", about = "Disk usage statistics")]
@@ -120,6 +126,8 @@ fn probe_offset(handle: &BcachefsHandle, dev: u32, offset: u64) -> Result<()> {
     println!("  inode:     {}", arg.inode);
     println!("  sectors:   {}", arg.sectors);
     println!("  background_target: {}", arg.background_target);
+    println!("  key_offset: {}", arg.key_offset);
+    println!("  key_size:   {}", arg.key_size);
 
     // Extract path (if resolved)
     if let Some(nul_pos) = path_buf.iter().position(|&b| b == 0) {
@@ -281,6 +289,16 @@ fn describe_target(target: u16, devs: &[DevInfo]) -> String {
     }
 }
 
+/// A sample that landed on the reflink btree, deferred for attribution to
+/// referencing files once the full sampling pass is done. `key_offset` is
+/// the owning indirect extent's bpos.offset (its end); `key_size` is its
+/// logical length in sectors (0 if the key could not be fetched).
+struct ReflinkSample {
+    key_offset: u64,
+    key_size: u32,
+    weight: f64,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn classify_sample(
     arg: &bch_ioctl_rev_map,
@@ -290,6 +308,7 @@ fn classify_sample(
     dev: &mut PerDeviceCounters,
     target_totals: &mut HashMap<String, f64>,
     devs: &[DevInfo],
+    reflink_samples: &mut Vec<ReflinkSample>,
 ) {
     dev.total += weight;
 
@@ -315,10 +334,212 @@ fn classify_sample(
             _ => tree.insert_pseudo("<unresolved>", weight),
         }
     } else if bid == u32::from(btree_id::reflink) {
-        tree.insert_pseudo("<reflink>", weight);
+        reflink_samples.push(ReflinkSample {
+            key_offset: arg.key_offset,
+            key_size: arg.key_size,
+            weight,
+        });
     } else {
         tree.insert_pseudo(&format!("<{}>", data_type_name(arg.data_type)), weight);
     }
+}
+
+// ──────────────────────────── Reflink attribution ────────────────────────────
+//
+// The reflink btree holds indirect extents with no reverse index to the
+// reflink_p keys that reference them (only a refcount). BCH_IOCTL_REFLINK_MAP
+// streams every reflink_p in the filesystem as (inum, snapshot, idx, len);
+// [idx, idx+len) is the referenced range in the reflink btree. We accumulate
+// these into an interval map and, for each sample that landed on the reflink
+// btree, query which files' reflink_p keys overlap that sample's owning
+// indirect extent. A sample with N distinct referencers is charged weight/N
+// to each, so the fractional attribution sums exactly back to the sampled
+// physical usage.
+
+/// One reflink_p pointer: file (inum, snapshot) references [start, end) in
+/// the reflink btree.
+struct ReflinkRef {
+    start: u64,
+    end: u64,
+    inum: u64,
+    snapshot: u32,
+}
+
+/// Interval map over reflink_p ranges, queried by physical overlap.
+///
+/// Sorted by `start`, with a parallel prefix-max of `end`: to find every
+/// interval overlapping [q_start, q_end), binary-search for the last entry
+/// with `start < q_end`, then scan backward while the running max `end`
+/// still exceeds `q_start` (a monotonic bound, since it's a prefix max) —
+/// once it drops below, no earlier entry can overlap either.
+struct ReflinkMap {
+    refs: Vec<ReflinkRef>,
+    max_end: Vec<u64>,
+}
+
+impl ReflinkMap {
+    fn build(mut refs: Vec<ReflinkRef>) -> Self {
+        refs.sort_by_key(|r| r.start);
+        let mut running = 0u64;
+        let max_end = refs
+            .iter()
+            .map(|r| {
+                running = running.max(r.end);
+                running
+            })
+            .collect();
+        Self { refs, max_end }
+    }
+
+    /// Distinct (inum, snapshot) referencers overlapping [q_start, q_end).
+    fn overlaps(&self, q_start: u64, q_end: u64) -> Vec<(u64, u32)> {
+        let mut out: Vec<(u64, u32)> = Vec::new();
+        let mut i = self.refs.partition_point(|r| r.start < q_end);
+        while i > 0 {
+            i -= 1;
+            if self.max_end[i] <= q_start {
+                break;
+            }
+            let r = &self.refs[i];
+            if r.end > q_start {
+                let key = (r.inum, r.snapshot);
+                if !out.contains(&key) {
+                    out.push(key);
+                }
+            }
+        }
+        out
+    }
+
+    /// Distinct referencers of one reflink sample's owning indirect extent:
+    /// `key_offset` is the extent's end position, `key_size` its logical
+    /// length (0 when the key couldn't be fetched — probe a single sector).
+    /// An empty result means the sample is `<reflink unreferenced>`; a
+    /// non-empty one is charged `weight / len` per referencer by the caller.
+    pub(super) fn sample_referencers(&self, sample: &ReflinkSample) -> Vec<(u64, u32)> {
+        let q_end = sample.key_offset;
+        let q_start = q_end.saturating_sub(sample.key_size.max(1) as u64);
+        self.overlaps(q_start, q_end)
+    }
+}
+
+/// Enumerate every reflink_p key via BCH_IOCTL_REFLINK_MAP, cursor-batched.
+fn build_reflink_map(handle: &BcachefsHandle) -> Result<ReflinkMap> {
+    let mut refs = Vec::new();
+    let mut buf: Vec<bch_ioctl_reflink_map_entry> =
+        std::iter::repeat_with(Default::default).take(REFLINK_MAP_BATCH).collect();
+    let mut arg = bch_ioctl_reflink_map {
+        entries: buf.as_mut_ptr() as u64,
+        nr_entries: buf.len() as u32,
+        ..Default::default()
+    };
+
+    loop {
+        arg.nr_entries = buf.len() as u32;
+
+        handle.reflink_map(&mut arg)
+            .map_err(|e| anyhow::anyhow!("reflink_map ioctl failed: {}", e))?;
+
+        for entry in &buf[..arg.nr_entries as usize] {
+            refs.push(ReflinkRef {
+                start: entry.idx,
+                end: entry.idx + entry.len as u64,
+                inum: entry.inum,
+                snapshot: entry.snapshot,
+            });
+        }
+
+        if arg.done != 0 {
+            break;
+        }
+    }
+
+    Ok(ReflinkMap::build(refs))
+}
+
+/// Resolve (inum, snapshot) to a path and background_target via
+/// BCH_IOCTL_INUM_TO_PATH. `Ok(None)` means the inode is gone (ENOENT):
+/// the caller folds that referencer into `<reflink unreferenced>`.
+fn resolve_inum_to_path(
+    handle: &BcachefsHandle,
+    inum: u64,
+    snapshot: u32,
+) -> Result<Option<(String, u16)>> {
+    let mut path_buf = vec![0u8; PATH_BUF_SIZE];
+    let mut arg = bch_ioctl_inum_to_path {
+        inum,
+        snapshot,
+        buf: path_buf.as_mut_ptr() as u64,
+        buf_size: path_buf.len() as u32,
+        ..Default::default()
+    };
+
+    let request = bch_ioc_wr::<bch_ioctl_inum_to_path>(BCH_IOCTL_INUM_TO_PATH_NR);
+    let ret = unsafe { libc::ioctl(handle.ioctl_fd_raw(), request, &mut arg as *mut _) };
+
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        let raw = err.raw_os_error().unwrap_or(0);
+        if raw == libc::ENOENT {
+            return Ok(None);
+        }
+        if raw == libc::ERANGE {
+            // Path didn't fit `buf`; background_target is still valid, we
+            // just can't attribute a path (same as rev_map's handling).
+            return Ok(Some((String::new(), arg.background_target)));
+        }
+        return Err(err)
+            .with_context(|| format!("inum_to_path ioctl failed for inum {} snapshot {}", inum, snapshot));
+    }
+
+    Ok(Some((extract_path(&path_buf).unwrap_or_default(), arg.background_target)))
+}
+
+/// Attribute deferred reflink samples to their referencing files, merging
+/// the fractional weights into `tree` and `target_totals` in place.
+fn attribute_reflink_samples(
+    handle: &BcachefsHandle,
+    samples: &[ReflinkSample],
+    tree: &mut DirNode,
+    target_totals: &mut HashMap<String, f64>,
+    devs: &[DevInfo],
+) -> Result<()> {
+    let map = build_reflink_map(handle).context("building reflink attribution map (BCH_IOCTL_REFLINK_MAP)")?;
+    let mut path_cache: HashMap<(u64, u32), Option<(String, u16)>> = HashMap::new();
+
+    for s in samples {
+        let referencers = map.sample_referencers(s);
+
+        if referencers.is_empty() {
+            tree.insert_pseudo("<reflink unreferenced>", s.weight);
+            continue;
+        }
+
+        let share = s.weight / referencers.len() as f64;
+        for (inum, snapshot) in referencers {
+            let key = (inum, snapshot);
+            let resolved = match path_cache.entry(key) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(resolve_inum_to_path(handle, inum, snapshot)?)
+                }
+            };
+
+            match resolved {
+                Some((path, background_target)) => {
+                    *target_totals.entry(describe_target(*background_target, devs)).or_insert(0.0) += share;
+                    if path.starts_with('/') {
+                        tree.insert_path(path, share);
+                    } else {
+                        tree.insert_pseudo("<unresolved>", share);
+                    }
+                }
+                None => tree.insert_pseudo("<reflink unreferenced>", share),
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn run_sampler(
@@ -341,6 +562,7 @@ fn run_sampler(
     let mut tree = DirNode::default();
     let mut per_dev: Vec<PerDeviceCounters> = devs.iter().map(|_| PerDeviceCounters::default()).collect();
     let mut target_totals: HashMap<String, f64> = HashMap::new();
+    let mut reflink_samples: Vec<ReflinkSample> = Vec::new();
 
     for _ in 0..n_samples {
         let dev_pos = dev_dist.sample(&mut rng);
@@ -374,10 +596,35 @@ fn run_sampler(
             path_buf[0] = 0;
         }
 
-        classify_sample(&arg, &path_buf, weight_per_sample, &mut tree, &mut per_dev[dev_pos], &mut target_totals, &devs);
+        classify_sample(
+            &arg,
+            &path_buf,
+            weight_per_sample,
+            &mut tree,
+            &mut per_dev[dev_pos],
+            &mut target_totals,
+            &devs,
+            &mut reflink_samples,
+        );
     }
 
-    print_report(total_sectors, n_samples, seed, &devs, &per_dev, &tree, &target_totals, path_prefix);
+    let reflink_attributed = !reflink_samples.is_empty();
+    if reflink_attributed {
+        attribute_reflink_samples(handle, &reflink_samples, &mut tree, &mut target_totals, &devs)
+            .context("attributing reflink samples to referencing files")?;
+    }
+
+    print_report(
+        total_sectors,
+        n_samples,
+        seed,
+        &devs,
+        &per_dev,
+        &tree,
+        &target_totals,
+        path_prefix,
+        reflink_attributed,
+    );
     Ok(())
 }
 
@@ -391,6 +638,7 @@ fn print_report(
     tree: &DirNode,
     target_totals: &HashMap<String, f64>,
     path_prefix: Option<&str>,
+    reflink_attributed: bool,
 ) {
     let free_est: f64 = per_dev.iter().map(|d| d.free).sum();
     let used_est = total_sectors as f64 - free_est;
@@ -441,6 +689,9 @@ fn print_report(
 
     println!();
     println!("note: <free> includes sb/journal and bucket reserves (no backpointers); compare with 'bcachefs fs usage'");
+    if reflink_attributed {
+        println!("note: reflinked (shared) data is charged fractionally to each referencing file");
+    }
 }
 
 pub const CMD: super::CmdDef = typed_cmd!("du", "Disk usage statistics", Cli, fs_du);
