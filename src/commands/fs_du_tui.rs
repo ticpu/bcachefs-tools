@@ -16,12 +16,19 @@
 //    whatever N happened to be when the sample landed.
 //  - Path resolution can't block sampling (there's no "phase 2"): an
 //    extents/reflink sample whose (inode, snapshot) hasn't been resolved
-//    yet contributes to a `<resolving>` pseudo-category instead of a real
-//    path, and is re-attributed once the resolver pool answers (App::
-//    pending/queued below). "Directory" is likewise inferred from the
-//    sampled tree (a node with children) rather than a real stat call,
-//    since BCH_IOCTL_REV_MAP/INUM_TO_PATH never hand back one — that's
-//    the only notion of "directory" available here.
+//    yet is held in App::pending/queued and re-attributed once the
+//    resolver pool answers. It does NOT appear as a tree row — a moving
+//    target would be a poor fit for a sorted list — instead the header
+//    reports it as a "resolving: N inodes / X pending" status line. That
+//    pending weight is already included in the header's used(est) total
+//    (per-device accounting in classify_sample happens before attribution
+//    is even attempted) but deliberately left out of every DirNode total
+//    until resolved, so the visible tree's percentages stay internally
+//    consistent instead of budgeting for an amount that keeps moving.
+//    "Directory" is likewise inferred from the sampled tree (a node with
+//    children) rather than a real stat call, since BCH_IOCTL_REV_MAP /
+//    the ancestor-walk resolver never hand back one — that's the only
+//    notion of "directory" available here.
 //
 // Threading: n sampler threads and n resolver threads, all spun up inside
 // one std::thread::scope alongside the UI event loop, which runs on the
@@ -30,6 +37,13 @@
 // per ioctl) and resolver threads by dropping the work-queue Sender
 // (their blocking recv() then errors out) - both are join()ed as scope()
 // returns, so no thread outlives the TUI.
+//
+// Pause ('p'): only affects sampler threads. A shared PauseState
+// (Mutex<bool> + Condvar) parks each sampler thread between ioctls rather
+// than having it busy-poll, so a paused TUI burns no CPU on sampling.
+// Resolvers are untouched by pause — they keep draining the work queue,
+// since resolving keys already sampled is useful progress independent of
+// whether new samples are being taken.
 //
 // Terminal restore: the crate builds with `panic = "abort"` in release
 // (fs/alloc catch_unwind can't safely swallow a libbcachefs-originated
@@ -43,7 +57,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -108,6 +122,44 @@ fn restore_terminal() {
     let _ = terminal::disable_raw_mode();
 }
 
+// ──────────────────────────── Pause ────────────────────────────
+
+/// Shared pause flag for sampler threads, toggled by 'p'. Sampler threads
+/// park on the Condvar instead of busy-polling an AtomicBool.
+struct PauseState {
+    paused: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl PauseState {
+    fn new() -> Self {
+        PauseState { paused: Mutex::new(false), cv: Condvar::new() }
+    }
+
+    fn toggle(&self) {
+        let mut paused = self.paused.lock().unwrap();
+        *paused = !*paused;
+        if !*paused {
+            self.cv.notify_all();
+        }
+    }
+
+    fn is_paused(&self) -> bool {
+        *self.paused.lock().unwrap()
+    }
+
+    /// Block while paused. Returns once resumed or `stop` is set (the
+    /// caller sets `stop` and notifies this Condvar together on shutdown,
+    /// so a paused sampler thread wakes immediately rather than staying
+    /// parked until the next resume).
+    fn wait_while_paused(&self, stop: &AtomicBool) {
+        let mut paused = self.paused.lock().unwrap();
+        while *paused && !stop.load(Ordering::Relaxed) {
+            paused = self.cv.wait(paused).unwrap();
+        }
+    }
+}
+
 // ──────────────────────────── Worker messages ────────────────────────────
 
 enum SamplerMsg {
@@ -123,7 +175,8 @@ enum ResolverMsg {
 /// Sample continuously via BCH_IOCTL_REV_MAP until `stop` is set, flushing
 /// locally-classified batches to `tx`. Each sample is classified with
 /// weight 1.0 (see module notes) rather than batch mode's pre-scaled
-/// sector weight.
+/// sector weight. Parks on `pause` between ioctls while paused.
+#[allow(clippy::too_many_arguments)]
 fn sampler_loop(
     handle: &BcachefsHandle,
     seed: u64,
@@ -131,6 +184,7 @@ fn sampler_loop(
     geoms: &[DeviceGeom],
     dev_dist: &WeightedIndex<u64>,
     stop: &AtomicBool,
+    pause: &PauseState,
     tx: &Sender<SamplerMsg>,
 ) {
     let mut rng = StdRng::seed_from_u64(seed);
@@ -139,6 +193,10 @@ fn sampler_loop(
     let mut batch_n: u64 = 0;
 
     while !stop.load(Ordering::Relaxed) {
+        pause.wait_while_paused(stop);
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         match fs_du::sample_one(handle, &mut rng, dev_dist, geoms) {
             Ok((arg, dev_pos)) => {
                 fs_du::classify_sample(&arg, 1.0, dev_pos, &mut accum);
@@ -197,10 +255,8 @@ fn resolver_loop(handle: &BcachefsHandle, work_rx: &Mutex<Receiver<(u64, u32)>>,
 
 // ──────────────────────────── UI state ────────────────────────────
 
-/// One row in the currently displayed directory listing: either a real
-/// `DirNode` child (enterable if it has children of its own) or the
-/// synthetic `<resolving>` row (root only, never enterable — see
-/// App::visible_rows).
+/// One row in the currently displayed directory listing: a real `DirNode`
+/// child, enterable if it has children of its own.
 struct Row {
     name: String,
     count: f64,
@@ -213,7 +269,11 @@ struct App<'a> {
     per_dev: Vec<PerDeviceCounters>,
     tree: DirNode,
     samples_taken: u64,
-    start: Instant,
+    /// Windowed sample rate: last measurement (time, samples_taken) and the
+    /// rate over that window - a lifetime average would decay asymptotically
+    /// instead of dropping to 0 when sampling is paused.
+    rate_prev: (Instant, u64),
+    rate: f64,
     path_cache: PathCache,
     /// Raw-count weight accumulated for (inode, snapshot) keys seen but
     /// not yet resolved, folded into the synthetic root-level
@@ -233,6 +293,14 @@ struct App<'a> {
 }
 
 impl<'a> App<'a> {
+    fn update_rate(&mut self) {
+        let dt = self.rate_prev.0.elapsed().as_secs_f64();
+        if dt >= 1.0 {
+            self.rate = (self.samples_taken - self.rate_prev.1) as f64 / dt;
+            self.rate_prev = (Instant::now(), self.samples_taken);
+        }
+    }
+
     fn new(
         devs: &'a [DevInfo],
         total_sectors: u64,
@@ -247,7 +315,8 @@ impl<'a> App<'a> {
             total_sectors,
             tree: DirNode::default(),
             samples_taken: 0,
-            start: Instant::now(),
+            rate_prev: (Instant::now(), 0),
+            rate: 0.0,
             path_cache: HashMap::new(),
             pending: HashMap::new(),
             queued: HashSet::new(),
@@ -278,29 +347,20 @@ impl<'a> App<'a> {
     }
 
     /// Denominator for "% of current dir": the current directory's sampled
-    /// total, plus any still-pending weight if we're at the root (where
-    /// `<resolving>` is shown) so percentages account for it honestly.
+    /// total. Pending (not-yet-resolved) weight is deliberately excluded —
+    /// see module notes — and reported separately in the header instead.
     fn current_dir_total(&self) -> f64 {
-        let base = self.current_dir().map(|d| d.total).unwrap_or(0.0);
-        let pending = if self.cwd.is_empty() { self.pending.values().sum::<f64>() } else { 0.0 };
-        base + pending
+        self.current_dir().map(|d| d.total).unwrap_or(0.0)
     }
 
-    /// Current directory's children, sorted by count desc, plus a
-    /// synthetic `<resolving>` row (root only) for not-yet-attributed
-    /// weight. Single source of truth for both rendering and cursor
-    /// movement/descend, so they can't disagree about what row N is.
+    /// Current directory's children, sorted by count desc. Single source
+    /// of truth for both rendering and cursor movement/descend, so they
+    /// can't disagree about what row N is.
     fn visible_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         if let Some(dir) = self.current_dir() {
             for (name, child) in dir.sorted_children() {
                 rows.push(Row { name: name.clone(), count: child.total, enterable: !child.children.is_empty() });
-            }
-        }
-        if self.cwd.is_empty() {
-            let pending: f64 = self.pending.values().sum();
-            if pending > 0.0 {
-                rows.push(Row { name: "<resolving>".to_string(), count: pending, enterable: false });
             }
         }
         rows.sort_by(|a, b| b.count.partial_cmp(&a.count).unwrap());
@@ -447,22 +507,31 @@ fn bar(pct: f64, width: usize) -> String {
     s
 }
 
-fn render_header(f: &mut Frame, area: Rect, app: &App) {
+fn render_header(f: &mut Frame, area: Rect, app: &App, pause: &PauseState) {
     let scale = app.scale();
     let free_est: f64 = app.per_dev.iter().map(|d| d.free).sum::<f64>() * scale;
+    // used(est) already includes pending (not-yet-resolved) weight: per-device
+    // accounting in classify_sample runs before path attribution is even
+    // attempted, so it's independent of whether a sample's owning file has
+    // been resolved yet.
     let used_est = app.total_sectors as f64 - free_est;
-    let elapsed = app.start.elapsed().as_secs_f64().max(0.001);
-    let rate = app.samples_taken as f64 / elapsed;
+    let paused_tag = if pause.is_paused() { "  [PAUSED]" } else { "" };
+    let pending_sectors: f64 = app.pending.values().sum::<f64>() * scale;
 
     let lines = vec![
-        Line::from(format!("bcachefs fs du --tui  {}  (seed {})", app.fs_path, app.seed)),
+        Line::from(format!("bcachefs fs du --tui  {}  (seed {}){}", app.fs_path, app.seed, paused_tag)),
         Line::from(format!(
             "samples: {}  {:.0}/s  total: {}  used(est): {}  free(est): {}",
             app.samples_taken,
-            rate,
+            app.rate,
             fs_du::fmt_sectors(app.total_sectors as f64),
             fs_du::fmt_sectors(used_est),
             fs_du::fmt_sectors(free_est),
+        )),
+        Line::from(format!(
+            "resolving: {} inodes / {} pending",
+            app.pending.len(),
+            fs_du::fmt_sectors(pending_sectors),
         )),
         Line::from(format!("/{}", app.cwd.join("/"))),
     ];
@@ -507,14 +576,15 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         }
         None => Line::from(""),
     };
-    let help = Line::from("q:quit  \u{2191}\u{2193}/j/k:move  enter/l:descend  backspace/h:ascend  r:refresh");
+    let help =
+        Line::from("q:quit  \u{2191}\u{2193}/j/k:move  enter/l:descend  backspace/h:ascend  p:pause/resume  r:refresh");
 
     f.render_widget(Paragraph::new(vec![error_line, help]).block(Block::default().borders(Borders::TOP)), area);
 }
 
-fn ui(f: &mut Frame, app: &mut App) {
-    let chunks = Layout::vertical([Constraint::Length(4), Constraint::Min(3), Constraint::Length(3)]).split(f.area());
-    render_header(f, chunks[0], app);
+fn ui(f: &mut Frame, app: &mut App, pause: &PauseState) {
+    let chunks = Layout::vertical([Constraint::Length(5), Constraint::Min(3), Constraint::Length(3)]).split(f.area());
+    render_header(f, chunks[0], app, pause);
     render_list(f, chunks[1], app);
     render_footer(f, chunks[2], app);
 }
@@ -532,6 +602,7 @@ fn run_ui(
     sample_rx: Receiver<SamplerMsg>,
     work_tx: Sender<(u64, u32)>,
     resolve_rx: Receiver<ResolverMsg>,
+    pause: &PauseState,
 ) -> Result<()> {
     let _guard = TerminalGuard::new()?;
     let mut terminal =
@@ -548,8 +619,9 @@ fn run_ui(
             app.handle_resolve_msg(msg);
         }
         app.clamp_cursor();
+        app.update_rate();
 
-        terminal.draw(|f| ui(f, &mut app)).context("drawing frame")?;
+        terminal.draw(|f| ui(f, &mut app, pause)).context("drawing frame")?;
 
         if event::poll(TICK)? {
             if let Event::Key(key) = event::read()? {
@@ -560,6 +632,7 @@ fn run_ui(
                     KeyCode::Down | KeyCode::Char('j') => app.move_down(),
                     KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.descend(),
                     KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => app.ascend(),
+                    KeyCode::Char('p') => pause.toggle(),
                     KeyCode::Char('r') => {} // redraw is already periodic; explicit no-op refresh key
                     _ => {}
                 }
@@ -593,6 +666,7 @@ pub(super) fn run(
     let resolver_handles = fs_du::open_handles(fs_path, n_threads, "resolver")?;
 
     let stop = AtomicBool::new(false);
+    let pause = PauseState::new();
     let (sample_tx, sample_rx) = mpsc::channel::<SamplerMsg>();
     let (work_tx, work_rx) = mpsc::channel::<(u64, u32)>();
     let work_rx = Mutex::new(work_rx);
@@ -610,7 +684,8 @@ pub(super) fn run(
             let geoms = &geoms;
             let dev_dist = &dev_dist;
             let stop = &stop;
-            s.spawn(move || sampler_loop(sh, thread_seed, devs, geoms, dev_dist, stop, &tx));
+            let pause = &pause;
+            s.spawn(move || sampler_loop(sh, thread_seed, devs, geoms, dev_dist, stop, pause, &tx));
         }
         drop(sample_tx);
 
@@ -625,8 +700,13 @@ pub(super) fn run(
         // what unblocks resolver_loop's blocking recv() below; stop then
         // unblocks sampler_loop. Both happen before this closure returns,
         // so thread::scope's implicit join sees every thread exit.
-        let result = run_ui(&devs, total_sectors, reflink_map, fs_path, seed, cwd, sample_rx, work_tx, resolve_rx);
+        let result = run_ui(
+            &devs, total_sectors, reflink_map, fs_path, seed, cwd, sample_rx, work_tx, resolve_rx, &pause,
+        );
         stop.store(true, Ordering::Relaxed);
+        // Wake a parked sampler thread immediately on shutdown, rather
+        // than leaving it blocked until a resume that will never come.
+        pause.cv.notify_all();
         result
     })
 }
