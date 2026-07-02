@@ -771,6 +771,12 @@ fn resolve_inums_parallel(fs_path: &str, keys: &[(u64, u32)], n_threads: usize) 
 /// treats this as equivalent to ENOENT, since every key it queries is
 /// resolved before this runs; the TUI, which resolves keys as it goes,
 /// defers unresolved weight into a `<resolving>` pseudo-category instead).
+///
+/// `target_trees`, if given, gets the same path inserted a second time
+/// under its resolved background_target label — the per-target pivot the
+/// TUI's target view walks (`fs_du_tui`'s target_trees field). Batch mode
+/// passes `None`: it only needs the flat `target_totals` sum.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn try_attribute(
     key: (u64, u32),
     weight: f64,
@@ -779,13 +785,18 @@ pub(super) fn try_attribute(
     tree: &mut DirNode,
     target_totals: &mut HashMap<String, f64>,
     devs: &[DevInfo],
+    target_trees: Option<&mut HashMap<String, DirNode>>,
 ) -> bool {
     match path_cache.get(&key) {
         Some(Some((path, background_target))) => {
-            *target_totals.entry(describe_target(*background_target, devs)).or_insert(0.0) += weight;
+            let label = describe_target(*background_target, devs);
+            *target_totals.entry(label.clone()).or_insert(0.0) += weight;
             // `path` always starts with '/' by construction (see
             // resolve_inum_to_path's ancestor walk).
             tree.insert_path(path, weight);
+            if let Some(target_trees) = target_trees {
+                target_trees.entry(label).or_default().insert_path(path, weight);
+            }
             true
         }
         Some(None) => {
@@ -812,7 +823,7 @@ fn attribute_samples(
     devs: &[DevInfo],
 ) {
     for (&key, &weight) in extent_totals {
-        if !try_attribute(key, weight, path_cache, "<unresolved>", tree, target_totals, devs) {
+        if !try_attribute(key, weight, path_cache, "<unresolved>", tree, target_totals, devs, None) {
             tree.insert_pseudo("<unresolved>", weight);
         }
     }
@@ -825,7 +836,7 @@ fn attribute_samples(
 
         let share = weight / referencers.len() as f64;
         for &key in referencers {
-            if !try_attribute(key, share, path_cache, "<reflink unreferenced>", tree, target_totals, devs) {
+            if !try_attribute(key, share, path_cache, "<reflink unreferenced>", tree, target_totals, devs, None) {
                 tree.insert_pseudo("<reflink unreferenced>", share);
             }
         }
