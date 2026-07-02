@@ -15,8 +15,11 @@
 #include "data/move.h"
 
 #include "fs/check.h"
+#include "fs/dirent.h"
 #include "fs/inode.h"
 #include "fs/namei.h"
+
+#include "snapshots/subvolume.h"
 
 #include "journal/init.h"
 #include "journal/journal.h"
@@ -1054,6 +1057,75 @@ static long bch2_ioctl_inum_to_path(struct bch_fs *c,
 	return copy_to_user_errcode(user_arg, &arg, sizeof(arg));
 }
 
+static long bch2_ioctl_inum_parent(struct bch_fs *c,
+				   struct bch_ioctl_inum_parent __user *user_arg)
+{
+	struct bch_ioctl_inum_parent arg;
+	try(copy_from_user_errcode(&arg, user_arg, sizeof(arg)));
+
+	if (!capable(CAP_SYS_ADMIN))
+		return bch_err_throw(c, EPERM_non_admin);
+
+	if (arg.flags || arg.pad || !arg.buf_size)
+		return -EINVAL;
+
+	CLASS(btree_trans, trans)(c);
+	CLASS(printbuf, name)();
+
+	int ret = lockrestart_do(trans, ({
+		printbuf_reset(&name);
+		arg.name_len		= 0;
+		arg.parent_inum		= 0;
+		arg.parent_snapshot	= 0;
+		arg.background_target	= 0;
+
+		struct bch_inode_unpacked inode;
+		int r = bch2_inode_find_by_inum_snapshot(trans, arg.inum,
+					arg.snapshot, &inode, 0);
+		if (!r) {
+			struct bch_inode_opts opts;
+			bch2_inode_opts_get_inode(c, &inode, &opts);
+			arg.background_target = opts.background_target;
+
+			if (inode.bi_subvol == BCACHEFS_ROOT_SUBVOL &&
+			    inode.bi_inum == BCACHEFS_ROOT_INO) {
+				/* filesystem root: parent_inum stays 0 */
+			} else if (!inode.bi_dir && !inode.bi_dir_offset) {
+				r = bch_err_throw(c, ENOENT_inode_no_backpointer);
+			} else {
+				u32 snapshot = arg.snapshot;
+
+				if (inode.bi_parent_subvol)
+					r = bch2_subvolume_get_snapshot(trans,
+						inode.bi_parent_subvol, &snapshot);
+				if (!r) {
+					CLASS(btree_iter, d_iter)(trans, BTREE_ID_dirents,
+						SPOS(inode.bi_dir, inode.bi_dir_offset,
+						     snapshot), 0);
+					struct bkey_s_c_dirent d =
+						bch2_bkey_get_typed(&d_iter, dirent);
+					r = bkey_err(d.s_c);
+					if (!r) {
+						struct qstr dn = bch2_dirent_get_name(d);
+
+						prt_bytes(&name, dn.name, dn.len);
+						arg.parent_inum		= inode.bi_dir;
+						arg.parent_snapshot	= snapshot;
+					}
+				}
+			}
+		}
+		r;
+	}));
+	if (ret)
+		return bch2_err_class(ret);
+
+	arg.name_len = name.pos;
+	try(printbuf_copy_nul_to_user(&name, arg.buf, arg.buf_size));
+
+	return copy_to_user_errcode(user_arg, &arg, sizeof(arg));
+}
+
 static long __bch2_fs_ioctl(struct bch_fs *c, unsigned cmd, void __user *arg)
 {
 	switch (cmd) {
@@ -1119,6 +1191,8 @@ static long __bch2_fs_ioctl(struct bch_fs *c, unsigned cmd, void __user *arg)
 		return bch2_ioctl_reflink_map(c, arg);
 	case BCH_IOCTL_INUM_TO_PATH:
 		return bch2_ioctl_inum_to_path(c, arg);
+	case BCH_IOCTL_INUM_PARENT:
+		return bch2_ioctl_inum_parent(c, arg);
 	default:
 		return -ENOTTY;
 	}
