@@ -59,7 +59,9 @@
 // never sees.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -234,6 +236,7 @@ pub(super) struct DeviceGeom {
 /// devices, per-device geometry, the capacity-weighted device selection
 /// distribution, and the resolved RNG seed.
 pub(super) struct SamplingSetup {
+    pub(super) sysfs_path: PathBuf,
     pub(super) devs: Vec<DevInfo>,
     pub(super) geoms: Vec<DeviceGeom>,
     pub(super) total_sectors: u64,
@@ -265,7 +268,7 @@ pub(super) fn sampling_setup(handle: &BcachefsHandle, seed: Option<u64>) -> Resu
     let dev_dist = WeightedIndex::new(&weights).context("building device selection weights")?;
     let seed = seed.unwrap_or_else(|| rand::thread_rng().gen());
 
-    Ok(SamplingSetup { devs, geoms, total_sectors, dev_dist, seed })
+    Ok(SamplingSetup { sysfs_path, devs, geoms, total_sectors, dev_dist, seed })
 }
 
 /// Open `n` independent filesystem handles, one per worker thread (see
@@ -376,11 +379,10 @@ pub(super) fn fmt_sectors(sectors: f64) -> String {
 
 /// Decode a `background_target` value into a device or disk-group label.
 /// Mirrors `target_decode()` in fs/alloc/disk_groups.h (TARGET_NULL=0,
-/// TARGET_DEV_START=1, TARGET_GROUP_START=257). Group *names* require
-/// reading the disk_groups superblock section, which isn't wired up here
-/// (`fs usage` reads it via the mounted handle's accounting path) — we
-/// print the numeric group index instead.
-fn describe_target(target: u16, devs: &[DevInfo]) -> String {
+/// TARGET_DEV_START=1, TARGET_GROUP_START=257). Group labels come from
+/// `group_labels` (see `read_group_labels`); an unlabeled or deleted
+/// group index falls back to the numeric form.
+fn describe_target(target: u16, devs: &[DevInfo], group_labels: &HashMap<u32, String>) -> String {
     const TARGET_DEV_START: u16 = 1;
     const TARGET_GROUP_START: u16 = 257;
 
@@ -393,30 +395,73 @@ fn describe_target(target: u16, devs: &[DevInfo]) -> String {
             None => format!("dev:{}", dev_idx),
         }
     } else {
-        format!("group:{}", target - TARGET_GROUP_START)
+        let group = (target - TARGET_GROUP_START) as u32;
+        group_labels.get(&group).cloned().unwrap_or_else(|| format!("group:{}", group))
     }
+}
+
+/// group id -> full dotted disk-group label (e.g. "nvme", "hdd.hdd0"),
+/// read from the `internal/disk_groups` sysfs attribute rather than
+/// re-parsing the on-disk disk_groups superblock section ourselves:
+/// `bch2_disk_groups_to_text()` (fs/debug/sysfs.c, wired up under the
+/// `internal` kobject via `bch2_fs_internal_files`) already walks the
+/// parent chain and formats it, one line per group as
+/// `"{idx:>2}: {label} devs <dev names>"` or `"{idx:>2}: [deleted]"`.
+/// Read once per run since groups don't change while `fs du` is sampling.
+pub(super) fn read_group_labels(sysfs_path: &Path) -> HashMap<u32, String> {
+    let mut labels = HashMap::new();
+    let Ok(text) = fs::read_to_string(sysfs_path.join("internal").join("disk_groups")) else {
+        return labels;
+    };
+    for line in text.lines() {
+        let Some((idx_str, rest)) = line.split_once(": ") else { continue };
+        let Ok(idx) = idx_str.trim().parse::<u32>() else { continue };
+        if rest == "[deleted]" {
+            continue;
+        }
+        let label = rest.split(" devs").next().unwrap_or(rest).trim();
+        if !label.is_empty() {
+            labels.insert(idx, label.to_string());
+        }
+    }
+    labels
+}
+
+/// Display row identifier for one device in the TUI's per-device view (see
+/// `fs_du_tui`): its disk label if set, else its block device name —
+/// matches the identifier `describe_target`'s "dev:" fallback and the
+/// batch report's per-device section use for the same device.
+pub(super) fn device_row_label(devs: &[DevInfo], dev_pos: usize) -> String {
+    let dev = &devs[dev_pos];
+    dev.label.clone().unwrap_or_else(|| dev.dev.clone())
 }
 
 /// A sample that landed on the reflink btree, deferred for attribution to
 /// referencing files once the full sampling pass is done. `key_offset` is
 /// the owning indirect extent's bpos.offset (its end); `key_size` is its
 /// logical length in sectors (0 if the key could not be fetched).
+/// `dev_pos` is the physical device the sample landed on (index into the
+/// run's `devs`/`geoms` slices), carried through for the per-device view.
 pub(super) struct ReflinkSample {
     pub(super) key_offset: u64,
     pub(super) key_size: u32,
     pub(super) weight: f64,
+    pub(super) dev_pos: usize,
 }
 
 /// One sampling thread's accumulated results, merged into the run-wide
 /// totals once all threads join (batch mode) or once per flushed batch
 /// (TUI mode, `fs_du_tui`). Extents samples are pre-aggregated by distinct
-/// (inode, snapshot) here rather than kept one-per-sample, since path
-/// resolution only needs the distinct set.
+/// (inode, snapshot, device) here rather than kept one-per-sample, since
+/// path resolution only needs the distinct (inode, snapshot) set; the
+/// device is kept in the key (rather than summed away) so per-device
+/// attribution (the TUI's device view) can split a replicated file's
+/// weight back out by the device each sample physically landed on.
 #[derive(Default)]
 pub(super) struct ThreadAccum {
     pub(super) per_dev: Vec<PerDeviceCounters>,
     pub(super) tree: DirNode,
-    pub(super) extent_totals: HashMap<(u64, u32), f64>,
+    pub(super) extent_totals: HashMap<(u64, u32, usize), f64>,
     pub(super) reflink_samples: Vec<ReflinkSample>,
 }
 
@@ -431,7 +476,7 @@ impl ThreadAccum {
 
 /// Classify one raw rev_map result into a thread's local accumulators.
 /// No path resolution happens here — extents samples are aggregated by
-/// (inode, snapshot) and resolved once, later, by the caller.
+/// (inode, snapshot, device) and resolved once, later, by the caller.
 pub(super) fn classify_sample(arg: &bch_ioctl_rev_map, weight: f64, dev_pos: usize, accum: &mut ThreadAccum) {
     let dev = &mut accum.per_dev[dev_pos];
     dev.total += weight;
@@ -446,12 +491,13 @@ pub(super) fn classify_sample(arg: &bch_ioctl_rev_map, weight: f64, dev_pos: usi
 
     let bid = arg.btree_id as u32;
     if bid == u32::from(btree_id::extents) {
-        *accum.extent_totals.entry((arg.inode, arg.snapshot)).or_insert(0.0) += weight;
+        *accum.extent_totals.entry((arg.inode, arg.snapshot, dev_pos)).or_insert(0.0) += weight;
     } else if bid == u32::from(btree_id::reflink) {
         accum.reflink_samples.push(ReflinkSample {
             key_offset: arg.key_offset,
             key_size: arg.key_size,
             weight,
+            dev_pos,
         });
     } else {
         accum.tree.insert_pseudo(&format!("<{}>", data_type_name(arg.data_type)), weight);
@@ -469,6 +515,12 @@ pub(super) fn classify_sample(arg: &bch_ioctl_rev_map, weight: f64, dev_pos: usi
 // indirect extent. A sample with N distinct referencers is charged weight/N
 // to each, so the fractional attribution sums exactly back to the sampled
 // physical usage.
+
+/// One reflink sample's resolved referencer set, its weight, and the
+/// physical device it landed on: output of the interval query against
+/// `ReflinkMap`, input to attribution (batch's `attribute_samples`, the
+/// TUI's `handle_sample_msg`).
+pub(super) type ReflinkReferencer = (Vec<(u64, u32)>, f64, usize);
 
 /// One reflink_p pointer: file (inum, snapshot) references [start, end) in
 /// the reflink btree.
@@ -776,6 +828,12 @@ fn resolve_inums_parallel(fs_path: &str, keys: &[(u64, u32)], n_threads: usize) 
 /// under its resolved background_target label — the per-target pivot the
 /// TUI's target view walks (`fs_du_tui`'s target_trees field). Batch mode
 /// passes `None`: it only needs the flat `target_totals` sum.
+///
+/// `device_row`, if given (device label, its `device_trees` map), gets
+/// the same treatment for the TUI's per-device view: same resolved path,
+/// same pseudo-category fallback, inserted under that one device's tree.
+/// Batch mode and target/reflink attribution that isn't device-specific
+/// pass `None`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_attribute(
     key: (u64, u32),
@@ -785,11 +843,13 @@ pub(super) fn try_attribute(
     tree: &mut DirNode,
     target_totals: &mut HashMap<String, f64>,
     devs: &[DevInfo],
+    group_labels: &HashMap<u32, String>,
     target_trees: Option<&mut HashMap<String, DirNode>>,
+    device_row: Option<(&str, &mut HashMap<String, DirNode>)>,
 ) -> bool {
     match path_cache.get(&key) {
         Some(Some((path, background_target))) => {
-            let label = describe_target(*background_target, devs);
+            let label = describe_target(*background_target, devs, group_labels);
             *target_totals.entry(label.clone()).or_insert(0.0) += weight;
             // `path` always starts with '/' by construction (see
             // resolve_inum_to_path's ancestor walk).
@@ -797,10 +857,16 @@ pub(super) fn try_attribute(
             if let Some(target_trees) = target_trees {
                 target_trees.entry(label).or_default().insert_path(path, weight);
             }
+            if let Some((dev_label, device_trees)) = device_row {
+                device_trees.entry(dev_label.to_string()).or_default().insert_path(path, weight);
+            }
             true
         }
         Some(None) => {
             tree.insert_pseudo(not_found_label, weight);
+            if let Some((dev_label, device_trees)) = device_row {
+                device_trees.entry(dev_label.to_string()).or_default().insert_pseudo(not_found_label, weight);
+            }
             true
         }
         None => false,
@@ -814,21 +880,30 @@ pub(super) fn try_attribute(
 /// included in the caller's resolution pass, so `try_attribute` always
 /// finds it in `path_cache`; the `!try_attribute(..)` fallback exists only
 /// for defensive symmetry with `fs_du_tui`, which shares this helper.
+///
+/// The device component of `extent_totals`'s key and `reflink_referencers`'
+/// tuples isn't used here — batch mode has no per-device report — but
+/// splitting a given (inode, snapshot)'s weight across several
+/// `try_attribute` calls (one per device it appeared on) rather than one
+/// call with the pre-summed total still lands on the same `tree`/
+/// `target_totals` totals, since `DirNode::insert_path` just accumulates.
 fn attribute_samples(
     path_cache: &PathCache,
-    extent_totals: &HashMap<(u64, u32), f64>,
-    reflink_referencers: &[(Vec<(u64, u32)>, f64)],
+    extent_totals: &HashMap<(u64, u32, usize), f64>,
+    reflink_referencers: &[ReflinkReferencer],
     tree: &mut DirNode,
     target_totals: &mut HashMap<String, f64>,
     devs: &[DevInfo],
+    group_labels: &HashMap<u32, String>,
 ) {
-    for (&key, &weight) in extent_totals {
-        if !try_attribute(key, weight, path_cache, "<unresolved>", tree, target_totals, devs, None) {
+    for (&(inum, snapshot, _dev_pos), &weight) in extent_totals {
+        let key = (inum, snapshot);
+        if !try_attribute(key, weight, path_cache, "<unresolved>", tree, target_totals, devs, group_labels, None, None) {
             tree.insert_pseudo("<unresolved>", weight);
         }
     }
 
-    for (referencers, weight) in reflink_referencers {
+    for (referencers, weight, _dev_pos) in reflink_referencers {
         if referencers.is_empty() {
             tree.insert_pseudo("<reflink unreferenced>", *weight);
             continue;
@@ -836,7 +911,7 @@ fn attribute_samples(
 
         let share = weight / referencers.len() as f64;
         for &key in referencers {
-            if !try_attribute(key, share, path_cache, "<reflink unreferenced>", tree, target_totals, devs, None) {
+            if !try_attribute(key, share, path_cache, "<reflink unreferenced>", tree, target_totals, devs, group_labels, None, None) {
                 tree.insert_pseudo("<reflink unreferenced>", share);
             }
         }
@@ -911,8 +986,9 @@ fn run_sampler(
         anyhow::bail!("--samples must be greater than zero");
     }
 
-    let SamplingSetup { devs, geoms, total_sectors, dev_dist, seed } =
+    let SamplingSetup { sysfs_path, devs, geoms, total_sectors, dev_dist, seed } =
         sampling_setup(handle, seed)?;
+    let group_labels = read_group_labels(&sysfs_path);
     let weight_per_sample = total_sectors as f64 / n_samples as f64;
 
     // ──────────── Phase 1: parallel sampling ────────────
@@ -948,7 +1024,7 @@ fn run_sampler(
 
     let mut tree = DirNode::default();
     let mut per_dev: Vec<PerDeviceCounters> = devs.iter().map(|_| PerDeviceCounters::default()).collect();
-    let mut extent_totals: HashMap<(u64, u32), f64> = HashMap::new();
+    let mut extent_totals: HashMap<(u64, u32, usize), f64> = HashMap::new();
     let mut reflink_samples: Vec<ReflinkSample> = Vec::new();
 
     for accum in thread_results {
@@ -976,14 +1052,15 @@ fn run_sampler(
     // Resolve each reflink sample's referencing (inode, snapshot) set now
     // (in-memory interval query, no ioctl) so the distinct key set below
     // includes them alongside the extents samples.
-    let mut resolve_keys: HashSet<(u64, u32)> = extent_totals.keys().copied().collect();
-    let reflink_referencers: Vec<(Vec<(u64, u32)>, f64)> = reflink_samples
+    let mut resolve_keys: HashSet<(u64, u32)> =
+        extent_totals.keys().map(|&(inum, snapshot, _dev_pos)| (inum, snapshot)).collect();
+    let reflink_referencers: Vec<ReflinkReferencer> = reflink_samples
         .iter()
         .map(|s| {
             let referencers =
                 map.as_ref().expect("reflink map built when samples present").sample_referencers(s);
             resolve_keys.extend(referencers.iter().copied());
-            (referencers, s.weight)
+            (referencers, s.weight, s.dev_pos)
         })
         .collect();
 
@@ -1003,6 +1080,7 @@ fn run_sampler(
         &mut tree,
         &mut target_totals,
         &devs,
+        &group_labels,
     );
 
     print_report(
