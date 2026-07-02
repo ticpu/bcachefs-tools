@@ -78,6 +78,7 @@
 #define BCH_IOCTL_REFLINK_MAP		_IOWR(0xbc,	36, struct bch_ioctl_reflink_map)
 #define BCH_IOCTL_INUM_TO_PATH		_IOWR(0xbc,	37, struct bch_ioctl_inum_to_path)
 #define BCH_IOCTL_REV_MAP		_IOWR(0xbc,	38, struct bch_ioctl_rev_map)
+#define BCH_IOCTL_INUM_PARENT		_IOWR(0xbc,	39, struct bch_ioctl_inum_parent)
 
 /*
  * BCH_IOCTL_REV_MAP: reverse-map a physical device offset to its owning
@@ -205,6 +206,40 @@ struct bch_ioctl_inum_to_path {
 	__u32			flags;
 	__u64			buf;
 	__u32			buf_size;
+	__u16			background_target;
+	__u16			pad;
+};
+
+/*
+ * BCH_IOCTL_INUM_PARENT: one upward step of path resolution - resolve an
+ * inode to its name and parent directory.
+ *
+ * Bulk path resolution via BCH_IOCTL_INUM_TO_PATH re-walks shared parent
+ * chains once per inode; this exposes the single step so userspace can
+ * memoize resolved ancestors and walk each chain segment only once.
+ *
+ * @inum, @snapshot - in: inode to resolve one step for
+ * @buf, @buf_size - in: buffer for the NUL-terminated name component
+ * @name_len	- out: name length (0 for the filesystem root)
+ * @parent_inum	- out: parent directory inode; 0 means @inum is the
+ *		  filesystem root
+ * @parent_snapshot - out: snapshot to pass when resolving @parent_inum
+ *		  (changes when crossing a subvolume boundary)
+ * @background_target - out
+ *
+ * Callers must bound walk depth: on a corrupt filesystem the parent chain
+ * can loop. Returns -ENOENT if the inode is missing or has no directory
+ * backpointer, -ERANGE if the name did not fit in @buf.
+ */
+struct bch_ioctl_inum_parent {
+	__u64			inum;
+	__u32			snapshot;
+	__u32			flags;
+	__u64			buf;
+	__u32			buf_size;
+	__u32			name_len;
+	__u64			parent_inum;
+	__u32			parent_snapshot;
 	__u16			background_target;
 	__u16			pad;
 };
