@@ -56,16 +56,24 @@
 // that hook always runs before the abort. The Drop impl covers the
 // unwinding (dev/test-build) case and the normal-return path.
 //
-// View toggle ('t'): the main list pivots between the path tree (`tree`)
-// and a background_target view (`target_trees`, one DirNode per resolved
-// target label). Chosen over tagging every path-tree node with per-target
-// weights because it reuses `try_attribute`'s existing target-label
-// resolution and `DirNode::insert_path` unchanged — each resolved key is
-// just inserted a second time, into its target's own tree, at attribution
-// time. Costs one extra DirNode insertion per resolved sample; acceptable
-// next to the ioctl cost it's riding on. Each view keeps its own
-// navigation stack (`path_cwd`/`target_cwd`) so switching views doesn't
-// disturb the other's position.
+// View toggle ('t' or 'v'): the main list cycles paths -> targets ->
+// devices -> paths. Targets pivots on background_target (`target_trees`,
+// one DirNode per resolved target label — group labels resolved from the
+// `disk_groups` sysfs attribute, see `fs_du::read_group_labels`); devices
+// pivots on the physical device a sample landed on (`device_trees`, one
+// DirNode per device's label/name). Both are chosen over tagging every
+// path-tree node with per-target/per-device weights because they reuse
+// `try_attribute`'s existing resolution and `DirNode::insert_path`
+// unchanged — each resolved key is just inserted again, into its
+// target's/device's own tree, at attribution time. This is why extents
+// samples are aggregated by (inode, snapshot, device) rather than just
+// (inode, snapshot): a replicated file's weight has to stay split by the
+// device each sample physically landed on, or the device view couldn't
+// attribute it back to more than one device. Reflink samples carry their
+// device the same way. Costs one extra DirNode insertion per resolved
+// sample per extra view; acceptable next to the ioctl cost it's riding
+// on. Each view keeps its own navigation stack (`path_cwd`/`target_cwd`/
+// `device_cwd`) so switching views doesn't disturb the others' position.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -321,6 +329,7 @@ struct Row {
 enum ViewMode {
     Paths,
     Targets,
+    Devices,
 }
 
 struct App<'a> {
@@ -332,6 +341,14 @@ struct App<'a> {
     /// on the resolved target label (see module notes). Populated
     /// alongside `tree` by `try_attribute`.
     target_trees: HashMap<String, DirNode>,
+    /// Per-device pivot of the same attributed samples, keyed on the
+    /// device's row label (`fs_du::device_row_label`). Populated
+    /// alongside `tree` by `try_attribute`.
+    device_trees: HashMap<String, DirNode>,
+    /// group id -> disk-group label, resolved once at startup (see
+    /// `fs_du::read_group_labels`) and passed to every `try_attribute`
+    /// call for target-label resolution.
+    group_labels: HashMap<u32, String>,
     samples_taken: u64,
     /// Windowed sample rate: last measurement (time, samples_taken) and the
     /// rate over that window - a lifetime average would decay asymptotically
@@ -341,8 +358,11 @@ struct App<'a> {
     path_cache: PathCache,
     /// Raw-count weight accumulated for (inode, snapshot) keys seen but
     /// not yet resolved, folded into the synthetic root-level
-    /// `<resolving>` row until the resolver pool answers.
-    pending: HashMap<(u64, u32), f64>,
+    /// `<resolving>` row until the resolver pool answers. Weight is kept
+    /// broken down per originating device (inner map) so that once
+    /// resolved, each device's share can still be attributed to its own
+    /// `device_trees` entry rather than only the summed total.
+    pending: HashMap<(u64, u32), HashMap<usize, f64>>,
     /// Keys already sent to the resolver work queue, so a key seen again
     /// before it resolves isn't re-enqueued.
     queued: HashSet<(u64, u32)>,
@@ -350,6 +370,7 @@ struct App<'a> {
     view: ViewMode,
     path_cwd: Vec<String>,
     target_cwd: Vec<String>,
+    device_cwd: Vec<String>,
     cursor: usize,
     list_state: ListState,
     error: Option<String>,
@@ -374,10 +395,12 @@ impl<'a> App<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         devs: &'a [DevInfo],
         total_sectors: u64,
         reflink_map: ReflinkMap,
+        group_labels: HashMap<u32, String>,
         fs_path: &str,
         seed: u64,
         path_cwd: Vec<String>,
@@ -388,6 +411,8 @@ impl<'a> App<'a> {
             total_sectors,
             tree: DirNode::default(),
             target_trees: HashMap::new(),
+            device_trees: HashMap::new(),
+            group_labels,
             samples_taken: 0,
             rate_prev: (Instant::now(), 0),
             rate: 0.0,
@@ -398,6 +423,7 @@ impl<'a> App<'a> {
             view: ViewMode::Paths,
             path_cwd,
             target_cwd: Vec::new(),
+            device_cwd: Vec::new(),
             cursor: 0,
             list_state: ListState::default(),
             error: None,
@@ -422,6 +448,7 @@ impl<'a> App<'a> {
         match self.view {
             ViewMode::Paths => &self.path_cwd,
             ViewMode::Targets => &self.target_cwd,
+            ViewMode::Devices => &self.device_cwd,
         }
     }
 
@@ -429,20 +456,22 @@ impl<'a> App<'a> {
         match self.view {
             ViewMode::Paths => &mut self.path_cwd,
             ViewMode::Targets => &mut self.target_cwd,
+            ViewMode::Devices => &mut self.device_cwd,
         }
     }
 
     fn toggle_view(&mut self) {
         self.view = match self.view {
             ViewMode::Paths => ViewMode::Targets,
-            ViewMode::Targets => ViewMode::Paths,
+            ViewMode::Targets => ViewMode::Devices,
+            ViewMode::Devices => ViewMode::Paths,
         };
         self.cursor = 0;
     }
 
     /// Current directory's `DirNode`, or `None` at the synthetic root of
-    /// the targets view (a virtual directory of target labels, not a real
-    /// `DirNode` — see `visible_rows`).
+    /// the targets/devices views (a virtual directory of target/device
+    /// labels, not a real `DirNode` — see `visible_rows`).
     fn current_dir(&self) -> Option<&DirNode> {
         match self.view {
             ViewMode::Paths => {
@@ -451,6 +480,10 @@ impl<'a> App<'a> {
             ViewMode::Targets => {
                 let root = self.target_trees.get(self.target_cwd.first()?)?;
                 if self.target_cwd.len() == 1 { Some(root) } else { root.find(&self.target_cwd[1..].join("/")) }
+            }
+            ViewMode::Devices => {
+                let root = self.device_trees.get(self.device_cwd.first()?)?;
+                if self.device_cwd.len() == 1 { Some(root) } else { root.find(&self.device_cwd[1..].join("/")) }
             }
         }
     }
@@ -463,19 +496,26 @@ impl<'a> App<'a> {
             ViewMode::Targets if self.target_cwd.is_empty() => {
                 self.target_trees.values().map(|d| d.total).sum()
             }
+            ViewMode::Devices if self.device_cwd.is_empty() => {
+                self.device_trees.values().map(|d| d.total).sum()
+            }
             _ => self.current_dir().map(|d| d.total).unwrap_or(0.0),
         }
     }
 
     /// Current directory's children, sorted by count desc. Single source
     /// of truth for both rendering and cursor movement/descend, so they
-    /// can't disagree about what row N is. At the targets view's root,
-    /// rows are the target labels themselves rather than a `DirNode`'s
-    /// children.
+    /// can't disagree about what row N is. At the targets/devices views'
+    /// root, rows are the target/device labels themselves rather than a
+    /// `DirNode`'s children.
     fn visible_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         if self.view == ViewMode::Targets && self.target_cwd.is_empty() {
             for (label, node) in &self.target_trees {
+                rows.push(Row { name: label.clone(), count: node.total, enterable: !node.children.is_empty() });
+            }
+        } else if self.view == ViewMode::Devices && self.device_cwd.is_empty() {
+            for (label, node) in &self.device_trees {
                 rows.push(Row { name: label.clone(), count: node.total, enterable: !node.children.is_empty() });
             }
         } else if let Some(dir) = self.current_dir() {
@@ -526,17 +566,21 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Attribute `weight` for `key` now if it's already resolved, otherwise
-    /// accumulate it under `pending` and enqueue `key` for resolution
-    /// (once per key, via `queued`).
+    /// Attribute `weight` for `key` (sampled on device `dev_pos`) now if
+    /// it's already resolved, otherwise accumulate it under `pending`
+    /// (keyed by device, so a later resolve can still split it back out
+    /// per device) and enqueue `key` for resolution (once per key, via
+    /// `queued`).
     fn attribute_or_defer(
         &mut self,
         key: (u64, u32),
         weight: f64,
+        dev_pos: usize,
         not_found_label: &str,
         target_totals: &mut HashMap<String, f64>,
         work_tx: &Sender<(u64, u32)>,
     ) {
+        let dev_label = fs_du::device_row_label(self.devs, dev_pos);
         if fs_du::try_attribute(
             key,
             weight,
@@ -545,11 +589,13 @@ impl<'a> App<'a> {
             &mut self.tree,
             target_totals,
             self.devs,
+            &self.group_labels,
             Some(&mut self.target_trees),
+            Some((&dev_label, &mut self.device_trees)),
         ) {
             return;
         }
-        *self.pending.entry(key).or_insert(0.0) += weight;
+        *self.pending.entry(key).or_default().entry(dev_pos).or_insert(0.0) += weight;
         if self.queued.insert(key) {
             let _ = work_tx.send(key); // resolver pool gone (quitting): drop silently, UI is tearing down
         }
@@ -570,18 +616,20 @@ impl<'a> App<'a> {
                 // the target view descends into — but it still wants
                 // somewhere to write, so give it a batch-scoped scratch map.
                 let mut target_totals = HashMap::new();
-                for (key, weight) in accum.extent_totals {
-                    self.attribute_or_defer(key, weight, "<unresolved>", &mut target_totals, work_tx);
+                for (&(inum, snapshot, dev_pos), &weight) in &accum.extent_totals {
+                    self.attribute_or_defer((inum, snapshot), weight, dev_pos, "<unresolved>", &mut target_totals, work_tx);
                 }
                 for sample in accum.reflink_samples {
                     let referencers = self.reflink_map.sample_referencers(&sample);
                     if referencers.is_empty() {
                         self.tree.insert_pseudo("<reflink unreferenced>", sample.weight);
+                        let dev_label = fs_du::device_row_label(self.devs, sample.dev_pos);
+                        self.device_trees.entry(dev_label).or_default().insert_pseudo("<reflink unreferenced>", sample.weight);
                         continue;
                     }
                     let share = sample.weight / referencers.len() as f64;
                     for key in referencers {
-                        self.attribute_or_defer(key, share, "<reflink unreferenced>", &mut target_totals, work_tx);
+                        self.attribute_or_defer(key, share, sample.dev_pos, "<reflink unreferenced>", &mut target_totals, work_tx);
                     }
                 }
             }
@@ -594,7 +642,7 @@ impl<'a> App<'a> {
             ResolverMsg::Resolved { key, result } => {
                 self.path_cache.insert(key, result);
                 self.queued.remove(&key);
-                if let Some(weight) = self.pending.remove(&key) {
+                if let Some(dev_weights) = self.pending.remove(&key) {
                     let mut target_totals = HashMap::new();
                     // A key can be deferred by both an extents sample and a
                     // reflink referencer before it resolves; once merged,
@@ -602,16 +650,21 @@ impl<'a> App<'a> {
                     // origin. Batch mode's finer-grained
                     // "<reflink unreferenced>" split only applies on the
                     // fast, immediate-resolution path in attribute_or_defer.
-                    fs_du::try_attribute(
-                        key,
-                        weight,
-                        &self.path_cache,
-                        "<unresolved>",
-                        &mut self.tree,
-                        &mut target_totals,
-                        self.devs,
-                        Some(&mut self.target_trees),
-                    );
+                    for (dev_pos, weight) in dev_weights {
+                        let dev_label = fs_du::device_row_label(self.devs, dev_pos);
+                        fs_du::try_attribute(
+                            key,
+                            weight,
+                            &self.path_cache,
+                            "<unresolved>",
+                            &mut self.tree,
+                            &mut target_totals,
+                            self.devs,
+                            &self.group_labels,
+                            Some(&mut self.target_trees),
+                            Some((&dev_label, &mut self.device_trees)),
+                        );
+                    }
                 }
             }
             ResolverMsg::Error(e) => self.record_error("resolver", e),
@@ -647,14 +700,15 @@ fn bar(pct: f64, width: usize) -> String {
 }
 
 /// Current path as shown in the header/list title: `/cwd` in the paths
-/// view, and in the targets view either `/cwd` under the selected target
-/// or the literal string `targets` at its synthetic root (no `DirNode`
-/// there to derive a path from — see `App::current_dir`).
+/// view, and in the targets/devices views either `/cwd` under the
+/// selected target/device or the literal string `targets`/`devices` at
+/// its synthetic root (no `DirNode` there to derive a path from — see
+/// `App::current_dir`).
 fn display_path(app: &App) -> String {
-    if app.view == ViewMode::Targets && app.target_cwd.is_empty() {
-        "targets".to_string()
-    } else {
-        format!("/{}", app.cwd().join("/"))
+    match app.view {
+        ViewMode::Targets if app.target_cwd.is_empty() => "targets".to_string(),
+        ViewMode::Devices if app.device_cwd.is_empty() => "devices".to_string(),
+        _ => format!("/{}", app.cwd().join("/")),
     }
 }
 
@@ -676,10 +730,11 @@ fn render_header(f: &mut Frame, area: Rect, app: &App, pause: &PauseState) {
         Some(since) if since.elapsed() >= BACKLOG_WARN_DURATION => "  [UI FALLING BEHIND SAMPLING]",
         _ => "",
     };
-    let pending_sectors: f64 = app.pending.values().sum::<f64>() * scale;
+    let pending_sectors: f64 = app.pending.values().flat_map(|m| m.values()).sum::<f64>() * scale;
     let view_tag = match app.view {
         ViewMode::Paths => "paths",
         ViewMode::Targets => "targets",
+        ViewMode::Devices => "devices",
     };
 
     let lines = vec![
@@ -744,7 +799,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         None => Line::from(""),
     };
     let help = Line::from(
-        "q:quit  \u{2191}\u{2193}/j/k:move  enter/l:descend  backspace/h:ascend  t:toggle view  p:pause/resume  r:refresh",
+        "q:quit  \u{2191}\u{2193}/j/k:move  enter/l:descend  backspace/h:ascend  t/v:toggle view  p:pause/resume",
     );
 
     f.render_widget(Paragraph::new(vec![error_line, help]).block(Block::default().borders(Borders::TOP)), area);
@@ -764,6 +819,7 @@ fn run_ui(
     devs: &[DevInfo],
     total_sectors: u64,
     reflink_map: ReflinkMap,
+    group_labels: HashMap<u32, String>,
     fs_path: &str,
     seed: u64,
     cwd: Vec<String>,
@@ -777,7 +833,7 @@ fn run_ui(
         Terminal::new(CrosstermBackend::new(io::stdout())).context("initializing ratatui terminal")?;
     terminal.clear().context("clearing terminal")?;
 
-    let mut app = App::new(devs, total_sectors, reflink_map, fs_path, seed, cwd);
+    let mut app = App::new(devs, total_sectors, reflink_map, group_labels, fs_path, seed, cwd);
     // Set once a channel drain hits its cap (more still queued) and
     // cleared once a drain comes back under cap. Gates the idle wait
     // below: blocking a full TICK while backlog is waiting would throttle
@@ -863,7 +919,7 @@ fn dispatch_key(app: &mut App, pause: &PauseState, key: crossterm::event::KeyEve
         KeyCode::Down | KeyCode::Char('j') => app.move_down(),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.descend(),
         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => app.ascend(),
-        KeyCode::Char('t') => app.toggle_view(),
+        KeyCode::Char('t') | KeyCode::Char('v') => app.toggle_view(),
         KeyCode::Char('p') => pause.toggle(),
         _ => {}
     }
@@ -879,12 +935,13 @@ pub(super) fn run(
     path_prefix: Option<&str>,
     n_threads: usize,
 ) -> Result<()> {
-    let fs_du::SamplingSetup { devs, geoms, total_sectors, dev_dist, seed } =
+    let fs_du::SamplingSetup { sysfs_path, devs, geoms, total_sectors, dev_dist, seed } =
         fs_du::sampling_setup(handle, seed)?;
 
     println!("building reflink map...");
     let reflink_map = fs_du::build_reflink_map(handle)
         .context("building reflink attribution map (BCH_IOCTL_REFLINK_MAP)")?;
+    let group_labels = fs_du::read_group_labels(&sysfs_path);
 
     let sample_handles = fs_du::open_handles(fs_path, n_threads, "sampling")?;
     let resolver_handles = fs_du::open_handles(fs_path, n_threads, "resolver")?;
@@ -929,7 +986,8 @@ pub(super) fn run(
         // unblocks sampler_loop. Both happen before this closure returns,
         // so thread::scope's implicit join sees every thread exit.
         let result = run_ui(
-            &devs, total_sectors, reflink_map, fs_path, seed, cwd, sample_rx, work_tx, resolve_rx, &pause,
+            &devs, total_sectors, reflink_map, group_labels, fs_path, seed, cwd, sample_rx, work_tx, resolve_rx,
+            &pause,
         );
         // work_tx is dropped by run_ui returning, above, before stop is set
         // here: a resolver parked on pause wakes via the stop check below,
