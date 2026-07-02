@@ -36,6 +36,19 @@
 // independent ioctls, so both phases fan out across `--threads` handles,
 // each opened separately per thread rather than shared behind a lock —
 // serializing IO on one fd would defeat the purpose.
+//
+// `--tui` (implemented in fs_du_tui.rs) reuses this file's sampler,
+// classifier, reflink map and resolver building blocks (all marked
+// `pub(super)` for that purpose) but can't reuse the fixed-N weighting
+// scheme above: it samples continuously with no final sample count to
+// pre-scale by. It instead accumulates raw visit counts (weight 1.0 per
+// sample, same DirNode/PerDeviceCounters types) and converts to sectors at
+// render time via total_sectors/samples_so_far, which is mathematically
+// the same estimator — just evaluated with a growing N instead of a fixed
+// one — and refines live as more samples arrive. `try_attribute()` is
+// factored out of `attribute_samples()` for the same reason: the TUI
+// resolves keys incrementally and needs the same path/ENOENT decision but
+// with a "not yet resolved" outcome batch mode never sees.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -55,6 +68,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use crate::commands::device;
+use crate::commands::fs_du_tui;
 use crate::wrappers::handle::BcachefsHandle;
 use crate::wrappers::ioctl::bch_ioc_wr;
 use crate::wrappers::sysfs::{self, DevInfo};
@@ -97,6 +111,11 @@ pub struct Cli {
     /// --threads value.
     #[arg(long)]
     threads: Option<usize>,
+
+    /// Interactive btdu-style live browser. Sampling runs continuously
+    /// until quit (--samples is ignored).
+    #[arg(long)]
+    tui: bool,
 }
 
 fn default_threads() -> usize {
@@ -115,7 +134,11 @@ fn fs_du(cli: Cli) -> Result<()> {
         probe_offset(&handle, dev, offset)?;
     } else {
         let n_threads = cli.threads.unwrap_or_else(default_threads).max(1);
-        run_sampler(&handle, &cli.filesystem, cli.samples, cli.seed, cli.path.as_deref(), n_threads)?;
+        if cli.tui {
+            fs_du_tui::run(&handle, &cli.filesystem, cli.seed, cli.path.as_deref(), n_threads)?;
+        } else {
+            run_sampler(&handle, &cli.filesystem, cli.samples, cli.seed, cli.path.as_deref(), n_threads)?;
+        }
     }
 
     Ok(())
@@ -179,23 +202,24 @@ pub(super) fn data_type_name(dt: u8) -> String {
 
 // ──────────────────────────── Sampler ────────────────────────────
 
-struct DeviceGeom {
-    idx: u32,
-    total_sectors: u64,
+pub(super) struct DeviceGeom {
+    pub(super) idx: u32,
+    pub(super) total_sectors: u64,
 }
 
-/// Everything sampling needs about the filesystem's shape: online devices,
-/// per-device geometry, the capacity-weighted device selection
+/// Everything sampling needs about the filesystem's shape, shared by the
+/// batch sampler (`run_sampler`) and the TUI (`fs_du_tui::run`): online
+/// devices, per-device geometry, the capacity-weighted device selection
 /// distribution, and the resolved RNG seed.
-struct SamplingSetup {
-    devs: Vec<DevInfo>,
-    geoms: Vec<DeviceGeom>,
-    total_sectors: u64,
-    dev_dist: WeightedIndex<u64>,
-    seed: u64,
+pub(super) struct SamplingSetup {
+    pub(super) devs: Vec<DevInfo>,
+    pub(super) geoms: Vec<DeviceGeom>,
+    pub(super) total_sectors: u64,
+    pub(super) dev_dist: WeightedIndex<u64>,
+    pub(super) seed: u64,
 }
 
-fn sampling_setup(handle: &BcachefsHandle, seed: Option<u64>) -> Result<SamplingSetup> {
+pub(super) fn sampling_setup(handle: &BcachefsHandle, seed: Option<u64>) -> Result<SamplingSetup> {
     let sysfs_path = sysfs::sysfs_path_from_fd(handle.sysfs_fd())?;
     let devs = sysfs::fs_get_devices(&sysfs_path, sysfs::DeviceNameMode::Raw)
         .context("enumerating filesystem devices")?;
@@ -224,7 +248,7 @@ fn sampling_setup(handle: &BcachefsHandle, seed: Option<u64>) -> Result<Sampling
 
 /// Open `n` independent filesystem handles, one per worker thread (see
 /// module notes on why handles aren't shared behind a lock).
-fn open_handles(fs_path: &str, n: usize, role: &str) -> Result<Vec<BcachefsHandle>> {
+pub(super) fn open_handles(fs_path: &str, n: usize, role: &str) -> Result<Vec<BcachefsHandle>> {
     (0..n)
         .map(|_| {
             BcachefsHandle::open(fs_path)
@@ -235,17 +259,24 @@ fn open_handles(fs_path: &str, n: usize, role: &str) -> Result<Vec<BcachefsHandl
 
 /// Per-device sample accounting, keyed on the ioctl's `data_type` output
 /// so it lines up 1:1 with `bcachefs fs usage -f devices`.
+///
+/// Batch mode accumulates pre-scaled sector weights here (fixed
+/// `total_sectors/n_samples` per sample); the TUI's continuous sampler
+/// (`fs_du_tui`) instead accumulates raw visit counts (weight 1.0 per
+/// sample) and converts to sectors at render time, since it has no fixed
+/// sample count to pre-scale by. `PerDeviceCounters` itself is agnostic to
+/// which convention a caller uses.
 #[derive(Default)]
-struct PerDeviceCounters {
-    total: f64,
-    free: f64,
-    by_data_type: HashMap<u8, f64>,
+pub(super) struct PerDeviceCounters {
+    pub(super) total: f64,
+    pub(super) free: f64,
+    pub(super) by_data_type: HashMap<u8, f64>,
 }
 
 impl PerDeviceCounters {
     /// Merge another (per-thread) counter set into this one, summing
     /// weights — sibling of `DirNode::merge`.
-    fn merge(&mut self, other: PerDeviceCounters) {
+    pub(super) fn merge(&mut self, other: PerDeviceCounters) {
         self.total += other.total;
         self.free += other.free;
         for (dt, weight) in other.by_data_type {
@@ -257,14 +288,17 @@ impl PerDeviceCounters {
 /// A node in the du-style path tree. Real files/directories are nested by
 /// path component; pseudo-categories (`<free>`, `<unresolved>`, `<reflink>`,
 /// `<btree>`, ...) are single-level children of the root.
+///
+/// Weight units follow the same batch-vs-TUI convention as
+/// `PerDeviceCounters` above.
 #[derive(Default)]
-struct DirNode {
-    total: f64,
-    children: HashMap<String, DirNode>,
+pub(super) struct DirNode {
+    pub(super) total: f64,
+    pub(super) children: HashMap<String, DirNode>,
 }
 
 impl DirNode {
-    fn insert_path(&mut self, path: &str, weight: f64) {
+    pub(super) fn insert_path(&mut self, path: &str, weight: f64) {
         self.total += weight;
         let mut node = self;
         for comp in path.split('/').filter(|c| !c.is_empty()) {
@@ -273,21 +307,21 @@ impl DirNode {
         }
     }
 
-    fn insert_pseudo(&mut self, name: &str, weight: f64) {
+    pub(super) fn insert_pseudo(&mut self, name: &str, weight: f64) {
         self.total += weight;
         let child = self.children.entry(name.to_string()).or_default();
         child.total += weight;
     }
 
     /// Merge another (per-thread) tree into this one, summing weights.
-    fn merge(&mut self, other: DirNode) {
+    pub(super) fn merge(&mut self, other: DirNode) {
         self.total += other.total;
         for (name, child) in other.children {
             self.children.entry(name).or_default().merge(child);
         }
     }
 
-    fn find(&self, path: &str) -> Option<&DirNode> {
+    pub(super) fn find(&self, path: &str) -> Option<&DirNode> {
         let mut node = self;
         for comp in path.split('/').filter(|c| !c.is_empty()) {
             node = node.children.get(comp)?;
@@ -295,7 +329,7 @@ impl DirNode {
         Some(node)
     }
 
-    fn sorted_children(&self) -> Vec<(&String, &DirNode)> {
+    pub(super) fn sorted_children(&self) -> Vec<(&String, &DirNode)> {
         let mut v: Vec<_> = self.children.iter().collect();
         v.sort_by(|a, b| b.1.total.partial_cmp(&a.1.total).unwrap());
         v
@@ -311,7 +345,7 @@ fn print_tree(node: &DirNode, indent: usize, depth_remaining: usize, top_k: usiz
     }
 }
 
-fn fmt_sectors(sectors: f64) -> String {
+pub(super) fn fmt_sectors(sectors: f64) -> String {
     let mut pb = Printbuf::new();
     pb.set_human_readable(true);
     pb.units_sectors(sectors.round() as u64);
@@ -353,26 +387,27 @@ fn describe_target(target: u16, devs: &[DevInfo]) -> String {
 /// referencing files once the full sampling pass is done. `key_offset` is
 /// the owning indirect extent's bpos.offset (its end); `key_size` is its
 /// logical length in sectors (0 if the key could not be fetched).
-struct ReflinkSample {
-    key_offset: u64,
-    key_size: u32,
-    weight: f64,
+pub(super) struct ReflinkSample {
+    pub(super) key_offset: u64,
+    pub(super) key_size: u32,
+    pub(super) weight: f64,
 }
 
 /// One sampling thread's accumulated results, merged into the run-wide
-/// totals once all threads join. Extents samples are pre-aggregated by
-/// distinct (inode, snapshot) here rather than kept one-per-sample, since
-/// path resolution only needs the distinct set.
+/// totals once all threads join (batch mode) or once per flushed batch
+/// (TUI mode, `fs_du_tui`). Extents samples are pre-aggregated by distinct
+/// (inode, snapshot) here rather than kept one-per-sample, since path
+/// resolution only needs the distinct set.
 #[derive(Default)]
-struct ThreadAccum {
-    per_dev: Vec<PerDeviceCounters>,
-    tree: DirNode,
-    extent_totals: HashMap<(u64, u32), f64>,
-    reflink_samples: Vec<ReflinkSample>,
+pub(super) struct ThreadAccum {
+    pub(super) per_dev: Vec<PerDeviceCounters>,
+    pub(super) tree: DirNode,
+    pub(super) extent_totals: HashMap<(u64, u32), f64>,
+    pub(super) reflink_samples: Vec<ReflinkSample>,
 }
 
 impl ThreadAccum {
-    fn new(n_devs: usize) -> Self {
+    pub(super) fn new(n_devs: usize) -> Self {
         ThreadAccum {
             per_dev: (0..n_devs).map(|_| PerDeviceCounters::default()).collect(),
             ..Default::default()
@@ -383,7 +418,7 @@ impl ThreadAccum {
 /// Classify one raw rev_map result into a thread's local accumulators.
 /// No path resolution happens here — extents samples are aggregated by
 /// (inode, snapshot) and resolved once, later, by the caller.
-fn classify_sample(arg: &bch_ioctl_rev_map, weight: f64, dev_pos: usize, accum: &mut ThreadAccum) {
+pub(super) fn classify_sample(arg: &bch_ioctl_rev_map, weight: f64, dev_pos: usize, accum: &mut ThreadAccum) {
     let dev = &mut accum.per_dev[dev_pos];
     dev.total += weight;
 
@@ -437,7 +472,7 @@ struct ReflinkRef {
 /// with `start < q_end`, then scan backward while the running max `end`
 /// still exceeds `q_start` (a monotonic bound, since it's a prefix max) —
 /// once it drops below, no earlier entry can overlap either.
-struct ReflinkMap {
+pub(super) struct ReflinkMap {
     refs: Vec<ReflinkRef>,
     max_end: Vec<u64>,
 }
@@ -457,7 +492,7 @@ impl ReflinkMap {
     }
 
     /// Distinct (inum, snapshot) referencers overlapping [q_start, q_end).
-    fn overlaps(&self, q_start: u64, q_end: u64) -> Vec<(u64, u32)> {
+    pub(super) fn overlaps(&self, q_start: u64, q_end: u64) -> Vec<(u64, u32)> {
         let mut out: Vec<(u64, u32)> = Vec::new();
         let mut i = self.refs.partition_point(|r| r.start < q_end);
         while i > 0 {
@@ -489,7 +524,7 @@ impl ReflinkMap {
 }
 
 /// Enumerate every reflink_p key via BCH_IOCTL_REFLINK_MAP, cursor-batched.
-fn build_reflink_map(handle: &BcachefsHandle) -> Result<ReflinkMap> {
+pub(super) fn build_reflink_map(handle: &BcachefsHandle) -> Result<ReflinkMap> {
     let mut refs = Vec::new();
     let mut buf: Vec<bch_ioctl_reflink_map_entry> =
         std::iter::repeat_with(Default::default).take(REFLINK_MAP_BATCH).collect();
@@ -525,7 +560,7 @@ fn build_reflink_map(handle: &BcachefsHandle) -> Result<ReflinkMap> {
 /// Resolve (inum, snapshot) to a path and background_target via
 /// BCH_IOCTL_INUM_TO_PATH. `Ok(None)` means the inode is gone (ENOENT):
 /// the caller folds that referencer into `<reflink unreferenced>`.
-fn resolve_inum_to_path(
+pub(super) fn resolve_inum_to_path(
     handle: &BcachefsHandle,
     inum: u64,
     snapshot: u32,
@@ -562,7 +597,7 @@ fn resolve_inum_to_path(
 
 /// (inode, snapshot) -> resolved (path, background_target), or `None` for
 /// an inode that no longer exists (ENOENT).
-type PathCache = HashMap<(u64, u32), Option<(String, u16)>>;
+pub(super) type PathCache = HashMap<(u64, u32), Option<(String, u16)>>;
 type PathCacheEntry = ((u64, u32), Option<(String, u16)>);
 
 /// Resolve a batch of distinct (inum, snapshot) keys via BCH_IOCTL_INUM_TO_PATH,
@@ -600,10 +635,47 @@ fn resolve_inums_parallel(fs_path: &str, keys: &[(u64, u32)], n_threads: usize) 
     })
 }
 
+/// Attribute `weight` for `key` using `path_cache`, if it's resolved
+/// there. Returns `true` once handled — a real path, or a confirmed-gone
+/// (ENOENT) key folded into `not_found_label` — and `false` if `key` isn't
+/// in the cache yet, leaving attribution up to the caller (batch mode
+/// treats this as equivalent to ENOENT, since every key it queries is
+/// resolved before this runs; the TUI, which resolves keys as it goes,
+/// defers unresolved weight into a `<resolving>` pseudo-category instead).
+pub(super) fn try_attribute(
+    key: (u64, u32),
+    weight: f64,
+    path_cache: &PathCache,
+    not_found_label: &str,
+    tree: &mut DirNode,
+    target_totals: &mut HashMap<String, f64>,
+    devs: &[DevInfo],
+) -> bool {
+    match path_cache.get(&key) {
+        Some(Some((path, background_target))) => {
+            *target_totals.entry(describe_target(*background_target, devs)).or_insert(0.0) += weight;
+            if path.starts_with('/') {
+                tree.insert_path(path, weight);
+            } else {
+                tree.insert_pseudo("<unresolved>", weight);
+            }
+            true
+        }
+        Some(None) => {
+            tree.insert_pseudo(not_found_label, weight);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Attribute deferred extents and reflink samples using a shared inode ->
 /// (path, background_target) cache, merging fractional weights into `tree`
 /// and `target_totals` in place. `reflink_referencers` pairs each reflink
-/// sample's resolved referencer set with its weight.
+/// sample's resolved referencer set with its weight. Every key here was
+/// included in the caller's resolution pass, so `try_attribute` always
+/// finds it in `path_cache`; the `!try_attribute(..)` fallback exists only
+/// for defensive symmetry with `fs_du_tui`, which shares this helper.
 fn attribute_samples(
     path_cache: &PathCache,
     extent_totals: &HashMap<(u64, u32), f64>,
@@ -612,19 +684,9 @@ fn attribute_samples(
     target_totals: &mut HashMap<String, f64>,
     devs: &[DevInfo],
 ) {
-    for (key, weight) in extent_totals {
-        match path_cache.get(key) {
-            Some(Some((path, background_target))) => {
-                *target_totals.entry(describe_target(*background_target, devs)).or_insert(0.0) += weight;
-                if path.starts_with('/') {
-                    tree.insert_path(path, *weight);
-                } else {
-                    tree.insert_pseudo("<unresolved>", *weight);
-                }
-            }
-            // ENOENT (raced with deletion) or never queried: no path to
-            // attribute to.
-            _ => tree.insert_pseudo("<unresolved>", *weight),
+    for (&key, &weight) in extent_totals {
+        if !try_attribute(key, weight, path_cache, "<unresolved>", tree, target_totals, devs) {
+            tree.insert_pseudo("<unresolved>", weight);
         }
     }
 
@@ -635,23 +697,19 @@ fn attribute_samples(
         }
 
         let share = weight / referencers.len() as f64;
-        for key in referencers {
-            match path_cache.get(key) {
-                Some(Some((path, background_target))) => {
-                    *target_totals.entry(describe_target(*background_target, devs)).or_insert(0.0) += share;
-                    if path.starts_with('/') {
-                        tree.insert_path(path, share);
-                    } else {
-                        tree.insert_pseudo("<unresolved>", share);
-                    }
-                }
-                _ => tree.insert_pseudo("<reflink unreferenced>", share),
+        for &key in referencers {
+            if !try_attribute(key, share, path_cache, "<reflink unreferenced>", tree, target_totals, devs) {
+                tree.insert_pseudo("<reflink unreferenced>", share);
             }
         }
     }
 }
 
-fn sample_one(
+/// Sample one uniformly random physical offset via BCH_IOCTL_REV_MAP,
+/// returning the raw ioctl result and the device it landed on (an index
+/// into `geoms`). Shared between the batch sampler's fixed-count loop
+/// below and the TUI's continuous sampler (`fs_du_tui::sampler_loop`).
+pub(super) fn sample_one(
     handle: &BcachefsHandle,
     rng: &mut StdRng,
     dev_dist: &WeightedIndex<u64>,

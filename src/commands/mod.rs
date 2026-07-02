@@ -95,6 +95,7 @@ pub mod dump;
 pub mod format;
 pub mod format_util;
 pub mod fs_du;
+mod fs_du_tui;
 pub mod fs_usage;
 pub mod fsck;
 #[cfg(feature = "fuse")]
