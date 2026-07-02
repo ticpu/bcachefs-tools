@@ -37,20 +37,24 @@
 // each opened separately per thread rather than shared behind a lock —
 // serializing IO on one fd would defeat the purpose.
 //
-// `--tui` (implemented in fs_du_tui.rs) reuses this file's sampler,
-// classifier, reflink map and resolver building blocks (all marked
-// `pub(super)` for that purpose) but can't reuse the fixed-N weighting
-// scheme above: it samples continuously with no final sample count to
-// pre-scale by. It instead accumulates raw visit counts (weight 1.0 per
-// sample, same DirNode/PerDeviceCounters types) and converts to sectors at
-// render time via total_sectors/samples_so_far, which is mathematically
-// the same estimator — just evaluated with a growing N instead of a fixed
-// one — and refines live as more samples arrive. `try_attribute()` is
-// factored out of `attribute_samples()` for the same reason: the TUI
-// resolves keys incrementally and needs the same path/ENOENT decision but
-// with a "not yet resolved" outcome batch mode never sees.
+// The interactive TUI (fs_du_tui.rs) is the default when stdout is a
+// terminal; `-b`/`--batch` forces this file's one-shot text report, which
+// is also the default when stdout isn't a terminal (pipes/scripts). The
+// TUI reuses this file's sampler, classifier, reflink map and resolver
+// building blocks (all marked `pub(super)` for that purpose) but can't
+// reuse the fixed-N weighting scheme above: it samples continuously with
+// no final sample count to pre-scale by. It instead accumulates raw visit
+// counts (weight 1.0 per sample, same DirNode/PerDeviceCounters types) and
+// converts to sectors at render time via total_sectors/samples_so_far,
+// which is mathematically the same estimator — just evaluated with a
+// growing N instead of a fixed one — and refines live as more samples
+// arrive. `try_attribute()` is factored out of `attribute_samples()` for
+// the same reason: the TUI resolves keys incrementally and needs the same
+// path/ENOENT decision but with a "not yet resolved" outcome batch mode
+// never sees.
 
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -112,9 +116,16 @@ pub struct Cli {
     #[arg(long)]
     threads: Option<usize>,
 
-    /// Interactive btdu-style live browser. Sampling runs continuously
-    /// until quit (--samples is ignored).
-    #[arg(long)]
+    /// Plain one-shot text report (--samples samples, then exit) instead
+    /// of the interactive TUI. This is the default when stdout is not a
+    /// terminal (pipes/scripts); pass explicitly to force it on a terminal.
+    #[arg(short = 'b', long, visible_alias = "oneshot")]
+    batch: bool,
+
+    /// Hidden compatibility alias: the interactive TUI is now the default
+    /// on a terminal. Kept as a forcing flag (TUI even when stdout isn't a
+    /// terminal) for scripts still passing --tui.
+    #[arg(long, hide = true)]
     tui: bool,
 }
 
@@ -134,7 +145,8 @@ fn fs_du(cli: Cli) -> Result<()> {
         probe_offset(&handle, dev, offset)?;
     } else {
         let n_threads = cli.threads.unwrap_or_else(default_threads).max(1);
-        if cli.tui {
+        let use_tui = !cli.batch && (cli.tui || std::io::stdout().is_terminal());
+        if use_tui {
             fs_du_tui::run(&handle, &cli.filesystem, cli.seed, cli.path.as_deref(), n_threads)?;
         } else {
             run_sampler(&handle, &cli.filesystem, cli.samples, cli.seed, cli.path.as_deref(), n_threads)?;
