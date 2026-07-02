@@ -55,6 +55,17 @@
 // hook that restores the terminal before delegating to the previous hook;
 // that hook always runs before the abort. The Drop impl covers the
 // unwinding (dev/test-build) case and the normal-return path.
+//
+// View toggle ('t'): the main list pivots between the path tree (`tree`)
+// and a background_target view (`target_trees`, one DirNode per resolved
+// target label). Chosen over tagging every path-tree node with per-target
+// weights because it reuses `try_attribute`'s existing target-label
+// resolution and `DirNode::insert_path` unchanged — each resolved key is
+// just inserted a second time, into its target's own tree, at attribution
+// time. Costs one extra DirNode insertion per resolved sample; acceptable
+// next to the ioctl cost it's riding on. Each view keeps its own
+// navigation stack (`path_cwd`/`target_cwd`) so switching views doesn't
+// disturb the other's position.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -88,6 +99,30 @@ const TICK: Duration = Duration::from_millis(100);
 /// per TICK).
 const SAMPLE_FLUSH_BATCH: u64 = 256;
 const LIST_BAR_WIDTH: usize = 12;
+/// Caps on how many messages each channel drain (see run_ui) processes
+/// per event-loop iteration. Uncapped `while let Ok(msg) = rx.try_recv()`
+/// only terminates once the channel is momentarily empty; with several
+/// sampler/resolver threads producing faster than this single thread can
+/// merge DirNode/target_trees updates, that condition can stop happening
+/// at all — the drain never returns, so input handling and drawing never
+/// run again (observed: 400% CPU, frozen UI). Capping each drain bounds
+/// one iteration's work no matter the production rate; the mpsc channel
+/// is the buffer, so anything past the cap is simply left queued for the
+/// next iteration. A sampler batch (up to SAMPLE_FLUSH_BATCH samples) does
+/// more work per message than a single resolved key, hence the lower cap.
+const MAX_SAMPLE_BATCHES_PER_ITER: usize = 16;
+const MAX_RESOLVE_MSGS_PER_ITER: usize = 512;
+/// Cap on queued terminal input events drained per iteration (see run_ui)
+/// — defensive bound against a pathological burst (e.g. bracketed paste)
+/// spinning the drain the same way an unbounded channel drain would.
+const MAX_INPUT_EVENTS_PER_ITER: usize = 256;
+/// How long a channel drain must keep hitting its cap, back-to-back and
+/// without a gap, before the header surfaces it as backlog. Wall-clock
+/// rather than an iteration count: once backlog stops blocking the idle
+/// wait (see `backlog` in run_ui), iterations while catching up run back
+/// to back with no fixed period, so a duration is what actually
+/// distinguishes a routine burst from sustained overload.
+const BACKLOG_WARN_DURATION: Duration = Duration::from_secs(1);
 
 // ──────────────────────────── Terminal setup ────────────────────────────
 
@@ -281,11 +316,22 @@ struct Row {
     enterable: bool,
 }
 
+/// Which pivot the main list is currently showing. See module notes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Paths,
+    Targets,
+}
+
 struct App<'a> {
     devs: &'a [DevInfo],
     total_sectors: u64,
     per_dev: Vec<PerDeviceCounters>,
     tree: DirNode,
+    /// Per-background_target pivot of the same attributed samples, keyed
+    /// on the resolved target label (see module notes). Populated
+    /// alongside `tree` by `try_attribute`.
+    target_trees: HashMap<String, DirNode>,
     samples_taken: u64,
     /// Windowed sample rate: last measurement (time, samples_taken) and the
     /// rate over that window - a lifetime average would decay asymptotically
@@ -301,11 +347,20 @@ struct App<'a> {
     /// before it resolves isn't re-enqueued.
     queued: HashSet<(u64, u32)>,
     reflink_map: ReflinkMap,
-    cwd: Vec<String>,
+    view: ViewMode,
+    path_cwd: Vec<String>,
+    target_cwd: Vec<String>,
     cursor: usize,
     list_state: ListState,
     error: Option<String>,
     error_count: u32,
+    /// When the current unbroken run of cap-hitting channel drains began
+    /// (see MAX_SAMPLE_BATCHES_PER_ITER / MAX_RESOLVE_MSGS_PER_ITER),
+    /// `None` if the last drain came back under cap. Sustained backlog
+    /// means production is outpacing this thread's consumption —
+    /// surfaced in the header once it's lasted BACKLOG_WARN_DURATION
+    /// rather than silently falling further behind.
+    backlog_since: Option<Instant>,
     fs_path: String,
     seed: u64,
 }
@@ -325,13 +380,14 @@ impl<'a> App<'a> {
         reflink_map: ReflinkMap,
         fs_path: &str,
         seed: u64,
-        cwd: Vec<String>,
+        path_cwd: Vec<String>,
     ) -> Self {
         App {
             per_dev: devs.iter().map(|_| PerDeviceCounters::default()).collect(),
             devs,
             total_sectors,
             tree: DirNode::default(),
+            target_trees: HashMap::new(),
             samples_taken: 0,
             rate_prev: (Instant::now(), 0),
             rate: 0.0,
@@ -339,11 +395,14 @@ impl<'a> App<'a> {
             pending: HashMap::new(),
             queued: HashSet::new(),
             reflink_map,
-            cwd,
+            view: ViewMode::Paths,
+            path_cwd,
+            target_cwd: Vec::new(),
             cursor: 0,
             list_state: ListState::default(),
             error: None,
             error_count: 0,
+            backlog_since: None,
             fs_path: fs_path.to_string(),
             seed,
         }
@@ -356,11 +415,43 @@ impl<'a> App<'a> {
         if self.samples_taken == 0 { 0.0 } else { self.total_sectors as f64 / self.samples_taken as f64 }
     }
 
+    /// Navigation stack for the active view. Each view keeps its own (see
+    /// module notes), so toggling views doesn't disturb the other's
+    /// position.
+    fn cwd(&self) -> &[String] {
+        match self.view {
+            ViewMode::Paths => &self.path_cwd,
+            ViewMode::Targets => &self.target_cwd,
+        }
+    }
+
+    fn cwd_mut(&mut self) -> &mut Vec<String> {
+        match self.view {
+            ViewMode::Paths => &mut self.path_cwd,
+            ViewMode::Targets => &mut self.target_cwd,
+        }
+    }
+
+    fn toggle_view(&mut self) {
+        self.view = match self.view {
+            ViewMode::Paths => ViewMode::Targets,
+            ViewMode::Targets => ViewMode::Paths,
+        };
+        self.cursor = 0;
+    }
+
+    /// Current directory's `DirNode`, or `None` at the synthetic root of
+    /// the targets view (a virtual directory of target labels, not a real
+    /// `DirNode` — see `visible_rows`).
     fn current_dir(&self) -> Option<&DirNode> {
-        if self.cwd.is_empty() {
-            Some(&self.tree)
-        } else {
-            self.tree.find(&self.cwd.join("/"))
+        match self.view {
+            ViewMode::Paths => {
+                if self.path_cwd.is_empty() { Some(&self.tree) } else { self.tree.find(&self.path_cwd.join("/")) }
+            }
+            ViewMode::Targets => {
+                let root = self.target_trees.get(self.target_cwd.first()?)?;
+                if self.target_cwd.len() == 1 { Some(root) } else { root.find(&self.target_cwd[1..].join("/")) }
+            }
         }
     }
 
@@ -368,15 +459,26 @@ impl<'a> App<'a> {
     /// total. Pending (not-yet-resolved) weight is deliberately excluded —
     /// see module notes — and reported separately in the header instead.
     fn current_dir_total(&self) -> f64 {
-        self.current_dir().map(|d| d.total).unwrap_or(0.0)
+        match self.view {
+            ViewMode::Targets if self.target_cwd.is_empty() => {
+                self.target_trees.values().map(|d| d.total).sum()
+            }
+            _ => self.current_dir().map(|d| d.total).unwrap_or(0.0),
+        }
     }
 
     /// Current directory's children, sorted by count desc. Single source
     /// of truth for both rendering and cursor movement/descend, so they
-    /// can't disagree about what row N is.
+    /// can't disagree about what row N is. At the targets view's root,
+    /// rows are the target labels themselves rather than a `DirNode`'s
+    /// children.
     fn visible_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        if let Some(dir) = self.current_dir() {
+        if self.view == ViewMode::Targets && self.target_cwd.is_empty() {
+            for (label, node) in &self.target_trees {
+                rows.push(Row { name: label.clone(), count: node.total, enterable: !node.children.is_empty() });
+            }
+        } else if let Some(dir) = self.current_dir() {
             for (name, child) in dir.sorted_children() {
                 rows.push(Row { name: name.clone(), count: child.total, enterable: !child.children.is_empty() });
             }
@@ -405,14 +507,14 @@ impl<'a> App<'a> {
     fn descend(&mut self) {
         if let Some(row) = self.visible_rows().into_iter().nth(self.cursor) {
             if row.enterable {
-                self.cwd.push(row.name);
+                self.cwd_mut().push(row.name);
                 self.cursor = 0;
             }
         }
     }
 
     fn ascend(&mut self) {
-        if self.cwd.pop().is_some() {
+        if self.cwd_mut().pop().is_some() {
             self.cursor = 0;
         }
     }
@@ -435,7 +537,16 @@ impl<'a> App<'a> {
         target_totals: &mut HashMap<String, f64>,
         work_tx: &Sender<(u64, u32)>,
     ) {
-        if fs_du::try_attribute(key, weight, &self.path_cache, not_found_label, &mut self.tree, target_totals, self.devs) {
+        if fs_du::try_attribute(
+            key,
+            weight,
+            &self.path_cache,
+            not_found_label,
+            &mut self.tree,
+            target_totals,
+            self.devs,
+            Some(&mut self.target_trees),
+        ) {
             return;
         }
         *self.pending.entry(key).or_insert(0.0) += weight;
@@ -453,10 +564,11 @@ impl<'a> App<'a> {
                 }
                 self.tree.merge(accum.tree);
 
-                // The TUI has no by-background_target panel; try_attribute
-                // still wants somewhere to write target totals, so give it
-                // a batch-scoped scratch map that's discarded once
-                // attribution is done rather than an unread App field.
+                // try_attribute's flat target_totals sum isn't read here —
+                // target_trees (populated as a side effect below) already
+                // carries the same per-target totals plus the full subtree
+                // the target view descends into — but it still wants
+                // somewhere to write, so give it a batch-scoped scratch map.
                 let mut target_totals = HashMap::new();
                 for (key, weight) in accum.extent_totals {
                     self.attribute_or_defer(key, weight, "<unresolved>", &mut target_totals, work_tx);
@@ -490,7 +602,16 @@ impl<'a> App<'a> {
                     // origin. Batch mode's finer-grained
                     // "<reflink unreferenced>" split only applies on the
                     // fast, immediate-resolution path in attribute_or_defer.
-                    fs_du::try_attribute(key, weight, &self.path_cache, "<unresolved>", &mut self.tree, &mut target_totals, self.devs);
+                    fs_du::try_attribute(
+                        key,
+                        weight,
+                        &self.path_cache,
+                        "<unresolved>",
+                        &mut self.tree,
+                        &mut target_totals,
+                        self.devs,
+                        Some(&mut self.target_trees),
+                    );
                 }
             }
             ResolverMsg::Error(e) => self.record_error("resolver", e),
@@ -525,6 +646,18 @@ fn bar(pct: f64, width: usize) -> String {
     s
 }
 
+/// Current path as shown in the header/list title: `/cwd` in the paths
+/// view, and in the targets view either `/cwd` under the selected target
+/// or the literal string `targets` at its synthetic root (no `DirNode`
+/// there to derive a path from — see `App::current_dir`).
+fn display_path(app: &App) -> String {
+    if app.view == ViewMode::Targets && app.target_cwd.is_empty() {
+        "targets".to_string()
+    } else {
+        format!("/{}", app.cwd().join("/"))
+    }
+}
+
 fn render_header(f: &mut Frame, area: Rect, app: &App, pause: &PauseState) {
     let scale = app.scale();
     let free_est: f64 = app.per_dev.iter().map(|d| d.free).sum::<f64>() * scale;
@@ -534,10 +667,26 @@ fn render_header(f: &mut Frame, area: Rect, app: &App, pause: &PauseState) {
     // been resolved yet.
     let used_est = app.total_sectors as f64 - free_est;
     let paused_tag = if pause.is_paused() { "  [PAUSED]" } else { "" };
+    // Sustained (not bursty — see BACKLOG_WARN_DURATION) channel backlog:
+    // this thread can't keep up with the sampler/resolver threads, so
+    // display is lagging behind the true sample rate. Surfaced rather
+    // than hidden behind an ever-growing drain — see
+    // MAX_SAMPLE_BATCHES_PER_ITER.
+    let backlog_tag = match app.backlog_since {
+        Some(since) if since.elapsed() >= BACKLOG_WARN_DURATION => "  [UI FALLING BEHIND SAMPLING]",
+        _ => "",
+    };
     let pending_sectors: f64 = app.pending.values().sum::<f64>() * scale;
+    let view_tag = match app.view {
+        ViewMode::Paths => "paths",
+        ViewMode::Targets => "targets",
+    };
 
     let lines = vec![
-        Line::from(format!("bcachefs fs du --tui  {}  (seed {}){}", app.fs_path, app.seed, paused_tag)),
+        Line::from(format!(
+            "bcachefs fs du --tui  {}  (seed {})  view: {}{}{}",
+            app.fs_path, app.seed, view_tag, paused_tag, backlog_tag
+        )),
         Line::from(format!(
             "samples: {}  {:.0}/s  total: {}  used(est): {}  free(est): {}",
             app.samples_taken,
@@ -551,7 +700,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App, pause: &PauseState) {
             app.pending.len(),
             fs_du::fmt_sectors(pending_sectors),
         )),
-        Line::from(format!("/{}", app.cwd.join("/"))),
+        Line::from(display_path(app)),
     ];
 
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::BOTTOM)), area);
@@ -578,7 +727,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
-    let title = format!(" /{} ", app.cwd.join("/"));
+    let title = format!(" {} ", display_path(app));
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -594,8 +743,9 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         }
         None => Line::from(""),
     };
-    let help =
-        Line::from("q:quit  \u{2191}\u{2193}/j/k:move  enter/l:descend  backspace/h:ascend  p:pause/resume  r:refresh");
+    let help = Line::from(
+        "q:quit  \u{2191}\u{2193}/j/k:move  enter/l:descend  backspace/h:ascend  t:toggle view  p:pause/resume  r:refresh",
+    );
 
     f.render_widget(Paragraph::new(vec![error_line, help]).block(Block::default().borders(Borders::TOP)), area);
 }
@@ -628,40 +778,96 @@ fn run_ui(
     terminal.clear().context("clearing terminal")?;
 
     let mut app = App::new(devs, total_sectors, reflink_map, fs_path, seed, cwd);
+    // Set once a channel drain hits its cap (more still queued) and
+    // cleared once a drain comes back under cap. Gates the idle wait
+    // below: blocking a full TICK while backlog is waiting would throttle
+    // consumption to `cap * (1000ms/TICK)` regardless of how fast the
+    // sampler/resolver threads actually produce, manufacturing exactly
+    // the "falling behind" condition the cap was meant to only report.
+    let mut backlog = false;
 
-    loop {
-        while let Ok(msg) = sample_rx.try_recv() {
-            app.handle_sample_msg(msg, &work_tx);
+    'main: loop {
+        // 1. Input first, drained to empty (capped — see
+        // MAX_INPUT_EVENTS_PER_ITER): a held/repeated key must never be
+        // discarded (that was the bug — see module notes) and must never
+        // wait behind a channel drain + DirNode merges + draw.
+        let mut had_event = false;
+        for _ in 0..MAX_INPUT_EVENTS_PER_ITER {
+            if !event::poll(Duration::ZERO)? {
+                break;
+            }
+            had_event = true;
+            if let Event::Key(key) = event::read()? {
+                if dispatch_key(&mut app, pause, key) {
+                    break 'main;
+                }
+            }
         }
-        while let Ok(msg) = resolve_rx.try_recv() {
-            app.handle_resolve_msg(msg);
+        if !had_event {
+            // Nothing queued: if the previous iteration left channel
+            // backlog, loop straight back into the drain below instead of
+            // blocking; otherwise block up to one tick, both to pace the
+            // ~100ms redraw and to react to a key the instant it arrives
+            // rather than only at the next iteration.
+            let wait = if backlog { Duration::ZERO } else { TICK };
+            if event::poll(wait)? {
+                if let Event::Key(key) = event::read()? {
+                    if dispatch_key(&mut app, pause, key) {
+                        break 'main;
+                    }
+                }
+            }
         }
+
+        // 2. Sampler/resolver channels, each capped per iteration (see
+        // module notes) so this drain can never starve step 1/3 no matter
+        // how fast the worker threads produce.
+        let mut sample_drained = 0;
+        for _ in 0..MAX_SAMPLE_BATCHES_PER_ITER {
+            match sample_rx.try_recv() {
+                Ok(msg) => {
+                    app.handle_sample_msg(msg, &work_tx);
+                    sample_drained += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        let mut resolve_drained = 0;
+        for _ in 0..MAX_RESOLVE_MSGS_PER_ITER {
+            match resolve_rx.try_recv() {
+                Ok(msg) => {
+                    app.handle_resolve_msg(msg);
+                    resolve_drained += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        backlog = sample_drained == MAX_SAMPLE_BATCHES_PER_ITER || resolve_drained == MAX_RESOLVE_MSGS_PER_ITER;
+        app.backlog_since = if backlog { Some(app.backlog_since.unwrap_or_else(Instant::now)) } else { None };
         app.clamp_cursor();
         app.update_rate();
 
+        // 3. Draw once.
         terminal.draw(|f| ui(f, &mut app, pause)).context("drawing frame")?;
-
-        if event::poll(TICK)? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Up | KeyCode::Char('k') => app.move_up(),
-                    KeyCode::Down | KeyCode::Char('j') => app.move_down(),
-                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.descend(),
-                    KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => app.ascend(),
-                    KeyCode::Char('p') => pause.toggle(),
-                    KeyCode::Char('r') => {} // redraw is already periodic; explicit no-op refresh key
-                    _ => {}
-                }
-            }
-            while event::poll(Duration::ZERO)? {
-                let _ = event::read();
-            }
-        }
     }
 
     Ok(())
+}
+
+/// Dispatch one key event. Returns `true` if the UI should quit.
+fn dispatch_key(app: &mut App, pause: &PauseState, key: crossterm::event::KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('q') => return true,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Up | KeyCode::Char('k') => app.move_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.move_down(),
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.descend(),
+        KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => app.ascend(),
+        KeyCode::Char('t') => app.toggle_view(),
+        KeyCode::Char('p') => pause.toggle(),
+        _ => {}
+    }
+    false
 }
 
 // ──────────────────────────── Entry point ────────────────────────────
