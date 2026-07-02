@@ -75,6 +75,8 @@
 #define BCH_IOCTL_SNAPSHOT_TREE		_IOWR(0xbc,	33, struct bch_ioctl_snapshot_tree_query)
 #define BCH_IOCTL_QUERY_BTREE_KEYS	_IOWR(0xbc,	34, struct bch_ioctl_query_btree_keys)
 #define BCH_IOCTL_REV_MAP		_IOWR(0xbc,	38, struct bch_ioctl_rev_map)
+#define BCH_IOCTL_REFLINK_MAP		_IOWR(0xbc,	35, struct bch_ioctl_reflink_map)
+#define BCH_IOCTL_INUM_TO_PATH		_IOWR(0xbc,	36, struct bch_ioctl_inum_to_path)
 
 /*
  * BCH_IOCTL_REV_MAP: reverse-map a physical device offset to its owning
@@ -102,6 +104,11 @@
  * @inode	- out: owning inode number (BTREE_ID_extents only)
  * @sectors	- out: length of the covering backpointer, in sectors
  * @background_target - out: inode's background_target (extents + RESOLVE_PATH)
+ * @key_offset	- out: owning key's bpos.offset; for the reflink btree this is
+ *		  the indirect extent's end position, used with @key_size to
+ *		  query a reflink_p map built via BCH_IOCTL_REFLINK_MAP
+ * @key_size	- out: owning key's logical size in sectors (reflink only;
+ *		  0 when the key could not be fetched)
  *
  * If the owning inode no longer exists (raced with deletion), the sample is
  * still returned with an empty path and background_target 0.
@@ -132,6 +139,73 @@ struct bch_ioctl_rev_map {
 	__u64			sectors;
 	__u16			background_target;
 	__u16			pad2[3];
+	__u64			key_offset;
+	__u32			key_size;
+	__u32			pad3;
+};
+
+/*
+ * BCH_IOCTL_REFLINK_MAP: enumerate reflink pointers, for building a
+ * physical-to-file map of reflinked data in userspace.
+ *
+ * bcachefs keeps no reverse index from an indirect extent (reflink btree) to
+ * the reflink_p keys referencing it, only a refcount. This ioctl scans the
+ * extents btree and streams every reflink_p as (inum, snapshot, file_offset,
+ * idx, len), where [idx, idx+len) is the referenced range in the reflink
+ * btree. Userspace accumulates them into an interval map, then attributes
+ * REV_MAP samples that land on the reflink btree via [key_offset - key_size,
+ * key_offset) overlap queries.
+ *
+ * Cursor-batched: zero the cursor to start, call repeatedly until @done.
+ * A call may return zero entries with @done still 0 (scan budget exhausted
+ * on a stretch with no reflink_p keys) - keep calling.
+ *
+ * @cursor_inum, @cursor_offset, @cursor_snapshot - in/out: resume position
+ * @entries	- in: userspace buffer of bch_ioctl_reflink_map_entry
+ * @nr_entries	- in: buffer capacity; out: entries written
+ * @done	- out: scan reached the end of the extents btree
+ */
+struct bch_ioctl_reflink_map_entry {
+	__u64			inum;
+	__u64			file_offset;
+	__u64			idx;
+	__u32			len;
+	__u32			snapshot;
+};
+
+struct bch_ioctl_reflink_map {
+	__u64			cursor_inum;
+	__u64			cursor_offset;
+	__u32			cursor_snapshot;
+	__u32			flags;
+	__u64			entries;
+	__u32			nr_entries;
+	__u8			done;
+	__u8			pad[3];
+};
+
+/*
+ * BCH_IOCTL_INUM_TO_PATH: resolve (inode number, snapshot) to a filesystem
+ * path and the inode's background_target.
+ *
+ * Companion to BCH_IOCTL_REFLINK_MAP: the map yields inode numbers; this
+ * resolves them. Unlike BCH_IOCTL_REV_MAP's best-effort path resolution,
+ * a missing inode here is an explicit -ENOENT.
+ *
+ * @inum, @snapshot - in: inode to resolve
+ * @buf, @buf_size - in: buffer for the NUL-terminated path
+ * @background_target - out
+ *
+ * Returns -ERANGE if the path did not fit in @buf.
+ */
+struct bch_ioctl_inum_to_path {
+	__u64			inum;
+	__u32			snapshot;
+	__u32			flags;
+	__u64			buf;
+	__u32			buf_size;
+	__u16			background_target;
+	__u16			pad;
 };
 
 /* ioctl below act on a particular file, not the filesystem as a whole: */

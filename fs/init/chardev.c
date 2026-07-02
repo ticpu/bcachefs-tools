@@ -843,7 +843,7 @@ static long bch2_ioctl_rev_map(struct bch_fs *c,
 		return bch_err_throw(c, EPERM_non_admin);
 
 	if ((arg.flags & ~BCH_REV_MAP_RESOLVE_PATH) ||
-	    arg.pad || arg.pad2[0] || arg.pad2[1] || arg.pad2[2])
+	    arg.pad || arg.pad2[0] || arg.pad2[1] || arg.pad2[2] || arg.pad3)
 		return -EINVAL;
 
 	CLASS(bch2_dev_tryget_noerror, ca)(c, arg.dev);
@@ -859,6 +859,8 @@ static long bch2_ioctl_rev_map(struct bch_fs *c,
 	arg.inode		= 0;
 	arg.sectors		= 0;
 	arg.background_target	= 0;
+	arg.key_offset		= 0;
+	arg.key_size		= 0;
 
 	struct bpos bucket = POS(arg.dev, sector_to_bucket(ca, arg.offset));
 	struct bpos bp_start = bucket_pos_to_bp_start(ca, bucket);
@@ -866,6 +868,7 @@ static long bch2_ioctl_rev_map(struct bch_fs *c,
 
 	CLASS(btree_trans, trans)(c);
 	struct bch_backpointer bp = {};
+	struct bpos bp_pos = POS_MIN;
 	bool found = false;
 
 	int ret = for_each_btree_key_max(trans, iter, BTREE_ID_backpointers,
@@ -878,6 +881,7 @@ static long bch2_ioctl_rev_map(struct bch_fs *c,
 			if (arg.offset >= start &&
 			    arg.offset < start + b.v->bucket_len) {
 				bp = *b.v;
+				bp_pos = k.k->p;
 				found = true;
 				r = 1;
 			}
@@ -895,6 +899,32 @@ static long bch2_ioctl_rev_map(struct bch_fs *c,
 		arg.sectors	= bp.bucket_len;
 		arg.inode	= bp.pos.inode;
 		arg.snapshot	= bp.pos.snapshot;
+		arg.key_offset	= bp.pos.offset;
+	}
+
+	/*
+	 * Reflink samples are attributed via a reflink_p interval map keyed
+	 * by logical range; fetch the indirect extent for its logical size
+	 * (bucket_len is disk sectors, wrong for compressed extents).
+	 */
+	if (found && bp.btree_id == BTREE_ID_reflink && !bp.level) {
+		struct bkey_i_backpointer bp_k;
+		bkey_backpointer_init(&bp_k.k_i);
+		bp_k.k.p = bp_pos;
+		bp_k.v = bp;
+
+		ret = lockrestart_do(trans, ({
+			CLASS(btree_iter_uninit, k_iter)(trans);
+			struct bkey_s_c k = bch2_backpointer_get_key(trans,
+					bkey_i_to_s_c_backpointer(&bp_k.k_i),
+					&k_iter, 0, NULL);
+			int r2 = bkey_err(k);
+			if (!r2 && k.k)
+				arg.key_size = k.k->size;
+			r2;
+		}));
+		if (ret)
+			return bch2_err_class(ret);
 	}
 
 	if (found &&
@@ -919,6 +949,107 @@ static long bch2_ioctl_rev_map(struct bch_fs *c,
 
 		try(printbuf_copy_nul_to_user(&path, arg.buf, arg.buf_size));
 	}
+
+	return copy_to_user_errcode(user_arg, &arg, sizeof(arg));
+}
+
+#define REFLINK_MAP_ENTRIES_MAX		(1U << 16)
+#define REFLINK_MAP_SCAN_BUDGET		(1U << 20)
+
+static long bch2_ioctl_reflink_map(struct bch_fs *c,
+				   struct bch_ioctl_reflink_map __user *user_arg)
+{
+	struct bch_ioctl_reflink_map arg;
+	try(copy_from_user_errcode(&arg, user_arg, sizeof(arg)));
+
+	if (!capable(CAP_SYS_ADMIN))
+		return bch_err_throw(c, EPERM_non_admin);
+
+	if (arg.flags || arg.pad[0] || arg.pad[1] || arg.pad[2])
+		return -EINVAL;
+
+	u32 nr_max = min(arg.nr_entries, REFLINK_MAP_ENTRIES_MAX);
+	if (!nr_max)
+		return -EINVAL;
+
+	struct bch_ioctl_reflink_map_entry *ents __free(kvfree) =
+		kvmalloc_array(nr_max, sizeof(*ents), GFP_KERNEL);
+	if (!ents)
+		return -ENOMEM;
+
+	struct bpos start = SPOS(arg.cursor_inum, arg.cursor_offset,
+				 arg.cursor_snapshot);
+	struct bpos next = start;
+	u64 scanned = 0;
+	u32 filled = 0;
+
+	CLASS(btree_trans, trans)(c);
+	int ret = for_each_btree_key(trans, iter, BTREE_ID_extents, start,
+				     BTREE_ITER_prefetch|BTREE_ITER_all_snapshots,
+				     k, ({
+		int r = 0;
+		if (k.k->type == KEY_TYPE_reflink_p) {
+			struct bkey_s_c_reflink_p p = bkey_s_c_to_reflink_p(k);
+			struct bch_ioctl_reflink_map_entry e = {
+				.inum		= k.k->p.inode,
+				.file_offset	= k.k->p.offset - k.k->size,
+				.idx		= REFLINK_P_IDX(p.v),
+				.len		= k.k->size,
+				.snapshot	= k.k->p.snapshot,
+			};
+
+			/* transaction restarts re-deliver the same key */
+			if (!filled || memcmp(&ents[filled - 1], &e, sizeof(e)))
+				ents[filled++] = e;
+			if (filled == nr_max) {
+				next = bpos_successor(k.k->p);
+				r = 1;
+			}
+		}
+		if (!r && ++scanned >= REFLINK_MAP_SCAN_BUDGET) {
+			next = bpos_successor(k.k->p);
+			r = 1;
+		}
+		r;
+	}));
+	if (ret < 0)
+		return bch2_err_class(ret);
+
+	arg.cursor_inum		= next.inode;
+	arg.cursor_offset	= next.offset;
+	arg.cursor_snapshot	= next.snapshot;
+	arg.nr_entries		= filled;
+	arg.done		= !ret;
+
+	if (filled)
+		try(copy_to_user_errcode((void __user *)(unsigned long) arg.entries,
+					 ents, (size_t) filled * sizeof(*ents)));
+
+	return copy_to_user_errcode(user_arg, &arg, sizeof(arg));
+}
+
+static long bch2_ioctl_inum_to_path(struct bch_fs *c,
+				    struct bch_ioctl_inum_to_path __user *user_arg)
+{
+	struct bch_ioctl_inum_to_path arg;
+	try(copy_from_user_errcode(&arg, user_arg, sizeof(arg)));
+
+	if (!capable(CAP_SYS_ADMIN))
+		return bch_err_throw(c, EPERM_non_admin);
+
+	if (arg.flags || arg.pad || !arg.buf_size)
+		return -EINVAL;
+
+	CLASS(btree_trans, trans)(c);
+	CLASS(printbuf, path)();
+
+	int ret = lockrestart_do(trans,
+		bch2_resolve_inum_path(trans, arg.inum, arg.snapshot,
+				       &path, &arg.background_target));
+	if (ret)
+		return bch2_err_class(ret);
+
+	try(printbuf_copy_nul_to_user(&path, arg.buf, arg.buf_size));
 
 	return copy_to_user_errcode(user_arg, &arg, sizeof(arg));
 }
@@ -984,6 +1115,10 @@ static long __bch2_fs_ioctl(struct bch_fs *c, unsigned cmd, void __user *arg)
 		return bch2_ioctl_query_btree_keys(c, arg);
 	case BCH_IOCTL_REV_MAP:
 		return bch2_ioctl_rev_map(c, arg);
+	case BCH_IOCTL_REFLINK_MAP:
+		return bch2_ioctl_reflink_map(c, arg);
+	case BCH_IOCTL_INUM_TO_PATH:
+		return bch2_ioctl_inum_to_path(c, arg);
 	default:
 		return -ENOTTY;
 	}
