@@ -12,7 +12,7 @@ use bch_bindgen::c::{
     bch_ioctl_disk_resize_journal, bch_ioctl_disk_resize_journal_v2,
     bch_ioctl_subvolume, bch_ioctl_subvolume_v2,
     bch_ioctl_query_btree_keys, bch_ioctl_query_uuid, bch_ioctl_read_super,
-    bch_ioctl_rev_map,
+    bch_ioctl_reflink_map, bch_ioctl_rev_map,
     BCH_BY_INDEX, BCH_SUBVOL_SNAPSHOT_CREATE,
 };
 use bch_bindgen::accounting::data_type;
@@ -510,6 +510,18 @@ impl BcachefsHandle {
     /// fs/bcachefs_ioctl.h); results come back in place.
     pub(crate) fn rev_map(&self, arg: &mut bch_ioctl_rev_map) -> Result<(), Errno> {
         let request = bch_ioc_wr::<bch_ioctl_rev_map>(38);
+        let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, arg as *mut _) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(Errno(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)))
+        }
+    }
+
+    /// BCH_IOCTL_REFLINK_MAP: stream one batch of reflink_p entries. The
+    /// cursor lives in `arg`; loop until `arg.done` is set.
+    pub(crate) fn reflink_map(&self, arg: &mut bch_ioctl_reflink_map) -> Result<(), Errno> {
+        let request = bch_ioc_wr::<bch_ioctl_reflink_map>(35);
         let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, arg as *mut _) };
         if ret == 0 {
             Ok(())
