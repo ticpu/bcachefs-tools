@@ -25,11 +25,16 @@
 // BCH_REV_MAP_RESOLVE_PATH path buffer round-trip per sample. After
 // sampling, extents samples are aggregated by distinct (inode, snapshot)
 // and reflink samples are resolved to their referencing (inode, snapshot)
-// set via the reflink map; both then share one BCH_IOCTL_INUM_TO_PATH
-// resolution pass and cache, since a filesystem tends to reuse the same
-// small set of inodes across many samples. This turns an O(samples) path
-// walk into O(distinct inodes), which dominates at scale (millions of
-// samples touching thousands of files).
+// set via the reflink map; both then share one resolution pass. Resolution
+// itself walks ancestors one step at a time via BCH_IOCTL_INUM_PARENT
+// (resolve_inum_to_path) instead of asking the kernel for a whole path per
+// inode: every ancestor it discovers is memoized in a shared AncestorCache
+// keyed on (inum, snapshot), so a directory shared by many sampled files
+// gets walked once and every other file under it splices onto the cached
+// prefix. This turns an O(samples) path walk into O(distinct inodes) the
+// same as before, but also collapses the O(distinct inodes * tree depth)
+// ancestor chain walks a whole-path-per-inode approach would repeat into
+// O(distinct ancestors) total ioctl calls.
 //
 // Sampling and resolution are each random-IO-bound (backpointer/reflink
 // btree reads, dirent/inode chain walks) and embarrassingly parallel across
@@ -55,18 +60,20 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bch_bindgen::accounting::data_type_from_u8;
 use bch_bindgen::c::{
-    bch_ioctl_inum_to_path, bch_ioctl_reflink_map, bch_ioctl_reflink_map_entry, bch_ioctl_rev_map,
+    bch_ioctl_inum_parent, bch_ioctl_reflink_map, bch_ioctl_reflink_map_entry, bch_ioctl_rev_map,
     btree_id, BCH_REV_MAP_RESOLVE_PATH,
 };
 use bcachefs_kernel::btree;
 use bcachefs_kernel::opts::prt_data_type;
 use bcachefs_kernel::util::printbuf::Printbuf;
 use clap::Parser;
+use errno::Errno;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -74,15 +81,18 @@ use rand::{Rng, SeedableRng};
 use crate::commands::device;
 use crate::commands::fs_du_tui;
 use crate::wrappers::handle::BcachefsHandle;
-use crate::wrappers::ioctl::bch_ioc_wr;
 use crate::wrappers::sysfs::{self, DevInfo};
 
-const BCH_IOCTL_INUM_TO_PATH_NR: u32 = 36;
 const DEFAULT_SAMPLES: u64 = 100_000;
-const PATH_BUF_SIZE: usize = 4096;
 const TREE_DEPTH: usize = 4;
 const TREE_TOP_K: usize = 15;
 const REFLINK_MAP_BATCH: usize = 4096;
+/// Name-buffer size for one BCH_IOCTL_INUM_PARENT step: NAME_MAX (255)
+/// plus a NUL terminator.
+const PARENT_NAME_BUF_SIZE: usize = 256;
+/// Ancestor-walk depth bound. A legitimate directory tree never gets close
+/// to this; exceeding it means a corrupt parent-chain loop.
+const MAX_PARENT_WALK_DEPTH: usize = 256;
 
 #[derive(Parser, Debug)]
 #[command(name = "du", about = "Disk usage statistics")]
@@ -364,14 +374,6 @@ pub(super) fn fmt_sectors(sectors: f64) -> String {
     pb.as_str().to_string()
 }
 
-fn extract_path(buf: &[u8]) -> Option<String> {
-    let nul = buf.iter().position(|&b| b == 0)?;
-    if nul == 0 {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&buf[..nul]).into_owned())
-}
-
 /// Decode a `background_target` value into a device or disk-group label.
 /// Mirrors `target_decode()` in fs/alloc/disk_groups.h (TARGET_NULL=0,
 /// TARGET_DEV_START=1, TARGET_GROUP_START=257). Group *names* require
@@ -569,42 +571,154 @@ pub(super) fn build_reflink_map(handle: &BcachefsHandle) -> Result<ReflinkMap> {
     Ok(ReflinkMap::build(refs))
 }
 
-/// Resolve (inum, snapshot) to a path and background_target via
-/// BCH_IOCTL_INUM_TO_PATH. `Ok(None)` means the inode is gone (ENOENT):
-/// the caller folds that referencer into `<reflink unreferenced>`.
-pub(super) fn resolve_inum_to_path(
-    handle: &BcachefsHandle,
-    inum: u64,
-    snapshot: u32,
-) -> Result<Option<(String, u16)>> {
-    let mut path_buf = vec![0u8; PATH_BUF_SIZE];
-    let mut arg = bch_ioctl_inum_to_path {
+/// Result of one BCH_IOCTL_INUM_PARENT step: the resolved inode's own name
+/// within its parent (`None` for the filesystem root) and its parent's
+/// (inum, snapshot), or `None` for the root's absent parent.
+struct ParentStep {
+    name: Option<String>,
+    parent_inum: u64,
+    parent_snapshot: u32,
+    background_target: u16,
+}
+
+/// One upward step of path resolution via BCH_IOCTL_INUM_PARENT. `Ok(None)`
+/// means the inode is missing or has no directory backpointer (ENOENT).
+fn inum_parent_step(handle: &BcachefsHandle, inum: u64, snapshot: u32) -> Result<Option<ParentStep>> {
+    let mut name_buf = vec![0u8; PARENT_NAME_BUF_SIZE];
+    let mut arg = bch_ioctl_inum_parent {
         inum,
         snapshot,
-        buf: path_buf.as_mut_ptr() as u64,
-        buf_size: path_buf.len() as u32,
+        buf: name_buf.as_mut_ptr() as u64,
+        buf_size: name_buf.len() as u32,
         ..Default::default()
     };
 
-    let request = bch_ioc_wr::<bch_ioctl_inum_to_path>(BCH_IOCTL_INUM_TO_PATH_NR);
-    let ret = unsafe { libc::ioctl(handle.ioctl_fd_raw(), request, &mut arg as *mut _) };
-
-    if ret < 0 {
-        let err = std::io::Error::last_os_error();
-        let raw = err.raw_os_error().unwrap_or(0);
-        if raw == libc::ENOENT {
-            return Ok(None);
-        }
-        if raw == libc::ERANGE {
-            // Path didn't fit `buf`; background_target is still valid, we
-            // just can't attribute a path (same as rev_map's handling).
-            return Ok(Some((String::new(), arg.background_target)));
-        }
-        return Err(err)
-            .with_context(|| format!("inum_to_path ioctl failed for inum {} snapshot {}", inum, snapshot));
+    if let Err(Errno(raw)) = handle.inum_parent(&mut arg) {
+        let err = std::io::Error::from_raw_os_error(raw);
+        return match raw {
+            libc::ENOENT => Ok(None),
+            libc::ENOTTY => Err(err).context(
+                "BCH_IOCTL_INUM_PARENT not supported by the loaded bcachefs module; \
+                 requires kernel commit 5aaded289 (\"bcachefs: add BCH_IOCTL_INUM_PARENT\") or later",
+            ),
+            libc::ERANGE => Err(err).with_context(|| {
+                format!("inum_parent ioctl: name buffer too small for inum {} snapshot {}", inum, snapshot)
+            }),
+            _ => Err(err)
+                .with_context(|| format!("inum_parent ioctl failed for inum {} snapshot {}", inum, snapshot)),
+        };
     }
 
-    Ok(Some((extract_path(&path_buf).unwrap_or_default(), arg.background_target)))
+    let name = if arg.name_len == 0 {
+        None
+    } else {
+        let len = arg.name_len as usize;
+        if len > name_buf.len() {
+            anyhow::bail!(
+                "inum_parent ioctl returned name_len {} exceeding the {}-byte buffer for inum {} snapshot {}",
+                len, name_buf.len(), inum, snapshot
+            );
+        }
+        Some(String::from_utf8_lossy(&name_buf[..len]).into_owned())
+    };
+
+    if name.is_none() && arg.parent_inum != 0 {
+        anyhow::bail!(
+            "inum_parent ioctl: inum {} snapshot {} has no name but a nonzero parent {} (inconsistent result)",
+            inum, snapshot, arg.parent_inum
+        );
+    }
+
+    Ok(Some(ParentStep {
+        name,
+        parent_inum: arg.parent_inum,
+        parent_snapshot: arg.parent_snapshot,
+        background_target: arg.background_target,
+    }))
+}
+
+/// Shared (inum, snapshot) -> full path memoization for ancestor-walk
+/// resolution, populated incrementally as `resolve_inum_to_path` walks up
+/// via BCH_IOCTL_INUM_PARENT. A directory tree tends to be visited by many
+/// files sharing the same ancestors, so memoizing every ancestor discovered
+/// along a walk turns repeated O(depth) walks into one shared walk plus a
+/// cache hit per file. Ioctl calls happen outside the lock: a racing
+/// duplicate walk from another thread just repeats work and overwrites with
+/// the same answer, which is cheaper than serializing walks behind it.
+pub(super) type AncestorCache = Mutex<HashMap<(u64, u32), Arc<str>>>;
+
+pub(super) fn new_ancestor_cache() -> AncestorCache {
+    Mutex::new(HashMap::new())
+}
+
+/// Resolve (inum, snapshot) to a path and background_target by walking
+/// ancestors one BCH_IOCTL_INUM_PARENT step at a time, splicing onto the
+/// first memoized ancestor found in `ancestors` (or the filesystem root)
+/// and memoizing every intermediate ancestor's path along the way.
+///
+/// `Ok(None)` means the inode is gone, has no directory backpointer, or the
+/// walk exceeded `MAX_PARENT_WALK_DEPTH` (a corrupt parent-chain loop): the
+/// caller folds that into `<unresolved>`/`<reflink unreferenced>`. The
+/// returned `background_target` always comes from the first step (the
+/// leaf's own), regardless of how far up the walk goes for its path.
+pub(super) fn resolve_inum_to_path(
+    handle: &BcachefsHandle,
+    ancestors: &AncestorCache,
+    inum: u64,
+    snapshot: u32,
+) -> Result<Option<(String, u16)>> {
+    let mut keys: Vec<(u64, u32)> = Vec::new();
+    let mut names: Vec<Option<String>> = Vec::new();
+    let mut background_target = 0u16;
+    let mut current = (inum, snapshot);
+    let mut base_path: Option<Arc<str>> = None;
+
+    for depth in 0..MAX_PARENT_WALK_DEPTH {
+        if depth > 0 {
+            let cached = ancestors.lock().unwrap().get(&current).cloned();
+            if let Some(p) = cached {
+                base_path = Some(p);
+                break;
+            }
+        }
+
+        let step = match inum_parent_step(handle, current.0, current.1)? {
+            None => return Ok(None),
+            Some(s) => s,
+        };
+        if depth == 0 {
+            background_target = step.background_target;
+        }
+
+        keys.push(current);
+        if step.parent_inum == 0 {
+            names.push(None);
+            base_path = Some(Arc::from("/"));
+            break;
+        }
+        names.push(step.name);
+        current = (step.parent_inum, step.parent_snapshot);
+    }
+
+    let Some(base_path) = base_path else {
+        // MAX_PARENT_WALK_DEPTH exceeded without hitting a cached ancestor
+        // or the root: a corrupt parent-chain loop, folded into unresolved
+        // like any other unwalkable inode.
+        return Ok(None);
+    };
+
+    let mut path = base_path.to_string();
+    for i in (0..keys.len()).rev() {
+        if let Some(name) = &names[i] {
+            if !path.ends_with('/') {
+                path.push('/');
+            }
+            path.push_str(name);
+        }
+        ancestors.lock().unwrap().insert(keys[i], Arc::from(path.as_str()));
+    }
+
+    Ok(Some((path, background_target)))
 }
 
 /// (inode, snapshot) -> resolved (path, background_target), or `None` for
@@ -612,8 +726,9 @@ pub(super) fn resolve_inum_to_path(
 pub(super) type PathCache = HashMap<(u64, u32), Option<(String, u16)>>;
 type PathCacheEntry = ((u64, u32), Option<(String, u16)>);
 
-/// Resolve a batch of distinct (inum, snapshot) keys via BCH_IOCTL_INUM_TO_PATH,
-/// fanned out across `n_threads` handles. Same random-IO-bound shape as
+/// Resolve a batch of distinct (inum, snapshot) keys via the
+/// BCH_IOCTL_INUM_PARENT ancestor walk, fanned out across `n_threads`
+/// handles sharing one `AncestorCache`. Same random-IO-bound shape as
 /// sampling, so the same per-thread-handle pattern applies.
 fn resolve_inums_parallel(fs_path: &str, keys: &[(u64, u32)], n_threads: usize) -> Result<PathCache> {
     if keys.is_empty() {
@@ -625,14 +740,16 @@ fn resolve_inums_parallel(fs_path: &str, keys: &[(u64, u32)], n_threads: usize) 
     let chunks: Vec<&[(u64, u32)]> = keys.chunks(chunk_size).collect();
 
     let handles = open_handles(fs_path, chunks.len(), "resolve")?;
+    let ancestors = new_ancestor_cache();
 
     std::thread::scope(|s| -> Result<PathCache> {
         let mut joins = Vec::with_capacity(chunks.len());
         for (handle, chunk) in handles.into_iter().zip(chunks) {
+            let ancestors = &ancestors;
             joins.push(s.spawn(move || -> Result<Vec<PathCacheEntry>> {
                 let mut out = Vec::with_capacity(chunk.len());
                 for &(inum, snapshot) in chunk {
-                    out.push(((inum, snapshot), resolve_inum_to_path(&handle, inum, snapshot)?));
+                    out.push(((inum, snapshot), resolve_inum_to_path(&handle, ancestors, inum, snapshot)?));
                 }
                 Ok(out)
             }));
@@ -666,11 +783,9 @@ pub(super) fn try_attribute(
     match path_cache.get(&key) {
         Some(Some((path, background_target))) => {
             *target_totals.entry(describe_target(*background_target, devs)).or_insert(0.0) += weight;
-            if path.starts_with('/') {
-                tree.insert_path(path, weight);
-            } else {
-                tree.insert_pseudo("<unresolved>", weight);
-            }
+            // `path` always starts with '/' by construction (see
+            // resolve_inum_to_path's ancestor walk).
+            tree.insert_path(path, weight);
             true
         }
         Some(None) => {

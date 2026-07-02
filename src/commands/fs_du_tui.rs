@@ -38,12 +38,15 @@
 // (their blocking recv() then errors out) - both are join()ed as scope()
 // returns, so no thread outlives the TUI.
 //
-// Pause ('p'): only affects sampler threads. A shared PauseState
-// (Mutex<bool> + Condvar) parks each sampler thread between ioctls rather
-// than having it busy-poll, so a paused TUI burns no CPU on sampling.
-// Resolvers are untouched by pause — they keep draining the work queue,
-// since resolving keys already sampled is useful progress independent of
-// whether new samples are being taken.
+// Pause ('p'): parks both sampler and resolver threads. A shared
+// PauseState (Mutex<bool> + Condvar) parks each thread between ioctls
+// rather than having it busy-poll, so a paused TUI does no IO/CPU at
+// all — the intended use case is a production server where "paused" must
+// mean zero load, not "stop taking new samples but keep draining the
+// resolve backlog for accuracy". Each loop checks pause at the top of its
+// iteration, before touching the work queue: an in-flight resolution
+// finishes its current key, then parks, so it never parks while holding
+// the receiver lock.
 //
 // Terminal restore: the crate builds with `panic = "abort"` in release
 // (fs/alloc catch_unwind can't safely swallow a libbcachefs-originated
@@ -74,7 +77,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use super::fs_du;
-use super::fs_du::{DeviceGeom, DirNode, PathCache, PerDeviceCounters, ReflinkMap, ThreadAccum};
+use super::fs_du::{AncestorCache, DeviceGeom, DirNode, PathCache, PerDeviceCounters, ReflinkMap, ThreadAccum};
 use crate::wrappers::handle::BcachefsHandle;
 use crate::wrappers::sysfs::DevInfo;
 
@@ -219,9 +222,24 @@ fn sampler_loop(
 
 /// Resolve (inum, snapshot) keys from a shared work queue until it closes
 /// (normal shutdown: the UI thread drops its Sender once it stops
-/// enqueueing new keys).
-fn resolver_loop(handle: &BcachefsHandle, work_rx: &Mutex<Receiver<(u64, u32)>>, tx: &Sender<ResolverMsg>) {
+/// enqueueing new keys). Parks on `pause` between keys while paused —
+/// checked before locking `work_rx`, never while holding it — so a paused
+/// TUI does no resolver IO either. A resolver parked at shutdown wakes via
+/// `pause.wait_while_paused`'s `stop` check, then falls through to `recv()`,
+/// which errors out once the UI thread has dropped the work-queue Sender
+/// (it always does so before setting `stop`), so quit-while-paused exits
+/// the same way as any other shutdown.
+fn resolver_loop(
+    handle: &BcachefsHandle,
+    work_rx: &Mutex<Receiver<(u64, u32)>>,
+    tx: &Sender<ResolverMsg>,
+    stop: &AtomicBool,
+    pause: &PauseState,
+    ancestors: &AncestorCache,
+) {
     loop {
+        pause.wait_while_paused(stop);
+
         let key = {
             let guard = match work_rx.lock() {
                 Ok(g) => g,
@@ -239,7 +257,7 @@ fn resolver_loop(handle: &BcachefsHandle, work_rx: &Mutex<Receiver<(u64, u32)>>,
             Err(_) => return, // channel closed: normal shutdown
         };
 
-        match fs_du::resolve_inum_to_path(handle, key.0, key.1) {
+        match fs_du::resolve_inum_to_path(handle, ancestors, key.0, key.1) {
             Ok(result) => {
                 if tx.send(ResolverMsg::Resolved { key, result }).is_err() {
                     return;
@@ -667,6 +685,7 @@ pub(super) fn run(
 
     let stop = AtomicBool::new(false);
     let pause = PauseState::new();
+    let ancestors = fs_du::new_ancestor_cache();
     let (sample_tx, sample_rx) = mpsc::channel::<SamplerMsg>();
     let (work_tx, work_rx) = mpsc::channel::<(u64, u32)>();
     let work_rx = Mutex::new(work_rx);
@@ -692,7 +711,10 @@ pub(super) fn run(
         for sh in &resolver_handles {
             let tx = resolve_tx.clone();
             let work_rx = &work_rx;
-            s.spawn(move || resolver_loop(sh, work_rx, &tx));
+            let stop = &stop;
+            let pause = &pause;
+            let ancestors = &ancestors;
+            s.spawn(move || resolver_loop(sh, work_rx, &tx, stop, pause, ancestors));
         }
         drop(resolve_tx);
 
@@ -703,9 +725,13 @@ pub(super) fn run(
         let result = run_ui(
             &devs, total_sectors, reflink_map, fs_path, seed, cwd, sample_rx, work_tx, resolve_rx, &pause,
         );
+        // work_tx is dropped by run_ui returning, above, before stop is set
+        // here: a resolver parked on pause wakes via the stop check below,
+        // then its recv() is guaranteed to see the Sender already gone.
         stop.store(true, Ordering::Relaxed);
-        // Wake a parked sampler thread immediately on shutdown, rather
-        // than leaving it blocked until a resume that will never come.
+        // Wake any parked sampler/resolver thread immediately on shutdown,
+        // rather than leaving it blocked until a resume that will never
+        // come.
         pause.cv.notify_all();
         result
     })
