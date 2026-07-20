@@ -1,3 +1,12 @@
+//! `bcachefs dump` / `undump`.
+//!
+//! Dump opens the fs with norecovery + nochanges, so the on-disk btrees are
+//! never mutated. Iteration still sees not-yet-replayed journal updates through
+//! the journal-keys overlay (btree_trans_peek_journal), so the alloc/btree walks
+//! are post-replay-equivalent even on an unclean fs -- a crash image with a
+//! committed-but-unflushed journal dumps the same live data a mount would recover.
+//! Full journal replay is deliberately not run so a damaged fs still opens.
+
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::Path;
