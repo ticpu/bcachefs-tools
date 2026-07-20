@@ -95,7 +95,7 @@ Device specific options:
 
   -f, --force
   -q, --quiet                  Only print errors
-  -v, --verbose                Verbose filesystem initialization
+  -v, --verbose                Print the full superblock after formatting
   -h, --help                   Display this help and exit
 
 Device specific options must come before corresponding devices, e.g.
@@ -151,6 +151,7 @@ struct FormatConfig {
     devices:         Vec<DevConfig>,
     force:           bool,
     quiet:           bool,
+    verbose:         bool,
     initialize:      bool,
     encrypted:       bool,
     no_passphrase:   bool,
@@ -234,6 +235,7 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
     let mut force = false;
     let mut no_passphrase = false;
     let mut quiet = false;
+    let mut verbose = false;
     let mut initialize = true;
     let mut encrypted = false;
     let mut passphrase_file: Option<String> = None;
@@ -391,7 +393,7 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
                 }
                 "force" => force = true,
                 "quiet" => quiet = true,
-                "verbose" => {}
+                "verbose" => verbose = true,
                 "help" => {
                     format_usage();
                     process::exit(0);
@@ -420,7 +422,7 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
                 }
                 b'f' => force = true,
                 b'q' => quiet = true,
-                b'v' => {}
+                b'v' => verbose = true,
                 b'h' => {
                     format_usage();
                     process::exit(0);
@@ -471,6 +473,7 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
         devices,
         force,
         quiet,
+        verbose,
         initialize,
         encrypted,
         no_passphrase,
@@ -633,13 +636,15 @@ fn cmd_format(argv: Vec<String>) -> Result<()> {
         bail!("format returned null");
     }
 
-    // Print superblock
-    if !cfg.quiet {
+    if cfg.verbose {
         let mut buf = Printbuf::new();
         buf.set_human_readable(true);
         let fields = sb_field_type::members_v2.bit();
         unsafe { crate::wrappers::sb_display::sb_to_text_with_names(&mut buf, std::ptr::null_mut(), &*sb, false, fields, -1) };
         print!("{}", buf);
+    } else if !cfg.quiet {
+        let uuid = uuid::Uuid::from_bytes(unsafe { (*sb).user_uuid.b });
+        println!("formatted {} ({} devices)", uuid, cfg.devices.len());
     }
     unsafe { libc::free(sb as *mut _) };
 
