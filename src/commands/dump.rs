@@ -1,5 +1,5 @@
 use bcachefs_kernel::alloc::background::alloc_to_v4;
-use bcachefs_kernel::format::{BkeyType, Btree, DataType};
+use bcachefs_kernel::format::{BkeyType, Btree};
 use bcachefs_kernel::fs::Dev;
 use bcachefs_kernel::sb::members::DevIoRef;
 use bcachefs_kernel::btree::bkey::prelude::*;
@@ -461,7 +461,7 @@ impl DumpDev {
         }
     }
 
-    fn all_ranges(&mut self) -> Ranges {
+    fn take_all_ranges(&mut self) -> Ranges {
         let mut ranges = Vec::new();
         ranges.append(&mut self.sb);
         ranges.append(&mut self.journal);
@@ -609,6 +609,7 @@ fn write_dev_image(
 }
 
 fn collect_data_buckets(fs: &Fs, devs: &mut [DumpDev], bucket_bytes: &[u64],
+                        first_bucket: &[u64], nbuckets: &[u64],
                         verbose: bool) -> Result<()> {
     let trans = bcachefs_kernel::btree_trans!(fs);
     let mut iter = btree::BtreeIter::new(
@@ -624,8 +625,22 @@ fn collect_data_buckets(fs: &Fs, devs: &mut [DumpDev], bucket_bytes: &[u64],
             return Ok(());
         }
 
-        if alloc_to_v4(k).data_type.get() != DataType::free {
-            range_add(&mut devs[dev].data, k.k.p.offset * bucket_bytes[dev], bucket_bytes[dev]);
+        // Offline members carry no bucket geometry (bucket_bytes == 0); their
+        // data can't be dumped and dump_fs warns about them separately.
+        if bucket_bytes[dev] == 0 {
+            return Ok(());
+        }
+
+        // A corrupt fs can hold alloc keys outside the device's bucket range;
+        // emitting them yields ranges past device end that kill the dump.
+        // Mirror bch2_alloc_read's [first_bucket, nbuckets) clamp.
+        let offset = k.k.p.offset;
+        if offset < first_bucket[dev] || offset >= nbuckets[dev] {
+            return Ok(());
+        }
+
+        if !alloc_to_v4(k).data_type.get().is_empty() {
+            range_add(&mut devs[dev].data, offset * bucket_bytes[dev], bucket_bytes[dev]);
         }
 
         Ok(())
@@ -657,6 +672,8 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool, str
 
     let mut nr_online = 0u32;
     let mut bucket_bytes: Vec<u64> = vec![0; nr_devices];
+    let mut first_bucket: Vec<u64> = vec![0; nr_devices];
+    let mut nbuckets: Vec<u64> = vec![0; nr_devices];
     for ca in fs.online_members() {
         if (sanitize || cli.single_replica) && (ca.mi.get().bucket_size as u32) % (block_size >> 9) != 0 {
             return Err(anyhow!("{} has unaligned buckets, cannot sanitize or de-replicate",
@@ -665,8 +682,18 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool, str
 
         let dev_idx = ca.dev_idx as usize;
         bucket_bytes[dev_idx] = (ca.mi.get().bucket_size as u64) << 9;
+        first_bucket[dev_idx] = ca.mi.get().first_bucket as u64;
+        nbuckets[dev_idx] = ca.mi.get().nbuckets;
         get_sb_journal(fs, &ca, entire_journal, &mut devs[dev_idx]);
         nr_online += 1;
+    }
+
+    // A present-but-offline member has no online geometry, so its data is
+    // silently absent from the dump; warn loudly per member so it isn't missed.
+    for (dev, &bytes) in bucket_bytes.iter().enumerate() {
+        if fs.dev_exists(dev as u32) && bytes == 0 {
+            eprintln!("WARNING: device {} is offline: its data is NOT included in this dump", dev);
+        }
     }
 
     // Walk all btree types (including dynamic) to collect metadata locations.
@@ -698,7 +725,7 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool, str
     }
 
     if !cli.metadata_only {
-        collect_data_buckets(fs, &mut devs, &bucket_bytes, cli.verbose)?;
+        collect_data_buckets(fs, &mut devs, &bucket_bytes, &first_bucket, &nbuckets, cli.verbose)?;
     }
 
     // Special case: streaming to stdout
@@ -725,7 +752,7 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool, str
 
         let infd = ca.bdev().fd();
         let d = &mut devs[ca.dev_idx as usize];
-        let mut ranges = d.all_ranges();
+        let mut ranges = d.take_all_ranges();
 
         qcow2::write_qcow2_stream(infd, stream_out.expect("stream fd"), block_size, &mut ranges)?;
         return Ok(());
@@ -757,11 +784,11 @@ fn cmd_dump(cli: DumpCli) -> Result<()> {
     };
 
     if sanitize && !cli.metadata_only {
-        return Err(anyhow!("--sanitize only applies with --metadata-only"));
+        return Err(anyhow!("--sanitize requires --metadata-only"));
     }
 
     if cli.single_replica && !cli.metadata_only {
-        return Err(anyhow!("--single-replica only applies with --metadata-only"));
+        return Err(anyhow!("--single-replica requires --metadata-only"));
     }
 
     if cli.device.is_some() && cli.output != "-" {
