@@ -1302,13 +1302,10 @@ When investigating damage before attempting repair:
   numbers, transaction names, and per-btree filtering. Essential for
   understanding what happened before a crash and for identifying journal
   rewind targets.
-\item[\texttt{bcachefs dump}] Writes each device to a sparse qcow2 image,
-  copying in-use buckets and skipping free space. The default full dump is a
-  faithful physical copy (preserving snapshots, subvolumes, reflinks,
-  compression, and per-file IO options) that relocates a filesystem via
-  \texttt{bcachefs undump}; \texttt{-m} restricts it to metadata for offline
-  analysis and bug reports. Encrypted filesystems must first have the
-  passphrase removed with \texttt{bcachefs remove-passphrase}.
+\item[\texttt{bcachefs dump}] Writes each device to a sparse qcow2 image
+  (see the \texttt{bcachefs dump} subsection); \texttt{-m} restricts it to
+  metadata for offline analysis and bug reports. Encrypted filesystems must
+  first have the passphrase removed with \texttt{bcachefs remove-passphrase}.
 \end{description}
 
 \subsubsection{Extent poisoning and data recovery}
