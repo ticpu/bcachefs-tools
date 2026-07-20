@@ -8,7 +8,7 @@
 //! Full journal replay is deliberately not run so a damaged fs still opens.
 
 use std::ops::ControlFlow;
-use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -1007,18 +1007,15 @@ fn cmd_dump(cli: DumpCli) -> Result<()> {
         if cli.single_replica {
             return Err(anyhow!("--single-replica is not supported with stdout output"));
         }
-        if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
+        if rustix::termios::isatty(rustix::stdio::stdout()) {
             return Err(anyhow!("refusing to write a qcow2 image to a terminal; redirect or pipe stdout"));
         }
 
-        let real = unsafe { libc::dup(libc::STDOUT_FILENO) };
-        if real < 0 {
-            return Err(anyhow!("dup stdout: {}", std::io::Error::last_os_error()));
-        }
-        if unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
-            return Err(anyhow!("redirect stdout: {}", std::io::Error::last_os_error()));
-        }
-        Some(unsafe { OwnedFd::from_raw_fd(real) })
+        let real = rustix::io::fcntl_dupfd_cloexec(rustix::stdio::stdout(), 0)
+            .map_err(|e| anyhow!("dup stdout: {}", e))?;
+        rustix::stdio::dup2_stdout(rustix::stdio::stderr())
+            .map_err(|e| anyhow!("redirect stdout: {}", e))?;
+        Some(real)
     } else {
         None
     };
