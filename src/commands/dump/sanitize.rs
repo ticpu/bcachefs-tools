@@ -49,12 +49,6 @@ fn bset_csum_set(fs: &Fs, buf: &mut [u8], first: bool, offset: u32) {
 
 // ---- Sanitize implementation ----
 
-/// Sanitize a bkey value region in-place. Returns true if modified.
-///
-///  - inline data, any type: its data zeroed, and its checksum, if it has one,
-///    set to none
-///  - dirent: d_inum(8), d_type(1), d_name — fill with 'X'
-///
 /// What the write path should do to each buffer before dumping it.
 #[derive(Clone, Copy)]
 pub(super) struct SanitizeOpts {
@@ -98,6 +92,10 @@ fn derep(fs: &Fs, k: BkeyS<'_, FamilyVal<AllTypes, Unvalidated>>) -> bool {
 /// filenames). Called for every key in both btree nodes and journal entries, so
 /// de-replication reaches the btree_root pointers carried in the journal as well
 /// as the interior/leaf pointers in btree nodes. Returns whether it modified.
+///
+/// - inline data, any type: its data zeroed, and its checksum, if it has one,
+///   set to none
+/// - dirent: d_inum(8), d_type(1), d_name — fill with 'X'
 fn sanitize_val(fs: &Fs, mut k: BkeyS<'_, FamilyVal<AllTypes, Unvalidated>>, opts: SanitizeOpts) -> bool {
     const BTREE_PTR:            BkeyType = BkeyType::btree_ptr;
     const BTREE_PTR_V2:         BkeyType = BkeyType::btree_ptr_v2;
