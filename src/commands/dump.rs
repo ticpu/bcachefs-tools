@@ -15,7 +15,7 @@ use bcachefs_kernel::opt_set;
 use bcachefs_kernel::POS_MIN;
 
 use crate::qcow2::{self, Qcow2Image, Ranges, range_add, ranges_sort};
-use crate::wrappers::accounting::{data_type_from_u8, data_type_is_empty};
+use crate::wrappers::accounting::{data_type, data_type_from_u8, data_type_is_empty};
 use crate::wrappers::super_io::vstruct_bytes_sb;
 
 // Crypto for the sanitize path. These drive the wrapped bch2_encrypt /
@@ -76,6 +76,24 @@ fn bset_magic(sb: &c::bch_sb) -> u64 {
 
 // ---- Dump CLI ----
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "snake_case")]
+enum IncludeBuckets {
+    Free,
+    NeedGcGens,
+    NeedDiscard,
+}
+
+impl IncludeBuckets {
+    fn as_c(self) -> c::bch_data_type {
+        match self {
+            Self::Free        => data_type::free,
+            Self::NeedGcGens  => data_type::need_gc_gens,
+            Self::NeedDiscard => data_type::need_discard,
+        }
+    }
+}
+
 /// Dump filesystem metadata and data to a qcow2 image (use --metadata-only for metadata-only debugging images)
 #[derive(Parser, Debug)]
 #[command(about = "Dump filesystem metadata and data to a qcow2 image")]
@@ -119,6 +137,10 @@ pub struct DumpCli {
     /// filesystem to stream (run once per device)
     #[arg(long = "device")]
     device: Option<u32>,
+
+    /// Dump these normally-empty bucket classes too (debug/forensics; `free` dumps every bucket in bounds)
+    #[arg(long = "include", value_delimiter = ',', value_enum)]
+    include: Vec<IncludeBuckets>,
 
     /// Devices to dump
     #[arg(required = true)]
@@ -739,6 +761,7 @@ fn write_dev_image(
 
 fn collect_data_buckets(fs: &Fs, devs: &mut [DumpDev], bucket_bytes: &[u64],
                         first_bucket: &[u64], nbuckets: &[u64],
+                        include: &[c::bch_data_type],
                         verbose: bool) -> Result<()> {
     let trans = btree::BtreeTrans::new(fs);
     let mut iter = btree::BtreeIter::new(
@@ -773,7 +796,8 @@ fn collect_data_buckets(fs: &Fs, devs: &mut [DumpDev], bucket_bytes: &[u64],
             c::__bch2_alloc_to_v4(c::bkey_s_c { k: k.k, v: k.v }, &mut v4);
         }
 
-        if !data_type_is_empty(data_type_from_u8(v4.data_type)) {
+        let dt = data_type_from_u8(v4.data_type);
+        if !data_type_is_empty(dt) || include.contains(&dt) {
             range_add(&mut devs[dev].data, offset * bucket_bytes[dev], bucket_bytes[dev]);
         }
 
@@ -872,7 +896,9 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool, str
     }
 
     if !cli.metadata_only {
-        collect_data_buckets(fs, &mut devs, &bucket_bytes, &first_bucket, &nbuckets, cli.verbose)?;
+        let include: Vec<c::bch_data_type> = cli.include.iter().map(|i| i.as_c()).collect();
+        collect_data_buckets(fs, &mut devs, &bucket_bytes, &first_bucket, &nbuckets,
+                             &include, cli.verbose)?;
     }
 
     // Special case: streaming to stdout
@@ -954,6 +980,10 @@ fn cmd_dump(cli: DumpCli) -> Result<()> {
 
     if cli.single_replica && !cli.metadata_only {
         return Err(anyhow!("--single-replica requires --metadata-only"));
+    }
+
+    if !cli.include.is_empty() && cli.metadata_only {
+        return Err(anyhow!("--include requires a full data dump (conflicts with --metadata-only)"));
     }
 
     if cli.device.is_some() && cli.output != "-" {
