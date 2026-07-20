@@ -102,12 +102,6 @@ fn vstruct_aligned_bytes(bytes: usize, block_bits: usize) -> usize {
     bytes.div_ceil(align) * align
 }
 
-/// Sanitize a bkey value region in-place. Returns true if modified.
-///
-/// On-disk value layout (bch_val = 0 bytes):
-///  - inline_data:          data at offset 0 — zero all
-///  - indirect_inline_data: refcount(8), data — zero data
-///  - dirent:               d_inum(8), d_type(1), d_name — fill with 'X'
 /// What the write path should do to each buffer before dumping it.
 #[derive(Clone, Copy)]
 pub(super) struct SanitizeOpts {
@@ -150,6 +144,11 @@ fn derep(fs: &Fs, mut k: BkeyS) -> bool {
 /// filenames). Called for every key in both btree nodes and journal entries, so
 /// de-replication reaches the btree_root pointers carried in the journal as well
 /// as the interior/leaf pointers in btree nodes. Returns whether it modified.
+///
+/// On-disk value layout (bch_val = 0 bytes):
+/// - inline_data:          data at offset 0 — zero all
+/// - indirect_inline_data: refcount(8), data — zero data
+/// - dirent:               d_inum(8), d_type(1), d_name — fill with 'X'
 fn sanitize_val(fs: &Fs, mut k: BkeyS, opts: SanitizeOpts) -> bool {
     const BTREE_PTR:            c::bch_bkey_type = c::bch_bkey_type::KEY_TYPE_btree_ptr;
     const BTREE_PTR_V2:         c::bch_bkey_type = c::bch_bkey_type::KEY_TYPE_btree_ptr_v2;
