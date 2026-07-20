@@ -306,6 +306,15 @@ pub fn qcow2_stream_to_raw(infd: BorrowedFd<'_>, outfd: BorrowedFd<'_>) -> Resul
     let bs = h.block_size as u64;
     let l2_size = h.block_size as usize / 8;
 
+    // The stream writer puts the L1 table right after the header cluster; the
+    // seek writer puts it at the end. Reject non-stream images here, before
+    // their data clusters get misparsed as tables.
+    if h.l1_table_offset != bs {
+        return Err(anyhow!(
+            "image is not in streaming layout: L1 table at {:#x}, expected {bs:#x}; save to a file and run `bcachefs undump <file.qcow2>`",
+            h.l1_table_offset));
+    }
+
     let mut discard = vec![0u8; h.block_size as usize - QCOW2_HDR_BYTES];
     read_exact_seq(infd, &mut discard)?;
 
@@ -866,5 +875,33 @@ mod tests {
         fs::remove_file(stream).unwrap();
         fs::remove_file(raw).unwrap();
         assert!(err.contains("compressed"), "{err}");
+    }
+
+    #[test]
+    fn stream_rejects_seek_written_image() {
+        let bs = 512u32;
+        let src_path = "target/qcow2-test-seekimg-src.img";
+        let image = "target/qcow2-test-seekimg.qcow2";
+        let raw = "target/qcow2-test-seekimg-raw.img";
+        make_src(src_path, 100000);
+
+        {
+            let infd = File::open(src_path).unwrap();
+            let outfd = File::create(image).unwrap();
+            let mut img = Qcow2Image::new(infd.as_fd(), outfd.as_fd(), bs).unwrap();
+            let mut ranges: Ranges = vec![1000..2000];
+            img.write_ranges(&mut ranges).unwrap();
+            img.finish().unwrap();
+        }
+
+        let infd = File::open(image).unwrap();
+        let outfd = OpenOptions::new().read(true).write(true).create(true).truncate(true)
+            .open(raw).unwrap();
+        let err = qcow2_stream_to_raw(infd.as_fd(), outfd.as_fd()).unwrap_err().to_string();
+
+        fs::remove_file(src_path).unwrap();
+        fs::remove_file(image).unwrap();
+        fs::remove_file(raw).unwrap();
+        assert!(err.contains("not in streaming layout"), "{err}");
     }
 }
