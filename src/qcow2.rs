@@ -4,8 +4,17 @@
 //!
 //! Used by `bcachefs dump` to create sparse metadata images and
 //! `bcachefs undump` to convert them back to raw device images.
+//!
+//! Streaming layout invariant (`write_qcow2_stream` / `qcow2_stream_to_raw`):
+//! clusters are emitted strictly forward with no seeking — header cluster,
+//! then the L1 table (padded to a cluster), then per used L1 index the L2
+//! table immediately followed by that group's data clusters. Every offset is
+//! therefore a deterministic function of the merged ranges, so the reader can
+//! validate each L1/L2 entry against the position it must hold and reject any
+//! image not written in this exact order (e.g. a seek-written file piped in).
+//! The seek-based `Qcow2Image` writer and the file-based `qcow2_to_raw` reader
+//! honor arbitrary offsets and are not bound by this invariant.
 
-use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::os::fd::BorrowedFd;
 
@@ -136,159 +145,252 @@ fn prepare_output(outfd: BorrowedFd, image_size: u64) -> Result<()> {
     }
 }
 
-struct SrcCluster { src_off: u64, l1_idx: u32, l2_idx: usize }
-struct L2Block   { l1_idx: u32, entries: Vec<u64> }
-
 /// Write a qcow2 image strictly forward (no seeking) to a pipe or file.
-/// Precomputes layout and emits header, L1, L2s, and data sequentially.
+///
+/// Two passes over the merged ranges: pass 1 counts data clusters per L2 group
+/// to assign each group's stream offset; pass 2 emits header, L1, then per used
+/// group its L2 table followed by that group's data. Memory is O(ranges + L1);
+/// no per-cluster bookkeeping. See the streaming layout invariant at the top of
+/// this file.
 pub fn write_qcow2_stream(infd: BorrowedFd, outfd: BorrowedFd, block_size: u32,
                           ranges: &mut Ranges) -> Result<()> {
     assert!(block_size.is_power_of_two());
 
-    ranges_roundup(ranges, block_size as u64);
+    let bs = block_size as u64;
+
+    ranges_roundup(ranges, bs);
     ranges_sort_merge(ranges);
 
     let image_size = file_size_fd(infd)?;
     let (l1_size, l2_size) = qcow2_geometry(block_size, image_size);
+    let group_bytes = bs * l2_size;
 
-    let mut src_clusters: Vec<SrcCluster> = Vec::new();
+    // Pass 1: data-cluster count per L2 group, then assign group offsets.
+    let mut counts = vec![0u32; l1_size];
     for r in ranges.iter() {
-        let mut src_off = r.start;
-        while src_off < r.end {
-            let src_blk = src_off / block_size as u64;
-            let l1_idx = (src_blk / l2_size) as u32;
-            let l2_idx = (src_blk % l2_size) as usize;
-            src_clusters.push(SrcCluster { src_off, l1_idx, l2_idx });
-            src_off += block_size as u64;
+        if r.start >= r.end {
+            continue;
+        }
+        let first_g = (r.start / group_bytes) as usize;
+        let last_g = ((r.end - 1) / group_bytes) as usize;
+        for (g, cnt) in counts.iter_mut().enumerate().take(last_g + 1).skip(first_g) {
+            let gw_start = g as u64 * group_bytes;
+            let gw_end = gw_start + group_bytes;
+            let cs = r.start.max(gw_start);
+            let ce = r.end.min(gw_end);
+            *cnt += ((ce - cs) / bs) as u32;
         }
     }
 
+    let l1_off = bs;
+    let l1_clusters = round_up(l1_size as u64 * 8, bs) / bs;
+    let data_start = l1_off + l1_clusters * bs;
+
     let mut l1_table = vec![0u64; l1_size];
-    let mut l2_tables: Vec<L2Block> = Vec::new();
-    let mut l1_idx_to_slot: HashMap<u32, usize> = HashMap::new();
-
-    let mut used_l1_indices: Vec<u32> = src_clusters.iter().map(|c| c.l1_idx)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    used_l1_indices.sort_unstable();
-
-    for (slot, l1_idx) in used_l1_indices.iter().enumerate() {
-        l1_idx_to_slot.insert(*l1_idx, slot);
-        l2_tables.push(L2Block { l1_idx: *l1_idx, entries: vec![0u64; l2_size as usize] });
+    let mut off = data_start;
+    for (g, &cnt) in counts.iter().enumerate() {
+        if cnt == 0 {
+            continue;
+        }
+        l1_table[g] = off | QCOW_OFLAG_COPIED;
+        off += bs * (1 + cnt as u64);
     }
 
-    let l1_off = block_size as u64;
-    let l1_clusters = round_up(l1_size as u64 * 8, block_size as u64) / block_size as u64;
-    let l2_region = l1_off + l1_clusters * block_size as u64;
-    let data_region = l2_region + (l2_tables.len() as u64) * block_size as u64;
+    let mut cluster = vec![0u8; block_size as usize];
+    let mut copybuf = vec![0u8; COPY_BUF_SIZE];
 
-    for (slot, blk) in l2_tables.iter().enumerate() {
-        l1_table[blk.l1_idx as usize] = (l2_region + slot as u64 * block_size as u64) | QCOW_OFLAG_COPIED;
-    }
-
-    for (n, c) in src_clusters.iter().enumerate() {
-        let data_off = data_region + n as u64 * block_size as u64;
-        let slot = l1_idx_to_slot[&c.l1_idx];
-        l2_tables[slot].entries[c.l2_idx] = data_off | QCOW_OFLAG_COPIED;
-    }
-
-    let mut buf = vec![0u8; block_size as usize];
-
-    buf.fill(0);
-    encode_header(&mut buf, QCOW_MAGIC, QCOW_VERSION, block_size.trailing_zeros(),
+    encode_header(&mut cluster, QCOW_MAGIC, QCOW_VERSION, block_size.trailing_zeros(),
                   image_size, l1_size as u32, l1_off);
-    write_all_seq(outfd, &buf)?;
+    write_all_seq(outfd, &cluster)?;
 
     let l1_bytes: Vec<u8> = l1_table.iter().flat_map(|v| v.to_be_bytes()).collect();
     write_all_seq(outfd, &l1_bytes)?;
-    let l1_pad = (l1_clusters * block_size as u64) as usize - l1_bytes.len();
-    buf.fill(0);
-    write_all_seq(outfd, &buf[..l1_pad])?;
+    let l1_pad = (l1_clusters * bs) as usize - l1_bytes.len();
+    copybuf[..l1_pad].fill(0);
+    write_all_seq(outfd, &copybuf[..l1_pad])?;
 
-    for blk in &l2_tables {
-        buf.fill(0);
-        pack_l2(&mut buf, &blk.entries);
-        write_all_seq(outfd, &buf)?;
-    }
+    // Pass 2: emit each used group's L2 table then its data clusters.
+    // A cursor (ri, cur) tracks the next unprocessed source offset across the
+    // sorted ranges; a range straddling a group boundary keeps the cursor.
+    let mut stream_pos = data_start;
+    let mut ri = 0usize;
+    let mut cur = ranges.first().map(|r| r.start).unwrap_or(0);
 
-    for c in &src_clusters {
-        pread_exact(infd, &mut buf, c.src_off)?;
-        write_all_seq(outfd, &buf)?;
+    for (g, &cnt) in counts.iter().enumerate() {
+        if cnt == 0 {
+            continue;
+        }
+        let l2_off = l1_table[g] & !QCOW_OFLAG_COPIED;
+        let data_base = l2_off + bs;
+        let gw_end = (g as u64 + 1) * group_bytes;
+
+        // Build the L2 table via a non-advancing sub-walk of this group's clusters.
+        cluster.fill(0);
+        let (mut lri, mut lcur) = (ri, cur);
+        let mut k = 0u64;
+        loop {
+            if lri >= ranges.len() {
+                break;
+            }
+            if lcur >= ranges[lri].end {
+                lri += 1;
+                if lri < ranges.len() {
+                    lcur = ranges[lri].start;
+                }
+                continue;
+            }
+            if lcur >= gw_end {
+                break;
+            }
+            let l2_idx = (lcur / bs % l2_size) as usize;
+            let entry = (data_base + k * bs) | QCOW_OFLAG_COPIED;
+            cluster[l2_idx * 8..l2_idx * 8 + 8].copy_from_slice(&entry.to_be_bytes());
+            k += 1;
+            lcur += bs;
+        }
+        debug_assert_eq!(k, cnt as u64);
+        write_all_seq(outfd, &cluster)?;
+        stream_pos += bs;
+
+        // Emit data: contiguous clusters within a clipped range are contiguous
+        // in both source and stream, so copy them in COPY_BUF_SIZE chunks.
+        let mut k2 = 0u64;
+        loop {
+            if ri >= ranges.len() {
+                break;
+            }
+            if cur >= ranges[ri].end {
+                ri += 1;
+                if ri < ranges.len() {
+                    cur = ranges[ri].start;
+                }
+                continue;
+            }
+            if cur >= gw_end {
+                break;
+            }
+            let seg_end = ranges[ri].end.min(gw_end);
+            let mut p = cur;
+            while p < seg_end {
+                let chunk = (seg_end - p).min(COPY_BUF_SIZE as u64);
+                // ranges_roundup may push past a non-block-aligned image_size;
+                // read what exists and zero-fill the cluster tail.
+                let avail = image_size.saturating_sub(p).min(chunk);
+                pread_exact(infd, &mut copybuf[..avail as usize], p)?;
+                copybuf[avail as usize..chunk as usize].fill(0);
+                write_all_seq(outfd, &copybuf[..chunk as usize])?;
+                stream_pos += chunk;
+                k2 += chunk / bs;
+                p += chunk;
+            }
+            cur = seg_end;
+        }
+        debug_assert_eq!(k2, cnt as u64);
     }
+    debug_assert_eq!(stream_pos, off);
 
     Ok(())
 }
 
 /// Convert a qcow2 image from stdin (pipe) to a raw device.
-/// Reads header, L1, L2, and data sequentially without seeking input.
+///
+/// Reads header, L1, L2, and data sequentially without seeking input, and
+/// validates that every L1/L2 entry points at the exact position the streaming
+/// layout requires. Any image not written by `write_qcow2_stream` (e.g. a
+/// seek-written file piped in) is rejected rather than silently mis-restored.
 pub fn qcow2_stream_to_raw(infd: BorrowedFd<'_>, outfd: BorrowedFd<'_>) -> Result<()> {
     let mut hdr_buf = [0u8; QCOW2_HDR_BYTES];
     read_exact_seq(infd, &mut hdr_buf)?;
+    let h = decode_validated_header(&hdr_buf)?;
 
-    let magic = read_be_u32(&hdr_buf, 0);
-    let version = read_be_u32(&hdr_buf, 4);
-    if magic != QCOW_MAGIC {
-        return Err(anyhow!("not a qcow2 image"));
-    }
-    if version != QCOW_VERSION {
-        return Err(anyhow!("incorrect qcow2 version"));
-    }
+    let bs = h.block_size as u64;
+    let l2_size = h.block_size as usize / 8;
 
-    let block_bits = read_be_u32(&hdr_buf, 20);
-    if !(9..=24).contains(&block_bits) {
-        return Err(anyhow!("qcow2: implausible block_bits {block_bits}"));
-    }
-    let block_size = 1u32 << block_bits;
-
-    let image_size = read_be_u64(&hdr_buf, 24);
-    let l1_size = read_be_u32(&hdr_buf, 36) as usize;
-
-    let (expected_l1, _) = qcow2_geometry(block_size, image_size);
-    if l1_size != expected_l1 {
-        return Err(anyhow!("qcow2: l1_size {l1_size} inconsistent with image size"));
-    }
-
-    let l2_size = block_size as usize / 8;
-
-    let mut discard = vec![0u8; block_size as usize - QCOW2_HDR_BYTES];
+    let mut discard = vec![0u8; h.block_size as usize - QCOW2_HDR_BYTES];
     read_exact_seq(infd, &mut discard)?;
 
-    prepare_output(outfd, image_size)?;
+    prepare_output(outfd, h.image_size)?;
 
-    // Read L1 table
-    let mut l1_buf = vec![0u8; l1_size * 8];
+    let mut l1_buf = vec![0u8; h.l1_size * 8];
     read_exact_seq(infd, &mut l1_buf)?;
 
-    let l1_clusters = round_up(l1_size as u64 * 8, block_size as u64) / block_size as u64;
-    let l1_pad = (l1_clusters * block_size as u64) as usize - l1_size * 8;
+    let l1_clusters = round_up(h.l1_size as u64 * 8, bs) / bs;
+    let l1_pad = (l1_clusters * bs) as usize - h.l1_size * 8;
     discard.resize(l1_pad, 0);
     read_exact_seq(infd, &mut discard)?;
 
-    // Read L2 tables in ascending l1_idx order
-    let mut l2_tables: Vec<(usize, Vec<u64>)> = Vec::new();
-    for i in 0..l1_size {
+    // Expected stream offset of the next unread cluster.
+    let mut pos = bs + l1_clusters * bs;
+
+    let mut l2_buf = vec![0u8; h.block_size as usize];
+    let mut copybuf = vec![0u8; COPY_BUF_SIZE];
+
+    for i in 0..h.l1_size {
         let l1_entry = read_be_u64(&l1_buf, i * 8);
-        if l1_entry != 0 {
-            let mut l2_buf = vec![0u8; block_size as usize];
-            read_exact_seq(infd, &mut l2_buf)?;
-
-            let mut l2_entries = Vec::with_capacity(l2_size);
-            for j in 0..l2_size {
-                l2_entries.push(read_be_u64(&l2_buf, j * 8));
-            }
-            l2_tables.push((i, l2_entries));
+        if l1_entry == 0 {
+            continue;
         }
-    }
+        if l1_entry & QCOW_OFLAG_COMPRESSED != 0 {
+            return Err(anyhow!(
+                "qcow2 L1 entry {i} has the compressed flag set ({l1_entry:#018x}); compressed images are unsupported"));
+        }
+        let l2_off = l1_entry & !QCOW_OFLAG_COPIED;
+        if l2_off != pos {
+            return Err(anyhow!(
+                "image is not in streaming layout: L1 entry {i} points to L2 at {l2_off:#x}, expected {pos:#x}; save to a file and run `bcachefs undump <file.qcow2>`"));
+        }
+        read_exact_seq(infd, &mut l2_buf)?;
+        pos += bs;
 
-    // Read data clusters in ascending (l1_idx, l2_idx) order
-    let mut data_buf = vec![0u8; block_size as usize];
-    for (i, l2_entries) in &l2_tables {
-        for (j, entry) in l2_entries.iter().enumerate() {
-            if *entry != 0 {
-                read_exact_seq(infd, &mut data_buf)?;
-                let dst_offset = (*i as u64 * l2_size as u64 + j as u64) * block_size as u64;
-                pwrite_all(outfd, &data_buf, dst_offset)?;
+        // Coalesce each maximal run of consecutive nonzero L2 entries into one
+        // read + one pwrite; validate every entry against its required offset.
+        let mut j = 0usize;
+        while j < l2_size {
+            if read_be_u64(&l2_buf, j * 8) == 0 {
+                j += 1;
+                continue;
+            }
+            let run_start = j;
+            let mut run_clusters = 0u64;
+            while j < l2_size {
+                let entry = read_be_u64(&l2_buf, j * 8);
+                if entry == 0 {
+                    break;
+                }
+                if entry & QCOW_OFLAG_COMPRESSED != 0 {
+                    return Err(anyhow!(
+                        "qcow2 L2 entry [{i}][{j}] has the compressed flag set ({entry:#018x}); compressed images are unsupported"));
+                }
+                let off = entry & !QCOW_OFLAG_COPIED;
+                let expected = pos + run_clusters * bs;
+                if off != expected {
+                    return Err(anyhow!(
+                        "image is not in streaming layout: L2 entry [{i}][{j}] points to {off:#x}, expected {expected:#x}; save to a file and run `bcachefs undump <file.qcow2>`"));
+                }
+                run_clusters += 1;
+                j += 1;
+            }
+
+            let dst_base = (i as u64 * l2_size as u64 + run_start as u64) * bs;
+            if dst_base >= h.image_size {
+                return Err(anyhow!(
+                    "qcow2 L2 entry [{i}][{run_start}] maps to {dst_base:#x}, past image size {:#x}", h.image_size));
+            }
+            let total = run_clusters * bs;
+            let mut done = 0u64;
+            while done < total {
+                let chunk = (total - done).min(COPY_BUF_SIZE as u64);
+                read_exact_seq(infd, &mut copybuf[..chunk as usize])?;
+                let dst = dst_base + done;
+                // Destination may end mid-cluster; clamp the final write.
+                let writable = h.image_size.saturating_sub(dst).min(chunk);
+                if writable == 0 {
+                    return Err(anyhow!(
+                        "qcow2 data cluster maps to {dst:#x}, past image size {:#x}", h.image_size));
+                }
+                pwrite_all(outfd, &copybuf[..writable as usize], dst)?;
+                done += chunk;
+                pos += chunk;
             }
         }
     }
@@ -301,6 +403,13 @@ pub fn qcow2_stream_to_raw(infd: BorrowedFd<'_>, outfd: BorrowedFd<'_>) -> Resul
 const QCOW_MAGIC: u32 = (b'Q' as u32) << 24 | (b'F' as u32) << 16 | (b'I' as u32) << 8 | 0xfb;
 const QCOW_VERSION: u32 = 2;
 const QCOW_OFLAG_COPIED: u64 = 1 << 63;
+const QCOW_OFLAG_COMPRESSED: u64 = 1 << 62;
+
+// Validation limits for untrusted (piped/on-disk) qcow2 headers.
+const QCOW2_MAX_BLOCK_BITS: u32 = 21; // qemu's MAX_CLUSTER_BITS
+const QCOW2_MAX_IMAGE_SIZE: u64 = 1 << 50; // 1 PiB
+const QCOW2_MAX_L1_BYTES: u64 = 1 << 30; // 1 GiB; a pipe reader must hold the whole L1
+const COPY_BUF_SIZE: usize = 4 << 20; // >= any valid block_size (<= 2 MiB)
 
 // Header field offsets and sizes (all big-endian on disk):
 //   magic:                  u32   @ 0
@@ -341,6 +450,63 @@ fn read_be_u32(buf: &[u8], off: usize) -> u32 {
 
 fn read_be_u64(buf: &[u8], off: usize) -> u64 {
     u64::from_be_bytes(buf[off..off + 8].try_into().unwrap())
+}
+
+#[cfg_attr(test, derive(Debug))]
+struct Qcow2Header {
+    block_size:      u32,
+    image_size:      u64,
+    l1_size:         usize,
+    l1_table_offset: u64,
+}
+
+/// Parse and validate a qcow2 header from at least the first `QCOW2_HDR_BYTES`.
+/// Shared by both readers so untrusted input is checked identically.
+fn decode_validated_header(hdr: &[u8]) -> Result<Qcow2Header> {
+    let magic = read_be_u32(hdr, 0);
+    if magic != QCOW_MAGIC {
+        return Err(anyhow!("not a qcow2 image: magic {magic:#010x} != {QCOW_MAGIC:#010x}"));
+    }
+    let version = read_be_u32(hdr, 4);
+    if version != QCOW_VERSION {
+        return Err(anyhow!("unsupported qcow2 version {version}, expected {QCOW_VERSION}"));
+    }
+    let backing_file_offset = read_be_u64(hdr, 8);
+    if backing_file_offset != 0 {
+        return Err(anyhow!(
+            "qcow2 backing files are unsupported: backing_file_offset {backing_file_offset:#x}"));
+    }
+    let block_bits = read_be_u32(hdr, 20);
+    if !(9..=QCOW2_MAX_BLOCK_BITS).contains(&block_bits) {
+        return Err(anyhow!(
+            "qcow2 block_bits {block_bits} out of range 9..={QCOW2_MAX_BLOCK_BITS}"));
+    }
+    let block_size = 1u32 << block_bits;
+
+    let image_size = read_be_u64(hdr, 24);
+    if image_size > QCOW2_MAX_IMAGE_SIZE {
+        return Err(anyhow!(
+            "qcow2 image size {image_size:#x} exceeds limit {QCOW2_MAX_IMAGE_SIZE:#x}"));
+    }
+    let crypt_method = read_be_u32(hdr, 32);
+    if crypt_method != 0 {
+        return Err(anyhow!("qcow2 encryption is unsupported: crypt_method {crypt_method}"));
+    }
+
+    let l1_size = read_be_u32(hdr, 36) as usize;
+    let (expected_l1, _) = qcow2_geometry(block_size, image_size);
+    if l1_size != expected_l1 {
+        return Err(anyhow!(
+            "qcow2 l1_size {l1_size} inconsistent with image size {image_size:#x} (expected {expected_l1})"));
+    }
+    let l1_bytes = l1_size as u64 * 8;
+    if l1_bytes > QCOW2_MAX_L1_BYTES {
+        return Err(anyhow!(
+            "qcow2 L1 table {l1_bytes} bytes exceeds limit {QCOW2_MAX_L1_BYTES}"));
+    }
+
+    let l1_table_offset = read_be_u64(hdr, 40);
+    Ok(Qcow2Header { block_size, image_size, l1_size, l1_table_offset })
 }
 
 // ---- Qcow2Image ----
@@ -484,36 +650,18 @@ impl<'fd> Qcow2Image<'fd> {
 pub fn qcow2_to_raw(infd: BorrowedFd<'_>, outfd: BorrowedFd<'_>) -> Result<()> {
     let mut hdr_buf = [0u8; QCOW2_HDR_BYTES];
     pread_exact(infd, &mut hdr_buf, 0)?;
+    let h = decode_validated_header(&hdr_buf)?;
 
-    let magic = read_be_u32(&hdr_buf, 0);
-    let version = read_be_u32(&hdr_buf, 4);
-    if magic != QCOW_MAGIC {
-        return Err(anyhow!("not a qcow2 image"));
-    }
-    if version != QCOW_VERSION {
-        return Err(anyhow!("incorrect qcow2 version"));
-    }
-
-    let block_bits = read_be_u32(&hdr_buf, 20);
-    if !(9..=24).contains(&block_bits) {
-        return Err(anyhow!("qcow2: implausible block_bits {block_bits}"));
-    }
-    let block_size = 1u32 << block_bits;
-
-    let image_size = read_be_u64(&hdr_buf, 24);
-    let l1_size = read_be_u32(&hdr_buf, 36) as usize;
-
-    let (expected_l1, _) = qcow2_geometry(block_size, image_size);
-    if l1_size != expected_l1 {
-        return Err(anyhow!("qcow2: l1_size {l1_size} inconsistent with image size"));
-    }
+    let block_size = h.block_size;
+    let image_size = h.image_size;
+    let l1_size = h.l1_size;
 
     prepare_output(outfd, image_size)?;
 
     let l2_size = block_size as usize / 8;
 
     // Read L1 table
-    let l1_offset = read_be_u64(&hdr_buf, 40);
+    let l1_offset = h.l1_table_offset;
     let mut l1_buf = vec![0u8; l1_size * 8];
     pread_exact(infd, &mut l1_buf, l1_offset)?;
 
@@ -559,5 +707,164 @@ fn file_size_fd(fd: BorrowedFd<'_>) -> Result<u64> {
         Ok(unsafe { rustix::ioctl::ioctl(fd, Getter::<BLKGETSIZE64, u64>::new()) }?)
     } else {
         Ok(stat.st_size as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, File, OpenOptions};
+    use std::os::fd::AsFd;
+
+    use super::*;
+
+    fn pattern(i: usize) -> u8 {
+        (i.wrapping_mul(2246822519) >> 13) as u8
+    }
+
+    fn make_src(path: &str, size: usize) -> Vec<u8> {
+        let data: Vec<u8> = (0..size).map(pattern).collect();
+        fs::write(path, &data).unwrap();
+        data
+    }
+
+    // Write a stream, read it back through the sequential reader, return the raw output.
+    fn stream_round_trip(name: &str, src: &str, block_size: u32, ranges: &mut Ranges) -> Vec<u8> {
+        let stream = format!("target/qcow2-test-{name}-stream.qcow2");
+        let raw = format!("target/qcow2-test-{name}-raw.img");
+
+        {
+            let infd = File::open(src).unwrap();
+            let outfd = File::create(&stream).unwrap();
+            write_qcow2_stream(infd.as_fd(), outfd.as_fd(), block_size, ranges).unwrap();
+        }
+        {
+            let infd = File::open(&stream).unwrap();
+            let outfd = OpenOptions::new().read(true).write(true).create(true).truncate(true)
+                .open(&raw).unwrap();
+            qcow2_stream_to_raw(infd.as_fd(), outfd.as_fd()).unwrap();
+        }
+
+        let out = fs::read(&raw).unwrap();
+        fs::remove_file(&stream).unwrap();
+        fs::remove_file(&raw).unwrap();
+        out
+    }
+
+    fn expected_raw(src: &[u8], ranges: &Ranges) -> Vec<u8> {
+        let mut exp = vec![0u8; src.len()];
+        for r in ranges {
+            let end = r.end.min(src.len() as u64);
+            for o in r.start..end {
+                exp[o as usize] = src[o as usize];
+            }
+        }
+        exp
+    }
+
+    #[test]
+    fn round_trip_straddling_and_unaligned() {
+        let bs = 512u32; // group = bs * (bs/8) = 32768 bytes
+        let src_path = "target/qcow2-test-straddle-src.img";
+        let image_size = 165000usize; // not block-aligned
+        let src = make_src(src_path, image_size);
+
+        // group boundaries at 32768: [30000,40000) straddles g0/g1; empty g3.
+        let mut ranges: Ranges = vec![
+            30000..40000,
+            70000..71000,
+            140000..141000,
+            164000..165000,
+        ];
+        let out = stream_round_trip("straddle", src_path, bs, &mut ranges);
+        // ranges is now rounded + merged; rebuild the expected raw from it.
+        let exp = expected_raw(&src, &ranges);
+
+        fs::remove_file(src_path).unwrap();
+        assert_eq!(out.len(), image_size);
+        assert_eq!(out, exp);
+    }
+
+    #[test]
+    fn round_trip_empty_ranges() {
+        let bs = 512u32;
+        let src_path = "target/qcow2-test-empty-src.img";
+        let image_size = 100000usize;
+        make_src(src_path, image_size);
+
+        let mut ranges: Ranges = vec![];
+        let out = stream_round_trip("empty", src_path, bs, &mut ranges);
+
+        fs::remove_file(src_path).unwrap();
+        assert_eq!(out.len(), image_size);
+        assert!(out.iter().all(|&b| b == 0));
+    }
+
+    fn valid_header(block_bits: u32, image_size: u64, l1_size: u32) -> [u8; QCOW2_HDR_BYTES] {
+        let mut hdr = [0u8; QCOW2_HDR_BYTES];
+        encode_header(&mut hdr, QCOW_MAGIC, QCOW_VERSION, block_bits, image_size, l1_size, 512);
+        hdr
+    }
+
+    #[test]
+    fn header_valid_accepted() {
+        let (l1, _) = qcow2_geometry(512, 100000);
+        let hdr = valid_header(9, 100000, l1 as u32);
+        assert!(decode_validated_header(&hdr).is_ok());
+    }
+
+    #[test]
+    fn header_rejects_oversized_block_bits() {
+        let hdr = valid_header(22, 100000, 0);
+        let err = decode_validated_header(&hdr).unwrap_err().to_string();
+        assert!(err.contains("block_bits"), "{err}");
+    }
+
+    #[test]
+    fn header_rejects_huge_image_size() {
+        let hdr = valid_header(9, QCOW2_MAX_IMAGE_SIZE + 1, 0);
+        let err = decode_validated_header(&hdr).unwrap_err().to_string();
+        assert!(err.contains("image size"), "{err}");
+    }
+
+    #[test]
+    fn header_rejects_l1_size_mismatch() {
+        let hdr = valid_header(9, 100000, 999);
+        let err = decode_validated_header(&hdr).unwrap_err().to_string();
+        assert!(err.contains("l1_size"), "{err}");
+    }
+
+    #[test]
+    fn stream_rejects_compressed_entry() {
+        let bs = 512u32;
+        let src_path = "target/qcow2-test-compressed-src.img";
+        let stream = "target/qcow2-test-compressed-stream.qcow2";
+        let raw = "target/qcow2-test-compressed-raw.img";
+        make_src(src_path, 100000);
+
+        {
+            let infd = File::open(src_path).unwrap();
+            let outfd = File::create(stream).unwrap();
+            let mut ranges: Ranges = vec![1000..2000];
+            write_qcow2_stream(infd.as_fd(), outfd.as_fd(), bs, &mut ranges).unwrap();
+        }
+
+        // Set the compressed flag on the first (nonzero) L1 entry, at byte l1_off = bs.
+        let mut bytes = fs::read(stream).unwrap();
+        let l1_off = bs as usize;
+        let mut entry = u64::from_be_bytes(bytes[l1_off..l1_off + 8].try_into().unwrap());
+        assert_ne!(entry, 0);
+        entry |= QCOW_OFLAG_COMPRESSED;
+        bytes[l1_off..l1_off + 8].copy_from_slice(&entry.to_be_bytes());
+        fs::write(stream, &bytes).unwrap();
+
+        let infd = File::open(stream).unwrap();
+        let outfd = OpenOptions::new().read(true).write(true).create(true).truncate(true)
+            .open(raw).unwrap();
+        let err = qcow2_stream_to_raw(infd.as_fd(), outfd.as_fd()).unwrap_err().to_string();
+
+        fs::remove_file(src_path).unwrap();
+        fs::remove_file(stream).unwrap();
+        fs::remove_file(raw).unwrap();
+        assert!(err.contains("compressed"), "{err}");
     }
 }
