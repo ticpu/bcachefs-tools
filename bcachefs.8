@@ -812,6 +812,13 @@ When streaming to stdout
 .Pf ( Fl o Ar - ) ,
 select which device of a multi-device filesystem to stream (run once per device
 to transfer all devices).
+.It Fl -include Ar classes
+Comma-separated normally-empty bucket classes to dump too
+.Pf ( Cm free , Cm need_gc_gens , Cm need_discard ) ,
+for debug or forensics;
+.Cm free
+dumps every bucket in bounds. Requires a full data dump (conflicts with
+.Fl m ) .
 .El
 .Pp
 Example: stream a two-device filesystem over ssh (run once per device):
