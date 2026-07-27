@@ -92,6 +92,7 @@ pub mod counters;
 pub mod damage;
 pub mod data_read;
 pub mod device;
+pub mod exporter;
 pub mod dump;
 pub mod format;
 pub mod format_util;
@@ -214,7 +215,7 @@ pub fn defers_shrinkers(name: &str) -> bool {
 
 static FS_CMD: CmdDef = CmdDef {
     name: "fs", about: "Manage a running filesystem", aliases: &[],
-    kind: CmdKind::Group { children: &[&fs_usage::CMD, &fs_failure_domains::CMD, &top::CMD, &timestats::CMD] },
+    kind: CmdKind::Group { children: &[&fs_usage::CMD, &fs_failure_domains::CMD, &top::CMD, &timestats::CMD, &exporter::CMD] },
 };
 
 // ── Version (no module, trivial) ─────────────────────────────────────
