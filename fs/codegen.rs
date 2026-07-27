@@ -576,6 +576,27 @@ fn generate_value_table(name: &str, entries: &[Vec<String>]) -> String {
     out
 }
 
+/// Adjacent C string literals concatenate; Rust's do not. Returns the joined
+/// contents, ready to sit inside one Rust literal.
+fn join_c_string_literals(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_str = false;
+    let mut escaped = false;
+    for ch in s.chars() {
+        if !in_str {
+            in_str = ch == '"';
+            continue;
+        }
+        match ch {
+            _ if escaped => { out.push(ch); escaped = false; }
+            '\\' => { out.push(ch); escaped = true; }
+            '"' => in_str = false,
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 fn generate_counter_table(entries: &[Vec<String>]) -> String {
     let mut out = String::new();
     out.push_str("// Auto-generated from BCH_PERSISTENT_COUNTERS() — do not edit\n\n");
@@ -583,14 +604,17 @@ fn generate_counter_table(entries: &[Vec<String>]) -> String {
     out.push_str("    pub name: &'static str,\n");
     out.push_str("    pub stable_id: u16,\n");
     out.push_str("    pub is_sectors: bool,\n");
+    out.push_str("    pub desc: &'static str,\n");
     out.push_str("}\n\n");
     out.push_str("pub const COUNTERS: &[CounterInfo] = &[\n");
     for e in entries {
         let name = &e[0];
         let stable_id = &e[1];
         let is_sectors = e[2].contains("TYPE_SECTORS");
+        let desc = join_c_string_literals(e.get(3).map(String::as_str).unwrap_or(""));
         out.push_str(&format!(
-            "    CounterInfo {{ name: \"{name}\", stable_id: {stable_id}, is_sectors: {is_sectors} }},\n"
+            "    CounterInfo {{ name: \"{name}\", stable_id: {stable_id}, \
+             is_sectors: {is_sectors}, desc: \"{desc}\" }},\n"
         ));
     }
     out.push_str("];\n");
