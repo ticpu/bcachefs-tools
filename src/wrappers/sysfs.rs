@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 
 use crate::device_multipath::preferred_multipath_devnode_for_block_name;
 
@@ -156,4 +158,65 @@ pub fn fs_get_devices(
     }
     devs.sort_by_key(|d| d.idx);
     Ok(devs)
+}
+
+/// Per-device IO totals from `dev-N/io_done`, in bytes.
+///
+/// The kernel emits JSON (`{"read": {...}, "write": {...}}`) with exact
+/// `%llu` values, so unlike the human-readable counter files these lose no
+/// precision.
+#[derive(Deserialize)]
+struct IoDone {
+    read:  HashMap<String, u64>,
+    write: HashMap<String, u64>,
+}
+
+/// Bytes read and written on one device for one data type.
+pub struct DevIoEntry {
+    pub dev:         String,
+    pub data_type:   String,
+    pub read_bytes:  u64,
+    pub write_bytes: u64,
+}
+
+impl DevIoEntry {
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.dev, self.data_type)
+    }
+}
+
+/// Read every device's `io_done`, skipping data types with no traffic.
+///
+/// Only a handful of the data types the kernel prints are ever accounted:
+/// reads are always attributed to `user` and writes to `user`, `btree`,
+/// `journal`, `sb` or the stripe types. The rest stay zero and are dropped.
+pub fn read_device_io(sysfs_path: &Path, name_mode: DeviceNameMode) -> Vec<DevIoEntry> {
+    let mut entries = Vec::new();
+    let Ok(dir) = fs::read_dir(sysfs_path) else { return entries };
+
+    for entry in dir.flatten() {
+        let dirname = entry.file_name().to_string_lossy().into_owned();
+        if !dirname.starts_with("dev-") { continue }
+
+        let dev_path = entry.path();
+        let dev_name = dev_display_name_from_sysfs(&dev_path, name_mode);
+
+        let io_done_path = dev_path.join("io_done");
+        let Ok(content) = fs::read_to_string(&io_done_path) else { continue };
+        let Ok(io_done) = serde_json::from_str::<IoDone>(&content) else { continue };
+
+        for (dtype, &r) in &io_done.read {
+            let w = io_done.write.get(dtype).copied().unwrap_or(0);
+            if r != 0 || w != 0 {
+                entries.push(DevIoEntry {
+                    dev:         dev_name.clone(),
+                    data_type:   dtype.clone(),
+                    read_bytes:  r,
+                    write_bytes: w,
+                });
+            }
+        }
+    }
+    entries.sort_by_key(|e| e.label());
+    entries
 }
