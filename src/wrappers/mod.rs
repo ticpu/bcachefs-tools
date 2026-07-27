@@ -1,5 +1,6 @@
 pub mod accounting;
 pub mod bdev;
+pub mod counters;
 pub mod fs;
 pub mod handle;
 pub mod io;
