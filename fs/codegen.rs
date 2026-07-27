@@ -451,9 +451,22 @@ fn parse_xmacro(header: &str, macro_name: &str) -> Vec<Vec<String>> {
 fn split_xmacro_args(s: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut depth = 0;
+    let mut in_str = false;
+    let mut escaped = false;
     let mut current = String::new();
     for ch in s.chars() {
+        if in_str {
+            current.push(ch);
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
         match ch {
+            '"' => { in_str = true; current.push(ch); }
             '(' => { depth += 1; current.push(ch); }
             ')' => { depth -= 1; current.push(ch); }
             ',' if depth == 0 => { args.push(current.trim().to_string()); current.clear(); }
