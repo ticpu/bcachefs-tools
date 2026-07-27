@@ -7,7 +7,6 @@ use std::process;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use bch_bindgen::c::bch_ioctl_query_counters;
 use bcachefs_kernel::sb::io::{COUNTERS, CounterInfo};
 use clap::Parser;
 use crossterm::{
@@ -17,73 +16,12 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use owo_colors::OwoColorize;
-use serde::Deserialize;
 
 use crate::commands::DeviceNameArgs;
 use crate::util::{fmt_bytes_human, fmt_num_human, run_tui};
 use crate::wrappers::handle::BcachefsHandle;
-use crate::wrappers::ioctl::{ioctl_ptr, IoctlBuf, BCH_IOCTL_QUERY_COUNTERS};
-use crate::wrappers::sysfs::{DeviceNameMode, dev_display_name_from_sysfs, sysfs_path_from_fd};
-
-const BCH_IOCTL_QUERY_COUNTERS_MOUNT: u16 = 1 << 0;
-
-// ioctl query
-
-fn read_counters(fd: std::os::fd::BorrowedFd, flags: u16, nr_stable: u16) -> Result<Vec<u64>> {
-    let mut buf = IoctlBuf::<bch_ioctl_query_counters>::new::<u64>(nr_stable as usize);
-    let hdr = buf.hdr_mut();
-    hdr.nr = nr_stable;
-    hdr.flags = flags;
-
-    unsafe { ioctl_ptr::<BCH_IOCTL_QUERY_COUNTERS>(fd, buf.as_mut_ptr())? };
-
-    let nr = (buf.hdr().nr as usize).min(nr_stable as usize);
-    Ok(unsafe { buf.hdr().d.as_slice(nr) }.to_vec())
-}
-
-// Per-device IO from sysfs (io_done is JSON: {"read": {...}, "write": {...}}, values in bytes)
-
-#[derive(Deserialize)]
-struct IoDone {
-    read:  HashMap<String, u64>,
-    write: HashMap<String, u64>,
-}
-
-struct DevIoEntry {
-    label:      String,     // "dev/data_type"
-    read_bytes: u64,
-    write_bytes: u64,
-}
-
-fn read_device_io(sysfs_path: &Path, name_mode: DeviceNameMode) -> Vec<DevIoEntry> {
-    let mut entries = Vec::new();
-    let Ok(dir) = fs::read_dir(sysfs_path) else { return entries };
-
-    for entry in dir.flatten() {
-        let dirname = entry.file_name().to_string_lossy().into_owned();
-        if !dirname.starts_with("dev-") { continue }
-
-        let dev_path = entry.path();
-        let dev_name = dev_display_name_from_sysfs(&dev_path, name_mode);
-
-        let io_done_path = dev_path.join("io_done");
-        let Ok(content) = fs::read_to_string(&io_done_path) else { continue };
-        let Ok(io_done) = serde_json::from_str::<IoDone>(&content) else { continue };
-
-        for (dtype, &r) in &io_done.read {
-            let w = io_done.write.get(dtype).copied().unwrap_or(0);
-            if r != 0 || w != 0 {
-                entries.push(DevIoEntry {
-                    label: format!("{}/{}", dev_name, dtype),
-                    read_bytes: r,
-                    write_bytes: w,
-                });
-            }
-        }
-    }
-    entries.sort_by(|a, b| a.label.cmp(&b.label));
-    entries
-}
+use crate::wrappers::counters::{QUERY_COUNTERS_MOUNT, read_counters};
+use crate::wrappers::sysfs::{DevIoEntry, DeviceNameMode, read_device_io, sysfs_path_from_fd};
 
 // Human-readable formatting
 
@@ -338,7 +276,7 @@ impl TopState {
         let ioctl_fd = handle.ioctl_fd();
         let nr_stable = COUNTERS.iter().map(|c| c.stable_id).max().unwrap_or(0) + 1;
 
-        let mount_vals = read_counters(ioctl_fd, BCH_IOCTL_QUERY_COUNTERS_MOUNT, nr_stable)?;
+        let mount_vals = read_counters(ioctl_fd, QUERY_COUNTERS_MOUNT, nr_stable)?;
         let start_vals = read_counters(ioctl_fd, 0, nr_stable)?;
         let prev_vals  = read_counters(ioctl_fd, 0, nr_stable)?;
 
@@ -459,14 +397,14 @@ fn build_frame(state: &TopState, curr: &[u64], dev_io: &[DevIoEntry])
 
             for (row, dev) in dev_io.iter().enumerate() {
                 let (prev_r, prev_w) = state.prev_dev_io
-                    .get(&dev.label)
+                    .get(&dev.label())
                     .copied()
                     .unwrap_or((dev.read_bytes, dev.write_bytes));
                 let rate_r = dev.read_bytes.wrapping_sub(prev_r) / interval;
                 let rate_w = dev.write_bytes.wrapping_sub(prev_w) / interval;
 
                 let row_str = format!("{:<40} {:>14} {:>14} {:>14} {:>14}",
-                    &dev.label,
+                    &dev.label(),
                     fmt_bytes(rate_r, h), fmt_bytes(dev.read_bytes, h),
                     fmt_bytes(rate_w, h), fmt_bytes(dev.write_bytes, h));
 
@@ -548,13 +486,13 @@ fn print_frame(
             "", "read/s", "read", "write/s", "write");
         for dev in dev_io {
             let (pr, pw) = prev_dev_io
-                .get(&dev.label)
+                .get(&dev.label())
                 .copied()
                 .unwrap_or((dev.read_bytes, dev.write_bytes));
             let rate_r = dev.read_bytes.wrapping_sub(pr) / d;
             let rate_w = dev.write_bytes.wrapping_sub(pw) / d;
             println!("  {:<40} {:>14} {:>14} {:>14} {:>14}",
-                &dev.label,
+                &dev.label(),
                 fmt_bytes(rate_r, h), fmt_bytes(dev.read_bytes,  h),
                 fmt_bytes(rate_w, h), fmt_bytes(dev.write_bytes, h));
         }
@@ -573,13 +511,13 @@ fn run_non_interactive(
 ) -> Result<()> {
     let ioctl_fd   = handle.ioctl_fd();
     let nr_stable  = COUNTERS.iter().map(|c| c.stable_id).max().unwrap_or(0) + 1;
-    let mount_vals = read_counters(ioctl_fd, BCH_IOCTL_QUERY_COUNTERS_MOUNT, nr_stable)?;
+    let mount_vals = read_counters(ioctl_fd, QUERY_COUNTERS_MOUNT, nr_stable)?;
     let sysfs_path = sysfs_path_from_fd(handle.sysfs_fd())?;
 
     let mut prev_vals   = read_counters(ioctl_fd, 0, nr_stable)?;
     let mut prev_dev_io: HashMap<String, (u64, u64)> = read_device_io(&sysfs_path, name_mode)
         .into_iter()
-        .map(|d| (d.label, (d.read_bytes, d.write_bytes)))
+        .map(|d| (d.label(), (d.read_bytes, d.write_bytes)))
         .collect();
 
     for i in 0..count {
@@ -592,7 +530,7 @@ fn run_non_interactive(
 
         prev_vals   = curr;
         prev_dev_io = dev_io.into_iter()
-            .map(|d| (d.label, (d.read_bytes, d.write_bytes)))
+            .map(|d| (d.label(), (d.read_bytes, d.write_bytes)))
             .collect();
     }
     Ok(())
@@ -616,7 +554,7 @@ fn run_interactive(
     state.prev_vals = curr.clone();
     let mut dev_io = read_device_io(&state.sysfs_path, state.name_mode);
     state.prev_dev_io = dev_io.iter()
-        .map(|d| (d.label.clone(), (d.read_bytes, d.write_bytes)))
+        .map(|d| (d.label(), (d.read_bytes, d.write_bytes)))
         .collect();
 
     run_tui(move |stdout| loop {
@@ -714,7 +652,7 @@ fn run_interactive(
              * timeout, so scrolling never resamples.) */
             state.prev_vals = curr;
             state.prev_dev_io = dev_io.into_iter()
-                .map(|d| (d.label, (d.read_bytes, d.write_bytes)))
+                .map(|d| (d.label(), (d.read_bytes, d.write_bytes)))
                 .collect();
             curr = read_counters(state.handle.ioctl_fd(), 0, state.nr_stable)?;
             dev_io = read_device_io(&state.sysfs_path, state.name_mode);
