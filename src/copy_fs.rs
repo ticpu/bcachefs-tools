@@ -361,7 +361,7 @@ fn copy_xattrs(
                     subvol_inum(dst.bi_inum),
                     dst,
                     &stripped_cstr,
-                    &val_buf[..val_size],
+                    Some(&val_buf[..val_size]),
                     xattr_type,
                     0,
                 )
