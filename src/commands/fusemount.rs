@@ -15,7 +15,7 @@
 //   requests get read-modify-write treatment in the write handler.
 
 use std::cell::Cell;
-use std::ffi::OsStr;
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
@@ -26,9 +26,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bch_bindgen::fs::FsExt;
 use bch_bindgen::c;
 use bch_bindgen::data::io::block_on;
-use bcachefs_kernel::errcode::BchError;
+use bcachefs_kernel::errcode::{self, BchError};
 use bcachefs_kernel::fs::Fs;
-use bcachefs_kernel::{accounting, btree, dirent, namei, str_hash};
+use bcachefs_kernel::{accounting, btree, dirent, namei, str_hash, xattr};
 use bcachefs_kernel::btree::iter::{CommitFlags, CommitOpts};
 use bcachefs_kernel::inode;
 use bcachefs_kernel::opt_set;
@@ -70,7 +70,7 @@ fn ensure_thread_init() {
 use fuser::{
     Config, FileAttr, FileType, Filesystem, MountOption,
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite,
+    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr,
     Request, TimeOrNow,
     Errno, FileHandle, FopenFlags, Generation,
     INodeNo, OpenFlags, RenameFlags,
@@ -144,17 +144,27 @@ fn bch_err(e: &BchError) -> Errno {
     Errno::from_i32(e.errno())
 }
 
+/// Mirrors avail_factor() in alloc/buckets.h: reserve 1/(2^6+1) of free space
+/// so statfs's f_bavail matches what the allocator will actually hand out.
+fn avail_factor(free: u64) -> u64 {
+    const RESERVE_FACTOR: u32 = 6;
+    (free << RESERVE_FACTOR) / ((1 << RESERVE_FACTOR) + 1)
+}
+
 fn start_fs(raw: *mut c::bch_fs) -> Result<(), BchError> {
     let fs = unsafe { Fs::borrow_raw(raw) };
     fs.start()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fuse_create_inode(
     fs:    &Fs,
     dir:   c::subvol_inum,
     name:  &[u8],
     mode:  u16,
     rdev:  u64,
+    uid:   u32,
+    gid:   u32,
 ) -> Result<c::bch_inode_unpacked, BchError> {
     let qstr = dirent::qstr(name);
     let mut dir_u: c::bch_inode_unpacked = Default::default();
@@ -175,8 +185,8 @@ fn fuse_create_inode(
                 &mut inode,
                 &mut subvol,
                 &qstr,
-                0,
-                0,
+                uid,
+                gid,
                 mode,
                 rdev,
                 c::subvol_inum::default(),
@@ -231,15 +241,45 @@ fn fuse_link(
     Ok(inode)
 }
 
+/// Pick the rename mode the way the kernel VFS does: EXCHANGE if asked for,
+/// otherwise probe the destination to tell a plain rename from an overwrite.
+fn fuse_rename_mode(
+    fs:       &Fs,
+    dst_dir:  c::subvol_inum,
+    dst_qstr: &c::qstr,
+    flags:    RenameFlags,
+) -> Result<c::bch_rename_mode, BchError> {
+    if flags.contains(RenameFlags::RENAME_EXCHANGE) {
+        return Ok(c::bch_rename_mode::BCH_RENAME_EXCHANGE);
+    }
+
+    let dir_u = inode::find_by_inum(fs, dst_dir)?;
+    let hash_info = str_hash::hash_info_init(fs, &dir_u)?;
+
+    match dirent::lookup(fs, dst_dir, &hash_info, dst_qstr) {
+        Ok(_) => {
+            if flags.contains(RenameFlags::RENAME_NOREPLACE) {
+                Err(BchError::from_raw(libc::EEXIST))
+            } else {
+                Ok(c::bch_rename_mode::BCH_RENAME_OVERWRITE)
+            }
+        }
+        Err(e) if e.matches_errno(libc::ENOENT) => Ok(c::bch_rename_mode::BCH_RENAME),
+        Err(e) => Err(e),
+    }
+}
+
 fn fuse_rename(
     fs:       &Fs,
     src_dir:  c::subvol_inum,
     src_name: &[u8],
     dst_dir:  c::subvol_inum,
     dst_name: &[u8],
+    flags:    RenameFlags,
 ) -> Result<(), BchError> {
     let src_qstr = dirent::qstr(src_name);
     let dst_qstr = dirent::qstr(dst_name);
+    let mode = fuse_rename_mode(fs, dst_dir, &dst_qstr, flags)?;
     let mut src_dir_u: c::bch_inode_unpacked = Default::default();
     let mut dst_dir_u: c::bch_inode_unpacked = Default::default();
     let mut src_inode_u: c::bch_inode_unpacked = Default::default();
@@ -260,7 +300,7 @@ fn fuse_rename(
                 &mut dst_inode_u,
                 &src_qstr,
                 &dst_qstr,
-                c::bch_rename_mode::BCH_RENAME,
+                mode,
             )
         },
     )
@@ -280,6 +320,13 @@ fn fuse_setattr(
     mtime:      u64,
 ) -> Result<c::bch_inode_unpacked, BchError> {
     let mut inode_out: c::bch_inode_unpacked = Default::default();
+
+    // Truncate first: setting bi_size alone would leave extents past EOF.
+    if let Some(size) = size {
+        let mut i_sectors_delta: u64 = 0;
+        let ret = unsafe { c::bch2_truncate(fs.raw, inum, size, &mut i_sectors_delta) };
+        errcode::ret_to_result_void(ret)?;
+    }
 
     btree::iter::trans_commit_do(
         fs,
@@ -307,9 +354,6 @@ fn fuse_setattr(
             if let Some(gid) = gid {
                 inode_u.bi_gid = gid;
             }
-            if let Some(size) = size {
-                inode_u.bi_size = size;
-            }
             if atime_flag == 1 {
                 inode_u.bi_atime = atime;
             }
@@ -322,6 +366,7 @@ fn fuse_setattr(
             if mtime_flag == 2 {
                 inode_u.bi_mtime = now;
             }
+            inode_u.bi_ctime = now;
 
             let t = inode::write(t, &mut iter, &mut inode_u)?;
             inode_out = inode_u;
@@ -353,6 +398,87 @@ fn fuse_update_inode_after_write(fs: &Fs, inum: c::subvol_inum) -> Result<(), Bc
             inode_u.bi_ctime = now;
             inode::write(t, &mut iter, &mut inode_u)
         },
+    )
+}
+
+const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+const XATTR_REPLACE:       i32 = 0x02;
+
+// KEY_TYPE_XATTR_INDEX_* from fs/xattr_format.h: plain #defines, not in the
+// bindgen allowlist. Same treatment as src/copy_fs.rs.
+const KEY_TYPE_XATTR_INDEX_USER:     i32 = 0;
+const KEY_TYPE_XATTR_INDEX_TRUSTED:  i32 = 3;
+const KEY_TYPE_XATTR_INDEX_SECURITY: i32 = 4;
+
+/// Namespace prefixes FUSE will hand us, mapped to bcachefs xattr type indices.
+/// system.* is deliberately absent: it maps to the POSIX ACL indices, whose
+/// values need ACL parsing rather than an opaque blob passthrough.
+const XATTR_NAMESPACES: &[(&[u8], i32)] = &[
+    (b"user.",     KEY_TYPE_XATTR_INDEX_USER),
+    (b"trusted.",  KEY_TYPE_XATTR_INDEX_TRUSTED),
+    (b"security.", KEY_TYPE_XATTR_INDEX_SECURITY),
+];
+
+/// Split "user.foo" into its type index and the short name bcachefs stores.
+fn parse_xattr_name(full: &[u8]) -> Option<(i32, CString)> {
+    for (prefix, typ) in XATTR_NAMESPACES {
+        if let Some(short) = full.strip_prefix(*prefix) {
+            return CString::new(short).ok().map(|n| (*typ, n));
+        }
+    }
+    None
+}
+
+fn xattr_type_to_prefix(typ: u8) -> Option<&'static [u8]> {
+    XATTR_NAMESPACES
+        .iter()
+        .find(|(_, t)| *t == typ as i32)
+        .map(|(p, _)| *p)
+}
+
+fn fuse_xattr_hash_info(
+    fs:   &Fs,
+    inum: c::subvol_inum,
+) -> Result<c::bch_hash_info, BchError> {
+    let bi = inode::find_by_inum(fs, inum)?;
+    str_hash::hash_info_init(fs, &bi)
+}
+
+/// Read an xattr value. ENOENT is translated to ENODATA, which is what
+/// getxattr(2) callers expect for a missing attribute.
+fn fuse_xattr_get(
+    fs:    &Fs,
+    inum:  c::subvol_inum,
+    typ:   i32,
+    name:  &CStr,
+) -> Result<Vec<u8>, BchError> {
+    let hash_info = fuse_xattr_hash_info(fs, inum)?;
+
+    xattr::get(fs, inum, &hash_info, name, typ as u8).map_err(|e| {
+        if e.matches_errno(libc::ENOENT) {
+            BchError::from_raw(libc::ENODATA)
+        } else {
+            e
+        }
+    })
+}
+
+/// Set an xattr, or remove it when `value` is `None`.
+fn fuse_xattr_set(
+    fs:    &Fs,
+    inum:  c::subvol_inum,
+    typ:   i32,
+    name:  &CStr,
+    value: Option<&[u8]>,
+    flags: i32,
+) -> Result<(), BchError> {
+    let mut inode_u: c::bch_inode_unpacked = Default::default();
+
+    btree::iter::trans_commit_do(
+        fs,
+        None,
+        CommitOpts::new().flags(CommitFlags::NO_ENOSPC),
+        |t| xattr::set(t, inum, &mut inode_u, name, value, typ, flags),
     )
 }
 
@@ -573,7 +699,7 @@ impl Filesystem for BcachefsFs {
 
     fn mknod(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -587,7 +713,9 @@ impl Filesystem for BcachefsFs {
         eprintln!("fuse_mknod(dir={}, name={:?}, mode={:#o})", dir.inum, name, mode);
 
         let fs = self.fs();
-        let new_inode = match fuse_create_inode(&fs, dir, name_bytes, mode as u16, rdev as u64) {
+        let new_inode = match fuse_create_inode(
+            &fs, dir, name_bytes, mode as u16, rdev as u64, req.uid(), req.gid(),
+        ) {
             Ok(inode) => inode,
             Err(e)    => { reply.error(bch_err(&e)); return; }
         };
@@ -629,7 +757,7 @@ impl Filesystem for BcachefsFs {
 
     fn symlink(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         link: &Path,
@@ -643,7 +771,9 @@ impl Filesystem for BcachefsFs {
 
         // Create the symlink inode
         let fs = self.fs();
-        let new_inode = match fuse_create_inode(&fs, dir, name_bytes, (S_IFLNK | 0o777) as u16, 0) {
+        let new_inode = match fuse_create_inode(
+            &fs, dir, name_bytes, (S_IFLNK | 0o777) as u16, 0, req.uid(), req.gid(),
+        ) {
             Ok(inode) => inode,
             Err(e)    => { reply.error(bch_err(&e)); return; }
         };
@@ -682,7 +812,7 @@ impl Filesystem for BcachefsFs {
         name: &OsStr,
         newparent: INodeNo,
         newname: &OsStr,
-        _flags: RenameFlags,
+        flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
         ensure_thread_init();
@@ -693,8 +823,14 @@ impl Filesystem for BcachefsFs {
         eprintln!("fuse_rename(src_dir={}, {:?} -> dst_dir={}, {:?})",
                src_dir.inum, name, dst_dir.inum, newname);
 
+        let supported = RenameFlags::RENAME_NOREPLACE | RenameFlags::RENAME_EXCHANGE;
+        if !(flags - supported).is_empty() {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+
         let fs = self.fs();
-        match fuse_rename(&fs, src_dir, src_bytes, dst_dir, dst_bytes) {
+        match fuse_rename(&fs, src_dir, src_bytes, dst_dir, dst_bytes, flags) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(bch_err(&e)),
         }
@@ -878,7 +1014,12 @@ impl Filesystem for BcachefsFs {
             pos = 1;
         }
         if pos == 1 {
-            if reply.add(INodeNo(1), 2, FileType::Directory, "..") {
+            let fs = self.fs();
+            let parent = match inode::find_by_inum(&fs, dir) {
+                Ok(bi) => unmap_root_ino(bi.bi_dir),
+                Err(e) => { reply.error(bch_err(&e)); return; }
+            };
+            if reply.add(INodeNo(parent), 2, FileType::Directory, "..") {
                 reply.ok();
                 return;
             }
@@ -932,8 +1073,8 @@ impl Filesystem for BcachefsFs {
 
         reply.statfs(
             usage.capacity >> shift,
-            (usage.capacity - usage.used) >> shift,
-            (usage.capacity - usage.used) >> shift,
+            usage.free >> shift,
+            avail_factor(usage.free) >> shift,
             nr_inodes,
             u64::MAX,
             block_size as u32,
@@ -942,9 +1083,200 @@ impl Filesystem for BcachefsFs {
         );
     }
 
-    fn create(
+    /// FUSE flush is close(2), not a writeback point: there is no page cache
+    /// here, so there is nothing to write back. fsync is what commits.
+    fn flush(
         &self,
         _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
+        reply.ok();
+    }
+
+    fn fsync(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        ensure_thread_init();
+        eprintln!("fuse_fsync(ino={})", ino.0);
+
+        // Writes go straight to the btree, so flushing the journal is
+        // sufficient to make them durable.
+        let ret = unsafe { c::bch2_journal_flush(&raw mut (*self.c).journal) };
+        match errcode::ret_to_result_void(ret) {
+            Ok(())  => reply.ok(),
+            Err(e)  => reply.error(bch_err(&e)),
+        }
+    }
+
+    fn fallocate(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        length: u64,
+        mode: i32,
+        reply: ReplyEmpty,
+    ) {
+        ensure_thread_init();
+        let inum = map_root_ino(ino);
+        eprintln!("fuse_fallocate(ino={}, offset={}, length={}, mode={:#x})",
+               inum.inum, offset, length, mode);
+
+        // Only plain allocation and KEEP_SIZE are handled; punch/collapse/
+        // insert/zero would each need real extent work.
+        if mode & !FALLOC_FL_KEEP_SIZE != 0 {
+            reply.error(Errno::EOPNOTSUPP);
+            return;
+        }
+
+        let end = offset + length;
+        let keep_size = mode & FALLOC_FL_KEEP_SIZE != 0;
+        let fs = self.fs();
+
+        let res = btree::iter::trans_commit_do(
+            &fs,
+            None,
+            CommitOpts::new().flags(CommitFlags::NO_ENOSPC),
+            |t| {
+                let now = fs.current_time();
+                let mut iter = btree::iter::BtreeIter::uninit();
+                let mut inode_u: c::bch_inode_unpacked = Default::default();
+
+                let t = inode::peek(
+                    t,
+                    &mut iter,
+                    &mut inode_u,
+                    inum,
+                    btree::iter::BtreeIterFlags::INTENT,
+                )?;
+
+                if !keep_size && end > inode_u.bi_size {
+                    inode_u.bi_size  = end;
+                    inode_u.bi_mtime = now;
+                    inode_u.bi_ctime = now;
+                }
+
+                inode::write(t, &mut iter, &mut inode_u)
+            },
+        );
+
+        match res {
+            Ok(())  => reply.ok(),
+            Err(e)  => reply.error(bch_err(&e)),
+        }
+    }
+
+    fn setxattr(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        _position: u32,
+        reply: ReplyEmpty,
+    ) {
+        ensure_thread_init();
+        let inum = map_root_ino(ino);
+        eprintln!("fuse_setxattr(ino={}, name={:?})", inum.inum, name);
+
+        let Some((typ, short)) = parse_xattr_name(name.as_bytes()) else {
+            reply.error(Errno::EOPNOTSUPP);
+            return;
+        };
+
+        let fs = self.fs();
+        match fuse_xattr_set(&fs, inum, typ, &short, Some(value), flags) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(bch_err(&e)),
+        }
+    }
+
+    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        ensure_thread_init();
+        let inum = map_root_ino(ino);
+        eprintln!("fuse_getxattr(ino={}, name={:?}, size={})", inum.inum, name, size);
+
+        let Some((typ, short)) = parse_xattr_name(name.as_bytes()) else {
+            reply.error(Errno::EOPNOTSUPP);
+            return;
+        };
+
+        let fs = self.fs();
+        let val = match fuse_xattr_get(&fs, inum, typ, &short) {
+            Ok(v)  => v,
+            Err(e) => { reply.error(bch_err(&e)); return; }
+        };
+
+        if size == 0 {
+            reply.size(val.len() as u32);
+        } else if (size as usize) < val.len() {
+            reply.error(Errno::ERANGE);
+        } else {
+            reply.data(&val);
+        }
+    }
+
+    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        ensure_thread_init();
+        let inum = map_root_ino(ino);
+        eprintln!("fuse_listxattr(ino={}, size={})", inum.inum, size);
+
+        let fs = self.fs();
+        let attrs = match xattr::list(&fs, inum) {
+            Ok(v)  => v,
+            Err(e) => { reply.error(bch_err(&e)); return; }
+        };
+
+        // NUL-separated, NUL-terminated names, as listxattr(2) specifies.
+        let mut buf: Vec<u8> = Vec::new();
+        for (typ, short) in &attrs {
+            let Some(prefix) = xattr_type_to_prefix(*typ) else { continue };
+            buf.extend_from_slice(prefix);
+            buf.extend_from_slice(short);
+            buf.push(0);
+        }
+
+        if size == 0 {
+            reply.size(buf.len() as u32);
+        } else if (size as usize) < buf.len() {
+            reply.error(Errno::ERANGE);
+        } else {
+            reply.data(&buf);
+        }
+    }
+
+    fn removexattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        ensure_thread_init();
+        let inum = map_root_ino(ino);
+        eprintln!("fuse_removexattr(ino={}, name={:?})", inum.inum, name);
+
+        let Some((typ, short)) = parse_xattr_name(name.as_bytes()) else {
+            reply.error(Errno::EOPNOTSUPP);
+            return;
+        };
+
+        let fs = self.fs();
+        // XATTR_REPLACE makes the removal fail if the attribute is absent.
+        match fuse_xattr_set(&fs, inum, typ, &short, None, XATTR_REPLACE) {
+            Ok(()) => reply.ok(),
+            Err(e) if e.matches_errno(libc::ENOENT) => reply.error(Errno::ENODATA),
+            Err(e) => reply.error(bch_err(&e)),
+        }
+    }
+
+    fn create(
+        &self,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -958,7 +1290,9 @@ impl Filesystem for BcachefsFs {
         eprintln!("fuse_create(dir={}, name={:?}, mode={:#o})", dir.inum, name, mode);
 
         let fs = self.fs();
-        let new_inode = match fuse_create_inode(&fs, dir, name_bytes, mode as u16, 0) {
+        let new_inode = match fuse_create_inode(
+            &fs, dir, name_bytes, mode as u16, 0, req.uid(), req.gid(),
+        ) {
             Ok(inode) => inode,
             Err(e)    => {
                 eprintln!("  create -> err {}", e);
