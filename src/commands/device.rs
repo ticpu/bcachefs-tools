@@ -604,18 +604,81 @@ fn cmd_device_evacuate(cli: EvacuateCli) -> Result<()> {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(about = "Set device options",
+          long_about = "\
+Set device-scoped options on a single device, online or offline. Changes are \
+persisted to the superblock.
+
+  bcachefs device set-option /dev/sda1 data_allowed=journal,btree
+
+Option names accept either underscores or dashes.")]
+pub struct SetOptionCli {
+    /// Device path
+    device: String,
+
+    /// Options to set, as <option>=<value>
+    #[arg(required = true, value_name = "OPTION=VALUE")]
+    options: Vec<String>,
+}
+
+fn cmd_device_set_option(cli: SetOptionCli) -> Result<()> {
+    let mut opts = Vec::with_capacity(cli.options.len());
+
+    for arg in &cli.options {
+        let (raw_name, value) = arg.split_once('=')
+            .ok_or_else(|| anyhow!("'{}' is not of the form <option>=<value>", arg))?;
+        let name = raw_name.replace('-', "_");
+
+        let (_id, opt) = bch_opt_lookup(&name)
+            .ok_or_else(|| anyhow!("Unknown option: {}", raw_name))?;
+
+        if opt.flags as u32 & c::opt_flags::OPT_DEVICE as u32 == 0 {
+            bail!("{} is not a device option; use 'bcachefs set-fs-option'", raw_name);
+        }
+
+        // Reject bad values before touching the filesystem. A value that
+        // needs an open superblock to resolve (targets, labels) parses as
+        // Ok(None) here and is checked again against the real fs later.
+        parse_opt_val(opt, value)
+            .with_context(|| format!("parsing {}={}", raw_name, value))?;
+
+        opts.push((name, value.to_string()));
+    }
+
+    // Pin the option to exactly this device. When the filesystem is
+    // mounted we can resolve the index up front; offline, apply_options
+    // resolves the path against the superblock members itself, so an
+    // empty index list means "the device named on the command line".
+    let dev_idxs = match open_dev(&cli.device) {
+        Ok((_handle, dev_idx)) => vec![dev_idx],
+        Err(e) => {
+            if cli.device.parse::<u32>().is_ok() {
+                return Err(e).context(
+                    "a bare device index needs a mounted filesystem; \
+                     give a device path instead");
+            }
+            vec![]
+        }
+    };
+
+    let devices = vec![&cli.device];
+    crate::commands::set_option::apply_options(&devices, &dev_idxs, &opts)
+}
+
 pub const CMD_ADD: super::CmdDef = raw_cmd!("add", "Add a device to a filesystem", cmd_device_add);
 pub const CMD_ONLINE: super::CmdDef = typed_cmd!("online", "Bring a device online", OnlineCli, cmd_device_online);
 pub const CMD_OFFLINE: super::CmdDef = typed_cmd!("offline", "Take a device offline", OfflineCli, cmd_device_offline);
 pub const CMD_REMOVE: super::CmdDef = typed_cmd!("remove", "Remove a device", RemoveCli, cmd_device_remove);
 pub const CMD_EVACUATE: super::CmdDef = typed_cmd!("evacuate", "Evacuate data from a device", EvacuateCli, cmd_device_evacuate);
 pub const CMD_SET_STATE: super::CmdDef = typed_cmd!("set-state", "Set device state", SetStateCli, cmd_device_set_state);
+pub const CMD_SET_OPTION: super::CmdDef = typed_cmd!("set-option", "Set device options", SetOptionCli, cmd_device_set_option);
 pub const CMD_RESIZE: super::CmdDef = typed_cmd!("resize", "Resize filesystem on a device", ResizeCli, cmd_device_resize);
 pub const CMD_RESIZE_JOURNAL: super::CmdDef = typed_cmd!("resize-journal", "Resize journal on a device", ResizeJournalCli, cmd_device_resize_journal);
 pub const CMD: super::CmdDef = super::CmdDef {
     name: "device", about: "Manage devices within a filesystem", aliases: &[],
     kind: super::CmdKind::Group { children: &[
         &CMD_ADD, &CMD_ONLINE, &CMD_OFFLINE, &CMD_REMOVE,
-        &CMD_EVACUATE, &CMD_SET_STATE, &CMD_RESIZE, &CMD_RESIZE_JOURNAL,
+        &CMD_EVACUATE, &CMD_SET_STATE, &CMD_SET_OPTION, &CMD_RESIZE, &CMD_RESIZE_JOURNAL,
     ]},
 };
