@@ -454,31 +454,88 @@ fn find_single_online_dev(fs: &Fs) -> Result<bcachefs_kernel::fs::DevRef> {
         .ok_or_else(|| anyhow!("could not get reference to device {}", found_idx))
 }
 
+const BCH_MEMBER_NBUCKETS_MAX: u64 = i32::MAX as u64 - 64;
+
+/// Grow a device offline in two phases, so an interrupted run is always
+/// resumable and never leaves the filesystem unmountable.
+///
+/// Phase 1 only flags the intent (resize_on_mount + freespace_initialized
+/// cleared) without touching nbuckets, so a crash here leaves a filesystem
+/// that still mounts. Phase 2 does the real work under full recovery: the
+/// kernel's bch2_fs_resize_on_mount() updates nbuckets, fs_freespace_init
+/// (PASS_ALWAYS) rebuilds the freespace btree over the new bucket range, and
+/// check_allocations recomputes disk accounting.
+///
+/// Doing it in one phase — updating nbuckets before recovery can allocate
+/// from the new space — is what wedges the filesystem.
 fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
-    use bcachefs_kernel::util::printbuf::Printbuf;
+    let new_nbuckets;
 
-    let opts: c::bch_opts = Default::default();
-    let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
-        .map_err(|e| anyhow!("error opening {}: {}", device, e))?;
+    {
+        let mut opts: c::bch_opts = Default::default();
+        opt_set!(opts, nostart, 1u8);
+        opt_set!(opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
 
-    let ca = find_single_online_dev(&fs)?;
+        let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
+            .map_err(|e| anyhow!("error opening {}: {}", device, e))?;
 
-    let nbuckets = size_sectors / ca.mi.bucket_size as u64;
+        let ca = find_single_online_dev(&fs)?;
+        let dev_idx = ca.dev_idx as u32;
 
-    if nbuckets < ca.mi.nbuckets {
-        bail!("shrinking not supported (requested {} buckets, have {})",
-            nbuckets, ca.mi.nbuckets);
+        new_nbuckets = size_sectors / ca.mi.bucket_size as u64;
+        let old_nbuckets = ca.mi.nbuckets;
+        let resuming = ca.mi.resize_on_mount != 0;
+
+        if new_nbuckets < old_nbuckets {
+            bail!("shrinking not supported (requested {} buckets, have {})",
+                new_nbuckets, old_nbuckets);
+        }
+        if new_nbuckets > BCH_MEMBER_NBUCKETS_MAX {
+            bail!("requested {} buckets exceeds maximum {}",
+                new_nbuckets, BCH_MEMBER_NBUCKETS_MAX);
+        }
+
+        if new_nbuckets == old_nbuckets && !resuming {
+            println!("already at {} buckets", old_nbuckets);
+            return Ok(());
+        }
+
+        if resuming {
+            println!("resuming interrupted grow: {} -> {} buckets",
+                old_nbuckets, new_nbuckets);
+        } else {
+            println!("marking resize_on_mount: {} -> {} buckets",
+                old_nbuckets, new_nbuckets);
+
+            let _lock = fs.sb_lock();
+            let m = unsafe { fs.member_mut(dev_idx) };
+            m.set_member_resize_on_mount(1);
+            m.set_member_freespace_initialized(0);
+            fs.write_super();
+        }
     }
 
-    println!("resizing to {} buckets", nbuckets);
+    println!("running recovery");
+    {
+        let mut opts: c::bch_opts = Default::default();
+        opt_set!(opts, copygc_enabled, 0u8);
+        opt_set!(opts, reconcile_enabled, 0u8);
+        opt_set!(opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
+        opt_set!(opts, recovery_passes,
+            1u64 << c::bch_recovery_pass::BCH_RECOVERY_PASS_check_allocations as u64);
 
-    let mut err = Printbuf::new();
-    let ret = unsafe {
-        c::bch2_dev_resize(fs.raw, ca.as_mut_ptr(), nbuckets, err.as_raw())
-    };
-    if ret != 0 {
-        bail!("resize error: {}\n{}", crate::wrappers::bch_err_str(ret), err);
+        let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
+            .map_err(|e| anyhow!("recovery of {} failed: {}", device, e))?;
+
+        let ca = find_single_online_dev(&fs)?;
+        if ca.mi.nbuckets != new_nbuckets {
+            bail!("resize verification failed: expected {} buckets, got {}",
+                new_nbuckets, ca.mi.nbuckets);
+        }
+
+        println!("resize complete: {} buckets", new_nbuckets);
     }
+
     Ok(())
 }
 
