@@ -277,18 +277,15 @@ impl BcachefsHandle {
         // filesystems register their sysfs dir under the device name instead
         // (see bch2_fs_online()), so `uuid` may be unset here. Query the
         // authoritative UUID from the ctl fd rather than trust the name.
-        let mut query_uuid = BchIoctlQueryUuid::default();
-        let ret = unsafe {
-            libc::ioctl(ioctl_fd.as_raw_fd(), BCH_IOCTL_QUERY_UUID, &mut query_uuid)
-        };
-        let uuid = if ret == 0 {
-            query_uuid.uuid
-        } else {
-            eprintln!(
-                "BCH_IOCTL_QUERY_UUID failed ({}), falling back to sysfs dir name for the filesystem UUID",
-                io::Error::last_os_error()
-            );
-            uuid.unwrap_or([0; 16])
+        let mut query_uuid = bch_ioctl_query_uuid::default();
+        let uuid = match ioctl_rw::<BCH_IOCTL_QUERY_UUID>(&ioctl_fd, &mut query_uuid) {
+            Ok(_) => query_uuid.uuid.b,
+            Err(e) => {
+                eprintln!(
+                    "BCH_IOCTL_QUERY_UUID failed ({e}), falling back to sysfs dir name for the filesystem UUID"
+                );
+                uuid.unwrap_or([0; 16])
+            }
         };
 
         Ok(BcachefsHandle {
@@ -509,37 +506,22 @@ impl BcachefsHandle {
     /// owning object. Caller fills the input fields of `arg` (see
     /// fs/bcachefs_ioctl.h); results come back in place.
     pub(crate) fn rev_map(&self, arg: &mut bch_ioctl_rev_map) -> Result<(), Errno> {
-        let request = bch_ioc_wr::<bch_ioctl_rev_map>(38);
-        let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, arg as *mut _) };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(Errno(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)))
-        }
+        ioctl_rw::<BCH_IOCTL_REV_MAP>(self.ioctl_fd(), arg)
+            .map(|_| ()).map_err(io_errno)
     }
 
     /// BCH_IOCTL_REFLINK_MAP: stream one batch of reflink_p entries. The
     /// cursor lives in `arg`; loop until `arg.done` is set.
     pub(crate) fn reflink_map(&self, arg: &mut bch_ioctl_reflink_map) -> Result<(), Errno> {
-        let request = bch_ioc_wr::<bch_ioctl_reflink_map>(35);
-        let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, arg as *mut _) };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(Errno(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)))
-        }
+        ioctl_rw::<BCH_IOCTL_REFLINK_MAP>(self.ioctl_fd(), arg)
+            .map(|_| ()).map_err(io_errno)
     }
 
     /// BCH_IOCTL_INUM_PARENT: one upward step of path resolution — resolve
     /// an inode to its name and parent directory.
     pub(crate) fn inum_parent(&self, arg: &mut bch_ioctl_inum_parent) -> Result<(), Errno> {
-        let request = bch_ioc_wr::<bch_ioctl_inum_parent>(37);
-        let ret = unsafe { libc::ioctl(self.ioctl_fd_raw(), request, arg as *mut _) };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(Errno(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)))
-        }
+        ioctl_rw::<BCH_IOCTL_INUM_PARENT>(self.ioctl_fd(), arg)
+            .map(|_| ()).map_err(io_errno)
     }
 
     /// Read the on-disk metadata version from the filesystem superblock.
