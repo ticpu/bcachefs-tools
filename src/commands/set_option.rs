@@ -16,6 +16,33 @@ fn opt_flags() -> u32 {
     c::OptFlags::fs.bits() | c::OptFlags::device.bits()
 }
 
+/// Apply option (name, value) pairs to a filesystem, online or offline.
+///
+/// `devices` locates the filesystem; `dev_idxs`, when non-empty, pins
+/// device-scoped options to those indices instead of to every path in
+/// `devices`. Shared with `device set-option`, which resolves its
+/// positional device to an index and passes it here.
+pub(crate) fn apply_options(devices: &[&String], dev_idxs: &[u32], opts: &[(String, String)])
+    -> Result<()>
+{
+    if opts.is_empty() {
+        bail!("No options specified");
+    }
+
+    let devs: Vec<std::path::PathBuf> = devices.iter().map(|d| d.as_str().into()).collect();
+
+    let mut fs_opts = c::bch_opts::default();
+    fs_opts.set_nostart(true);
+    fs_opts.set_will_not_start(true);
+
+    match crate::device_scan::open_online_or_offline(&devs, fs_opts)
+        .with_context(|| format!("opening filesystem for '{}'", devices[0]))?
+    {
+        OpenedFs::Online(fs)  => set_option_online(fs, devices, dev_idxs, opts),
+        OpenedFs::Offline(fs) => set_option_offline(fs, devices, dev_idxs, opts),
+    }
+}
+
 fn set_option_cmd() -> Command {
     Command::new("set-fs-option")
         .about("Set a filesystem option")
@@ -46,20 +73,8 @@ fn cmd_set_option(argv: Vec<String>) -> Result<()> {
         .unwrap_or_default();
 
     let opts = bch_options_from_matches(&matches, opt_flags());
-    if opts.is_empty() {
-        bail!("No options specified");
-    }
 
-    let devs: Vec<std::path::PathBuf> = devices.iter().map(|d| d.as_str().into()).collect();
-
-    let mut fs_opts = c::bch_opts::default();
-    fs_opts.set_nostart(true);
-    fs_opts.set_will_not_start(true);
-
-    match crate::device_scan::open_online_or_offline(&devs, fs_opts)? {
-        OpenedFs::Online(fs)  => set_option_online(fs, &devices, &dev_idxs, &opts),
-        OpenedFs::Offline(fs) => set_option_offline(fs, &devices, &dev_idxs, &opts),
-    }
+    apply_options(&devices, &dev_idxs, &opts)
 }
 
 fn set_option_online(
