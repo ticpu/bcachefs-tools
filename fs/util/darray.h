@@ -11,6 +11,8 @@
 #include <linux/cleanup.h>
 #include <linux/slab.h>
 
+#include "compat.h"
+
 #define DARRAY_PREALLOCATED(_type, _nr)					\
 struct {								\
 	size_t nr, size;						\

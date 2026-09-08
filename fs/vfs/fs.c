@@ -1226,11 +1226,20 @@ err:
 	return bch2_err_class(ret);
 }
 
+/* ->mkdir returned int until 6.18 made it hand back a dentry. */
+#ifdef BCH_KERNEL_PRE_6_18
+static int bch2_mkdir(struct mnt_idmap *idmap,
+		      struct inode *vdir, struct dentry *dentry, umode_t mode)
+{
+	return bch2_mknod(idmap, vdir, dentry, mode|S_IFDIR, 0);
+}
+#else
 static struct dentry *bch2_mkdir(struct mnt_idmap *idmap,
 				 struct inode *vdir, struct dentry *dentry, umode_t mode)
 {
 	return ERR_PTR(bch2_mknod(idmap, vdir, dentry, mode|S_IFDIR, 0));
 }
+#endif
 
 static int bch2_rename2(struct mnt_idmap *idmap,
 			struct inode *src_vdir, struct dentry *src_dentry,

@@ -21,6 +21,7 @@
 #include <linux/workqueue.h>
 
 #include "closure.h"
+#include "compat.h"
 #include "mean_and_variance.h"
 
 #include "darray.h"

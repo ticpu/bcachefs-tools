@@ -662,8 +662,14 @@ static int bch2_topology_check_root(struct btree_trans *trans, enum btree_id btr
 static void ratelimit_reset(struct ratelimit_state *rs)
 {
 	guard(raw_spinlock)(&rs->lock);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
+	/* Counts printed up to burst rather than remaining, and is not atomic. */
+	rs->printed = 0;
+	rs->missed = 0;
+#else
 	atomic_set(&rs->rs_n_left, 0);
 	atomic_set(&rs->missed, 0);
+#endif
 	rs->flags = 0;
 	rs->begin = 0;
 }

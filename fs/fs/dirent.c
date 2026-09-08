@@ -652,7 +652,7 @@ static noinline int bch2_dir_emit_slow(struct btree_trans *trans, struct bkey_bu
 	return 0;
 }
 
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && !defined(BCH_NO_FILLDIR64_FASTPATH)
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 
@@ -814,7 +814,7 @@ int bch2_readdir(struct bch_fs *c, subvol_inum inum,
 		 struct bch_hash_info *hash_info,
 		 struct dir_context *ctx)
 {
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && !defined(BCH_NO_FILLDIR64_FASTPATH)
 	/*
 	 * If this is getdents64, fault in the user buffer up front so the
 	 * lock-holding fast path in bch2_dir_emit() doesn't fault - and fall
@@ -903,7 +903,7 @@ int bch2_fsck_remove_dirent(struct btree_trans *trans, struct bpos pos)
 	return 0;
 }
 
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && !defined(BCH_NO_FILLDIR64_FASTPATH)
 #include <linux/kprobes.h>
 #include <linux/uaccess.h>
 #ifdef CONFIG_X86_KERNEL_IBT
@@ -970,6 +970,10 @@ void bch2_dirent_init(void)
 
 void bch2_filldir64_specialization_to_text(struct printbuf *out)
 {
+#ifdef BCH_NO_FILLDIR64_FASTPATH
+	prt_str(out, "filldir64 fast path:\tunavailable (kernel predates dir_context.count)\n");
+#else
 	prt_str(out, "filldir64 fast path:\tunavailable (userspace)\n");
+#endif
 }
 #endif
