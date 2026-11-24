@@ -1,10 +1,11 @@
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use bcachefs_kernel::c;
 use bcachefs_kernel::fs::{Fs, OpenFs};
 use bcachefs_kernel::util::printbuf::Printbuf;
 use bcachefs_kernel::util::rcu;
 use clap::{Arg, ArgAction, Command};
+use rustix::fs::FileType;
 
 use crate::commands::opts::{bch_opt_lookup, bch_option_args, bch_options_from_matches};
 use crate::device_scan::OpenedFs;
@@ -211,10 +212,10 @@ fn set_option_offline(
                 // runs, and the command reports success having done nothing.
                 let mut idxs = Vec::with_capacity(devices.len());
                 for dev in devices {
-                    match name_to_dev_idx(&fs, dev) {
-                        Some(i) => idxs.push(i as u32),
-                        None => {
-                            eprintln!("Couldn't find device {dev} in this filesystem");
+                    match path_to_dev_idx(&fs, dev) {
+                        Ok(i) => idxs.push(i),
+                        Err(e) => {
+                            eprintln!("{e:#}");
                             failed.insert(name.as_str());
                         }
                     }
@@ -263,10 +264,86 @@ fn set_option_offline(
     Ok(())
 }
 
-fn name_to_dev_idx(fs: &Fs, name: &str) -> Option<usize> {
-    fs.devs_rcu(&rcu::read_lock())
-        .find(|ca| ca.name().to_bytes() == name.as_bytes())
-        .map(|ca| ca.dev_idx as usize)
+/// The online member whose block device is the file at @path. Matched by
+/// identity: a member's name is only its path's last component.
+fn path_to_dev_idx(fs: &Fs, path: &str) -> Result<u32> {
+    let st = rustix::fs::stat(path)
+        .with_context(|| format!("looking up device {path}"))?;
+
+    let online: Vec<u32> = fs.online_devs_rcu(&rcu::read_lock())
+        .map(|ca| ca.dev_idx as u32)
+        .collect();
+
+    for idx in online {
+        let Some(ca) = fs.dev_get_ioref::<c::DevReadRefKind>(idx) else {
+            continue;
+        };
+        let member = rustix::fs::fstat(ca.bdev().fd())
+            .with_context(|| format!("stat of device {idx}'s open file"))?;
+        if same_device(&st, &member) {
+            return Ok(idx);
+        }
+    }
+
+    bail!("{path} is not an online member of this filesystem")
+}
+
+/// A block device is its device number, whatever node names it; any other
+/// file is its inode.
+fn same_device(a: &rustix::fs::Stat, b: &rustix::fs::Stat) -> bool {
+    let is_blk = |st: &rustix::fs::Stat| FileType::from_raw_mode(st.st_mode) == FileType::BlockDevice;
+
+    match (is_blk(a), is_blk(b)) {
+        (true, true)   => a.st_rdev == b.st_rdev,
+        (false, false) => a.st_dev == b.st_dev && a.st_ino == b.st_ino,
+        _              => false,
+    }
 }
 
 pub const CMD: super::CmdDef = raw_cmd!("set-fs-option", "Set filesystem options", cmd_set_option);
+
+#[cfg(test)]
+mod tests {
+    use super::same_device;
+    use std::fs;
+
+    fn stat(p: &std::path::Path) -> rustix::fs::Stat {
+        rustix::fs::stat(p).unwrap()
+    }
+
+    #[test]
+    fn file_matches_by_inode_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let (img_a, img_b) = (a.join("dev.img"), b.join("dev.img"));
+        fs::write(&img_a, b"").unwrap();
+        fs::write(&img_b, b"").unwrap();
+        fs::hard_link(&img_a, dir.path().join("link.img")).unwrap();
+
+        let spelled_differently = a.join("..").join("a").join("dev.img");
+        assert!(same_device(&stat(&img_a), &stat(&spelled_differently)));
+        assert!(same_device(&stat(&img_a), &stat(&dir.path().join("link.img"))));
+        assert!(!same_device(&stat(&img_a), &stat(&img_b)));
+    }
+
+    #[test]
+    fn block_device_never_matches_a_file() {
+        let Some(blk) = fs::read_dir("/dev").unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| rustix::fs::FileType::from_raw_mode(stat(p).st_mode)
+                == rustix::fs::FileType::BlockDevice)
+        else {
+            eprintln!("no block device in /dev, skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("dev.img");
+        fs::write(&file, b"").unwrap();
+
+        assert!(same_device(&stat(&blk), &stat(&blk)));
+        assert!(!same_device(&stat(&blk), &stat(&file)));
+    }
+}
