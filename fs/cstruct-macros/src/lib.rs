@@ -421,7 +421,8 @@ pub fn xmacro_select(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
 /// A variant prints and parses as its name, or its #[label("..")].
 /// `#[nr]`: Self::NR, past the
 /// largest value - a number, not one of its values. `#[own_to_text]`: it
-/// prints as more than its name, by its own ToText.
+/// prints as more than its name, by its own ToText. `#[arm_docs]`: const fn
+/// doc(), a variant's doc as one line.
 ///
 /// A variant is written with its doc, and its columns - `#[arm_columns(..)]`,
 /// bch_enum.rs - each made a const fn of the enum:

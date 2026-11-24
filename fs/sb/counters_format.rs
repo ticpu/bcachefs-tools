@@ -14,6 +14,7 @@ pub enum CounterFlags {
 
 #[bch_enum(closed)]
 #[nr]
+#[arm_docs]
 #[arm_columns(stable: enum(PersistentCounterStable: u32, nr),
               flags: CounterFlags)]
 #[repr(u32)]
@@ -318,4 +319,28 @@ pub enum PersistentCounter {
 #[derive(Clone, Copy, Default, MaybeZeroable, Plain, TypeInfo)]
 pub struct bch_sb_field_counters {
     pub d: [Le64; 0],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[bch_enum(closed)]
+    #[arm_docs]
+    #[repr(u32)]
+    enum Probe {
+        /// First line,
+        ///   indented second
+        multi_line,
+        undocumented,
+    }
+
+    #[test]
+    fn arm_docs() {
+        assert_eq!(PersistentCounter::data_update.doc(),
+                   "Sectors moved by data update (reconcile, copygc)");
+        assert_eq!(PersistentCounter::error_throw.doc(), "Errors thrown");
+        assert_eq!(Probe::multi_line.doc(), "First line, indented second");
+        assert_eq!(Probe::undocumented.doc(), "");
+    }
 }

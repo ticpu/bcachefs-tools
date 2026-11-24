@@ -17,6 +17,9 @@
 //!                          width
 //!   #[mask(NAME: REPR)]  the #[flags] NAME of bit numbers, 1 << each value,
 //!                        named as their variants
+//!   #[arm_docs]          `const fn doc(self) -> &'static str`: a variant's
+//!                        doc, its lines trimmed and joined by a space.
+//!                        Opt-in, as it puts every doc string in the binary
 //!   NAME_arms!(cb [pre]) cb! { [pre] (name, value, [Type], [column]..), .. }:
 //!                        the variants as a list's rows, for what expands
 //!                        them - a table, xmacro_select
@@ -169,13 +172,14 @@ pub(crate) fn declaration(kind: EnumKind, item: syn::ItemEnum) -> Result<TokenSt
     let name = item.ident.clone();
     let err = |m: String| format!("{name}: {m}");
     let (mut repr, mut docs, mut own_to_text, mut nr) = (None, Vec::new(), false, false);
-    let (mut columns, mut mask) = (Vec::new(), None);
+    let (mut columns, mut mask, mut arm_docs) = (Vec::new(), None, false);
     for a in &item.attrs {
         let args = || a.parse_args::<TokenStream>().map_err(|e| err(e.to_string()));
         match a.path().get_ident().map(|i| i.to_string()).as_deref() {
             Some("repr")        => repr = Some(a.parse_args::<Ident>().map_err(|e| err(e.to_string()))?),
             Some("own_to_text") => own_to_text = true,
             Some("nr")          => nr = true,
+            Some("arm_docs")    => arm_docs = true,
             Some("arm_columns") => columns = self::columns(args()?).map_err(err)?,
             Some("mask")        => mask = Some(EnumDef { kind: EnumKind::Flags, ..tag_enum(args()?).map_err(err)? }),
             Some("doc")         => docs.extend(doc_of(a)),
@@ -194,6 +198,9 @@ pub(crate) fn declaration(kind: EnumKind, item: syn::ItemEnum) -> Result<TokenSt
     if e.kind == EnumKind::Flags && mask.is_some() {
         return Err(err("#[mask] is of bit numbers, not flags".into()));
     }
+    if e.kind == EnumKind::Flags && arm_docs {
+        return Err(err("#[arm_docs] are an enum's, not flags' - bits".into()));
+    }
     let arms = arms(item.variants.to_token_stream(), &columns, false).map_err(err)?;
 
     let mut out = generate(&e, &arms, &columns);
@@ -206,7 +213,38 @@ pub(crate) fn declaration(kind: EnumKind, item: syn::ItemEnum) -> Result<TokenSt
     if let Some(m) = &mask {
         out.extend(mask_of(m, &e, &arms));
     }
+    if arm_docs {
+        out.extend(doc_fn(&e, &arms));
+    }
     Ok(out)
+}
+
+/// #[arm_docs]: `const fn doc(self)`, each arm's doc as one line; an
+/// undocumented arm, and an open enum's value no arm has, give "".
+fn doc_fn(e: &EnumDef, arms: &[Arm]) -> TokenStream {
+    let name = &e.name;
+    let arm_names = arms.iter().map(|a| &a.name);
+    let docs = arms.iter().map(|a| doc_line(&a.docs));
+    let other = (e.kind != EnumKind::Closed).then(|| quote!(_ => "",));
+    quote! {
+        impl #name {
+            pub const fn doc(self) -> &'static str {
+                match self {
+                    #(Self::#arm_names => #docs,)*
+                    #other
+                }
+            }
+        }
+    }
+}
+
+/// A doc's lines, each trimmed, the blank ones dropped, joined by a space.
+fn doc_line(docs: &[String]) -> String {
+    docs.iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `[closed,] NAME: REPR[, nr]`: a tag enum's, or an enum column's.
