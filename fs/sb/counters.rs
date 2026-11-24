@@ -86,6 +86,8 @@ pub struct CounterInfo {
     pub name: &'static str,
     pub stable_id: u16,
     pub is_sectors: bool,
+    /// Its doc in counters_format.rs, as one line
+    pub desc: &'static str,
 }
 
 // From PersistentCounter_arms!(): (name, index, [stable id], [type]).
@@ -96,7 +98,12 @@ macro_rules! counter_is_sectors {
 macro_rules! counter_table {
     ($(($name:tt, $nr:expr, [$id:tt], [$ty:tt])),* $(,)?) => {
         pub const COUNTERS: &[CounterInfo] = &[$(
-            CounterInfo { name: stringify!($name), stable_id: $id, is_sectors: counter_is_sectors!($ty) },
+            CounterInfo {
+                name: stringify!($name),
+                stable_id: $id,
+                is_sectors: counter_is_sectors!($ty),
+                desc: c::PersistentCounter::$name.doc(),
+            },
         )*];
     };
 }
